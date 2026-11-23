@@ -1,4 +1,4 @@
-import { $, actorName, api, fmtElapsed, toast, root } from "./api.js";
+import { $, actorName, api, fmtElapsed, projectQuerySuffix, root, toast } from "./api.js";
 import { bindCouncilActions, refreshCouncil } from "./council.js";
 import { renderDAG } from "./dag.js";
 import { handleLiveDrawerEvent, initDrawer, openReportModal, openTaskDrawer } from "./drawer.js";
@@ -221,7 +221,7 @@ let activeEventSource = null;
 
 function connectSSE() {
   if (activeEventSource) activeEventSource.close();
-  const es = new EventSource(`/vernal-api/events?after=${lastEventId}`);
+  const es = new EventSource(`/vernal-api/events?after=${lastEventId}${projectQuerySuffix("&")}`);
   activeEventSource = es;
   es.onopen = () => {
     timeline.setConnected(true);

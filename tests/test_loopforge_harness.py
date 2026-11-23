@@ -162,7 +162,7 @@ def test_loopforge_harness_dispatches_auto_passes_reuses_issue_and_parses_result
         assert res1.usage.input_tokens == 120 and res1.usage.output_tokens == 55
         assert approved_nodes == ["draft"]
         assert len(created_issues) == 1
-        assert created_issues[0]["workflowId"] == plan_workflow_id("proj-plan")
+        assert created_issues[0]["workflowId"] == plan_workflow_id("proj-plan", "pm")
 
         # 第 2 次同角色同阶段：复用原 Issue（update + rerun=True），不刷屏新建
         res2 = asyncio.run(

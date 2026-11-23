@@ -962,7 +962,16 @@ class Engine:
             raise OpsError(f"主仓库当前不在 {base} 分支，请先切换")
         if not gitops.is_clean(root):
             raise OpsError("主仓库工作区存在未提交改动，请先提交或清理后再合并")
+        prev_sha = gitops.head_sha(root)
         gitops.fast_forward(root, ms.branch_name, f"autodev: merge milestone {milestone_id}")
+        merged_sha = gitops.head_sha(root)
+        pushed_remote = False
+        if gitops.has_remote(root, "origin"):
+            ok_push, push_out = gitops.push_branch(root, base, remote="origin")
+            if not ok_push:
+                gitops.reset_hard(root, prev_sha)
+                raise OpsError(f"推送 {base} 到远端 origin 失败，已回滚本地合入：{push_out}")
+            pushed_remote = True
         for t in self.db.list_tasks(milestone_id=milestone_id):
             self.db.update_task(t.task_id, status=TaskStatus.MERGED, assigned_slot=None, active_agent_label=None)
             if t.worktree_path:
@@ -971,8 +980,9 @@ class Engine:
         gitops.remove_worktree(root, self.ws.integration_dir / milestone_id)
         self.db.update_milestone(milestone_id, status=MilestoneStatus.MERGED)
         self.db.meta_set("contract_hash", gitops.tree_fingerprint(root, self.settings.protected_paths))
+        push_note = " 并推送至 origin" if pushed_remote else ""
         self.db.add_event(
-            "milestone.merged", f"{milestone_id} 已合入 {base}（{gitops.head_sha(root)[:10]}）", actor=actor
+            "milestone.merged", f"{milestone_id} 已合入 {base}{push_note}（{merged_sha[:10]}）", actor=actor
         )
         if all(m.status == MilestoneStatus.MERGED for m in self.db.list_milestones()):
             self.set_status(ProjectStatus.COMPLETED)

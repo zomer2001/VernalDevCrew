@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import difflib
+import hashlib
 import io
 import json
+import os
 import re
+import time
 import zipfile
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -27,13 +32,36 @@ from autodev.engine import Engine, OpsError, PlanningError, init_workspace
 from autodev.harnesses.base import extract_json
 from autodev.harnesses.codex_cli import parse_events_jsonl
 from autodev.loopforge.bootstrap import ensure_vernal_loopforge_assets
-from autodev.loopforge.bridge import LoopForgeBridge
+from autodev.loopforge.bridge import LoopForgeBridge, verify_context_sig
 from autodev.loopforge.client import LoopForgeClient, LoopForgeError
 from autodev.scheduler import Scheduler
 from autodev.server.history import event_page, history_sources
 from autodev.server.proxy import LoopForgeProxy
 
 STATIC_DIR = Path(__file__).parent / "static"
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+_PROJECT_ID_RE = re.compile(r"^[0-9A-Za-z._\-]{1,64}$")
+
+
+@dataclass
+class _ProjectSlot:
+    project_key: str
+    engine: Engine
+    subscribers: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = field(default_factory=set)
+    scheduler: Scheduler | None = None
+    scheduler_task: asyncio.Task[Any] | None = None
+    plan_task: asyncio.Task[Any] | None = None
+    on_event: Any = None
+
+
+class _EngineProxy:
+    """按请求上下文自动路由到当前项目槽位的 Engine 代理，避免多人切项目串台。"""
+
+    def __init__(self, getter: Any):
+        self._getter = getter
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._getter().engine, name)
 
 
 class PlanRequest(BaseModel):
@@ -58,10 +86,12 @@ class RuntimeConfigRequest(BaseModel):
 
 class AgentConfigRequest(BaseModel):
     harness: str | None = None
+    pm_harness: str | None = None
     director_harness: str | None = None
     coder_harness: str | None = None
     qa_harness: str | None = None
     model: str | None = None
+    pm_model: str | None = None
     director_model: str | None = None
     coder_model: str | None = None
     qa_model: str | None = None
@@ -105,56 +135,262 @@ class EditPlanTaskRequest(BaseModel):
     depends_on: list[str] | None = None
 
 
-def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
-    subscribers: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
-    state: dict[str, Any] = {
-        "scheduler": None,
-        "scheduler_task": None,
-        "plan_task": None,
-    }
+def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
+    slots: dict[str, _ProjectSlot] = {}
+    all_slots: list[_ProjectSlot] = []
+    auth_cache: dict[str, tuple[float, str]] = {}
+    proj_perm_cache: dict[str, tuple[float, set[str]]] = {}
 
-    def on_event(ev: dict[str, Any]) -> None:
-        for loop, wake in list(subscribers):
-            if not loop.is_closed():
-                loop.call_soon_threadsafe(wake.set)
+    def _register_slot(eng: Engine) -> _ProjectSlot:
+        slot = _ProjectSlot(project_key=eng.settings.loopforge_project_id or eng.ws.root.name, engine=eng)
 
-    engine.db.listeners.append(on_event)
+        def _on_ev(_ev: dict[str, Any]) -> None:
+            for loop, wake in list(slot.subscribers):
+                if not loop.is_closed():
+                    loop.call_soon_threadsafe(wake.set)
+
+        slot.on_event = _on_ev
+        eng.db.listeners.append(_on_ev)
+        all_slots.append(slot)
+        slots[eng.ws.root.name] = slot
+        if eng.settings.loopforge_project_id:
+            slots[eng.settings.loopforge_project_id] = slot
+        return slot
+
+    default_slot_ref: list[_ProjectSlot] = [_register_slot(initial_engine)]
+    current_slot_var: contextvars.ContextVar[_ProjectSlot | None] = contextvars.ContextVar("vernal_slot", default=None)
+
+    def _slot() -> _ProjectSlot:
+        return current_slot_var.get() or default_slot_ref[0]
+
+    engine: Any = _EngineProxy(_slot)
+
+    def _workspaces_parent() -> Path:
+        base_root = initial_engine.ws.root.resolve()
+        parent = base_root.parent
+        if parent.name != "workspaces":
+            parent = base_root.parent / "workspaces"
+            parent.mkdir(parents=True, exist_ok=True)
+        return parent
+
+    def _find_or_open_slot(
+        pid: str,
+        *,
+        create: bool = False,
+        project_name: str = "",
+        seed_engine: Engine | None = None,
+    ) -> _ProjectSlot | None:
+        existing = slots.get(pid)
+        if existing is not None:
+            return existing
+
+        parent = _workspaces_parent()
+        target_ws: Workspace | None = None
+        if parent.is_dir():
+            for entry in sorted(parent.iterdir()):
+                if not entry.is_dir() or entry.is_symlink():
+                    continue
+                cand = Workspace(entry)
+                if cand.config_path.is_file() and cand.db_path.is_file():
+                    try:
+                        cfg = Settings.load(cand.config_path)
+                        if cfg.loopforge_project_id == pid:
+                            target_ws = cand
+                            break
+                    except Exception:
+                        continue
+            if target_ws is None:
+                direct = parent / pid
+                if (direct / ".autodev" / "state.db").is_file():
+                    target_ws = Workspace(direct)
+
+        if target_ws is None:
+            if not create:
+                return None
+            target_ws = init_workspace(parent / pid, name=project_name.strip() or pid, collaboration_mode="files")
+
+        new_settings = target_ws.load_settings()
+        base_eng = seed_engine or default_slot_ref[0].engine
+        new_settings.runtime_backend = "loopforge"
+        new_settings.loopforge_url = base_eng.settings.loopforge_url
+        new_settings.gitea_url = base_eng.settings.gitea_url
+        new_settings.vernal_public_url = base_eng.settings.vernal_public_url
+        if not new_settings.loopforge_token and base_eng.settings.loopforge_token:
+            new_settings.loopforge_token = base_eng.settings.loopforge_token
+        new_settings.loopforge_project_id = pid
+        if not (target_ws.root / ".git").exists():
+            new_settings.collaboration_mode = "files"
+
+        new_eng = Engine(target_ws, settings=new_settings)
+        slot = _register_slot(new_eng)
+        slots[pid] = slot
+        return slot
+
+    def _is_loopback(request: Request) -> bool:
+        if request.headers.get("x-forwarded-for"):
+            return False
+        host = request.client.host if request.client else ""
+        return host in _LOOPBACK_HOSTS
+
+    async def _verify_cookie_user(cookie: str, lf_url: str) -> str:
+        if not cookie.strip():
+            raise HTTPException(status_code=401, detail="请先登录 LoopForge 后再执行该操作")
+        ck_key = f"{lf_url}|{hashlib.sha256(cookie.encode('utf-8')).hexdigest()}"
+        cached = auth_cache.get(ck_key)
+        now = time.monotonic()
+        if cached and now - cached[0] < 10.0:
+            return cached[1]
+        try:
+            me = await LoopForgeClient(lf_url).auth_current_with_cookie(cookie)
+        except LoopForgeError as exc:
+            raise HTTPException(status_code=401, detail=f"身份验证失败：{exc}") from exc
+        user = me.get("user") if isinstance(me.get("user"), dict) else me
+        login = str((user or {}).get("loginName") or (user or {}).get("login") or "")
+        if not login or (user or {}).get("isGuest"):
+            raise HTTPException(status_code=401, detail="当前为未登录或访客会话，无权执行该操作")
+        auth_cache[ck_key] = (now, login)
+        return login
+
+    async def _verify_project_access(cookie: str, lf_url: str, pid: str) -> None:
+        if not pid:
+            return
+        ck_key = f"{lf_url}|{hashlib.sha256(cookie.encode('utf-8')).hexdigest()}"
+        cached = proj_perm_cache.get(ck_key)
+        now = time.monotonic()
+        if cached and now - cached[0] < 10.0:
+            allowed_ids = cached[1]
+        else:
+            try:
+                projects = await LoopForgeClient(lf_url).list_projects_with_cookie(cookie)
+            except LoopForgeError:
+                return
+            allowed_ids = {str(p.get("id") or "") for p in projects if isinstance(p, dict) and p.get("id")}
+            proj_perm_cache[ck_key] = (now, allowed_ids)
+        if allowed_ids and pid not in allowed_ids:
+            raise HTTPException(status_code=403, detail=f"当前登录用户无权访问项目 {pid}")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
             yield
         finally:
-            sched: Scheduler | None = state["scheduler"]
-            if sched is not None:
-                sched.request_stop()
-            for key in ("scheduler_task", "plan_task"):
-                t = state[key]
-                if t is not None and not t.done():
-                    t.cancel()
+            for s in list(all_slots):
+                if s.scheduler is not None:
+                    s.scheduler.request_stop()
+                for t in (s.scheduler_task, s.plan_task):
+                    if t is not None and not t.done():
+                        t.cancel()
+                        try:
+                            await t
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                if s.on_event in s.engine.db.listeners:
+                    s.engine.db.listeners.remove(s.on_event)
+                if s.engine is not initial_engine:
                     try:
-                        await t
-                    except (asyncio.CancelledError, Exception):
+                        s.engine.db.close()
+                    except Exception:
                         pass
-            if on_event in engine.db.listeners:
-                engine.db.listeners.remove(on_event)
-            px = state.get("proxy")
-            if px is not None:
-                await px.close()
+            if proxy is not None:
+                await proxy.close()
 
     app = FastAPI(title="Vernal", version="0.2.0", lifespan=lifespan, docs_url="/vernal-api/docs", openapi_url="/vernal-api/openapi.json", redoc_url=None)
-    # Vernal 自有静态资源与旧版独立看板（仅调试用），与 LoopForge 路径零冲突
+    # Vernal 自有静态资源，与 LoopForge 路径零冲突
     app.mount("/vernal-static", StaticFiles(directory=str(STATIC_DIR)), name="vernal-static")
-    proxy = LoopForgeProxy(engine.settings.loopforge_url, transport=proxy_transport)
-    state["proxy"] = proxy
+    proxy = LoopForgeProxy(initial_engine.settings.loopforge_url, transport=proxy_transport)
 
-    def _is_scheduler_running() -> bool:
-        t = state["scheduler_task"]
-        return t is not None and not t.done()
+    @app.middleware("http")
+    async def vernal_project_and_auth_middleware(request: Request, call_next: Any):
+        path = request.url.path
+        if not path.startswith("/vernal-api/"):
+            return await call_next(request)
 
-    def _is_planning() -> bool:
-        t = state["plan_task"]
-        return t is not None and not t.done()
+        # 1. 执行机自动绑定码：严格限定仅本机回环地址可调用
+        if path == "/vernal-api/runner/bind-code":
+            if not _is_loopback(request):
+                return JSONResponse(
+                    {"detail": "执行机自动绑定码仅限宿主机本机脚本调用，局域网成员请通过网页「设置 → 执行机器」绑定"},
+                    status_code=403,
+                )
+
+        # 2. 按请求头/查询参数定位项目槽位（多人同时打开不同项目互不串台）
+        req_pid = (request.headers.get("x-vernal-project") or request.query_params.get("project") or "").strip()
+        target_slot = default_slot_ref[0]
+        uninitialized_bootstrap = False
+        if req_pid:
+            if not _PROJECT_ID_RE.fullmatch(req_pid):
+                return JSONResponse({"detail": "非法的项目标识"}, status_code=400)
+            resolved = _find_or_open_slot(req_pid, create=False)
+            if resolved is not None:
+                target_slot = resolved
+            elif path in ("/vernal-api/project/select", "/vernal-api/runtime/status", "/vernal-api/runtime/bind", "/vernal-api/runner/health"):
+                # 新项目首次打开尚未建本地工作区：允许先查状态与绑定登录态，随后由 /project/select 初始化工作区
+                uninitialized_bootstrap = True
+            else:
+                return JSONResponse({"detail": f"项目工作区尚未初始化：{req_pid}"}, status_code=404)
+        request.state.requested_project_id = req_pid
+        request.state.workspace_initialized = not uninitialized_bootstrap
+
+        tok = current_slot_var.set(target_slot)
+        try:
+            # 3. 敏感操作与跨机访问鉴权（验证 LoopForge 登录态与项目权限）
+            is_local = _is_loopback(request)
+            cookie = request.headers.get("cookie", "")
+            require_auth_env = os.environ.get("VERNAL_REQUIRE_AUTH", "").strip() == "1"
+            lf_url = target_slot.engine.settings.loopforge_url
+
+            # 3a. Runner 上下文/基线拉取端点：允许有效 HMAC 签名或本机调用，拦截未授权局域网读取
+            is_baseline_dl = bool(
+                re.fullmatch(r"/vernal-api/tasks/[^/]+/baseline\.json", path)
+                or re.fullmatch(r"/vernal-api/plan-context/[^/]+\.json", path)
+            )
+            if is_baseline_dl:
+                sig = (request.query_params.get("sig") or "").strip()
+                res_key = (
+                    f"baseline:{path.split('/')[-2]}"
+                    if path.endswith("/baseline.json")
+                    else f"plan:{path.rsplit('/', 1)[-1][:-5]}"
+                )
+                sig_ok = verify_context_sig(
+                    target_slot.engine.settings.effective_loopforge_token(),
+                    target_slot.engine.settings.loopforge_project_id,
+                    res_key,
+                    sig,
+                )
+                if not sig_ok and (not is_local or require_auth_env):
+                    try:
+                        await _verify_cookie_user(cookie, lf_url)
+                        await _verify_project_access(cookie, lf_url, req_pid or target_slot.engine.settings.loopforge_project_id)
+                    except HTTPException as exc:
+                        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+
+            # 3b. 写操作、敏感控制及远程下载：局域网访问 / 启用强制鉴权 / LoopForge 模式下携带 Cookie 时强制校验登录与项目权限
+            is_sensitive_op = (
+                request.method in ("POST", "PUT", "PATCH", "DELETE")
+                and path not in ("/vernal-api/runtime/bind", "/vernal-api/runner/bind-code")
+            ) or (not is_local and path.endswith("/files.zip"))
+            use_lf_cookie_auth = bool(cookie) and target_slot.engine.settings.runtime_backend == "loopforge"
+
+            if is_sensitive_op and (not is_local or require_auth_env or use_lf_cookie_auth):
+                try:
+                    await _verify_cookie_user(cookie, lf_url)
+                    check_pid = req_pid or target_slot.engine.settings.loopforge_project_id
+                    if check_pid and path != "/vernal-api/project/select":
+                        await _verify_project_access(cookie, lf_url, check_pid)
+                except HTTPException as exc:
+                    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+
+            return await call_next(request)
+        finally:
+            current_slot_var.reset(tok)
+
+    def _is_scheduler_running(slot: _ProjectSlot | None = None) -> bool:
+        s = slot or _slot()
+        return s.scheduler_task is not None and not s.scheduler_task.done()
+
+    def _is_planning(slot: _ProjectSlot | None = None) -> bool:
+        s = slot or _slot()
+        return s.plan_task is not None and not s.plan_task.done()
 
     @app.get("/vernal-api/state")
     def get_state() -> dict[str, Any]:
@@ -217,18 +453,20 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
 
     @app.post("/vernal-api/plan")
     async def api_plan(req: PlanRequest) -> dict[str, Any]:
-        if _is_planning():
+        slot = _slot()
+        eng = slot.engine
+        if _is_planning(slot):
             raise HTTPException(status_code=409, detail="规划任务已在后台运行")
-        if _is_scheduler_running():
+        if _is_scheduler_running(slot):
             raise HTTPException(status_code=409, detail="调度器正在运行，请先停止")
 
         async def _run_plan() -> None:
             try:
-                await engine.plan(extra_instructions=req.extra_instructions, mode=req.mode)
+                await eng.plan(extra_instructions=req.extra_instructions, mode=req.mode)
             except (OpsError, PlanningError, Exception) as exc:
-                engine.db.add_event("plan.failed", f"规划失败：{exc}")
+                eng.db.add_event("plan.failed", f"规划失败：{exc}")
 
-        state["plan_task"] = asyncio.create_task(_run_plan())
+        slot.plan_task = asyncio.create_task(_run_plan())
         return {"started": True}
 
     @app.post("/vernal-api/plan/approve")
@@ -646,80 +884,88 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
 
     @app.post("/vernal-api/scheduler/start")
     async def api_scheduler_start(watch: bool = True) -> dict[str, Any]:
-        if _is_scheduler_running():
+        slot = _slot()
+        eng = slot.engine
+        if _is_scheduler_running(slot):
             return {"running": True}
-        sched = Scheduler(engine)
+        sched = Scheduler(eng)
         try:
             sched.check_runtime()
         except OpsError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        state["scheduler"] = sched
+        slot.scheduler = sched
 
         async def _run_sched() -> None:
             try:
                 await sched.run(watch=watch)
             except Exception as exc:
-                engine.db.add_event("scheduler.error", f"调度器异常：{exc}")
+                eng.db.add_event("scheduler.error", f"调度器异常：{exc}")
 
-        state["scheduler_task"] = asyncio.create_task(_run_sched())
+        slot.scheduler_task = asyncio.create_task(_run_sched())
         return {"running": True}
 
     @app.post("/vernal-api/scheduler/stop")
     async def api_scheduler_stop() -> dict[str, Any]:
-        sched: Scheduler | None = state["scheduler"]
-        if sched is not None:
-            sched.request_stop()
+        slot = _slot()
+        if slot.scheduler is not None:
+            slot.scheduler.request_stop()
         return {"stopping": True}
 
     def _lf_client() -> LoopForgeClient:
-        return LoopForgeClient(engine.settings.loopforge_url, engine.settings.effective_loopforge_token())
+        eng = _slot().engine
+        return LoopForgeClient(eng.settings.loopforge_url, eng.settings.effective_loopforge_token())
 
     # ---------- 多智能体架构评审圆桌（Council） ----------
     @app.get("/vernal-api/council")
     def api_council_get() -> dict[str, Any]:
-        msgs = engine.db.list_council_messages()
+        slot = _slot()
+        msgs = slot.engine.db.list_council_messages()
         consensus = next((m for m in reversed(msgs) if m.get("kind") == "consensus"), None)
         return {
             "messages": msgs,
             "consensus": consensus["body"] if consensus else None,
-            "running": _is_planning(),
+            "running": _is_planning(slot),
         }
 
     @app.post("/vernal-api/council/run")
     async def api_council_run(req: PlanRequest) -> dict[str, Any]:
-        if _is_planning():
+        slot = _slot()
+        eng = slot.engine
+        if _is_planning(slot):
             raise HTTPException(status_code=409, detail="规划/圆桌会议已在运行中")
-        if _is_scheduler_running():
+        if _is_scheduler_running(slot):
             raise HTTPException(status_code=409, detail="调度器正在运行，请先停止")
 
         async def _run() -> None:
             try:
-                await run_council(engine, extra_instructions=req.extra_instructions)
+                await run_council(eng, extra_instructions=req.extra_instructions)
             except Exception as exc:
-                engine.db.add_event("council.failed", f"架构评审圆桌失败：{exc}", task_id="_council")
+                eng.db.add_event("council.failed", f"架构评审圆桌失败：{exc}", task_id="_council")
 
-        state["plan_task"] = asyncio.create_task(_run())
+        slot.plan_task = asyncio.create_task(_run())
         return {"started": True}
 
     @app.post("/vernal-api/council/interject")
     async def api_council_interject(req: CouncilInterjectRequest) -> dict[str, Any]:
-        if _is_planning():
+        slot = _slot()
+        eng = slot.engine
+        if _is_planning(slot):
             raise HTTPException(status_code=409, detail="圆桌会议正在收敛，请稍候")
         if not req.note.strip():
             raise HTTPException(status_code=400, detail="插话内容不能为空")
 
         async def _run() -> None:
             try:
-                await interject_council(engine, actor=req.actor, note=req.note)
+                await interject_council(eng, actor=req.actor, note=req.note)
             except Exception as exc:
-                engine.db.add_event("council.failed", f"圆桌补充裁决失败：{exc}", task_id="_council")
+                eng.db.add_event("council.failed", f"圆桌补充裁决失败：{exc}", task_id="_council")
 
-        state["plan_task"] = asyncio.create_task(_run())
+        slot.plan_task = asyncio.create_task(_run())
         return {"started": True}
 
     # ---------- LoopForge 底座连接、BFF 代理与统一审批收件箱 ----------
     @app.get("/vernal-api/runtime/status")
-    async def api_runtime_status() -> dict[str, Any]:
+    async def api_runtime_status(request: Request) -> dict[str, Any]:
         client = _lf_client()
         lf_ok, lf_health = await client.health()
         gt_ok, gt_health = await client.gitea_health(engine.settings.gitea_url)
@@ -727,6 +973,8 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
         payload: dict[str, Any] = {
             "runtime_backend": engine.settings.runtime_backend,
             "collaboration_mode": engine.settings.collaboration_mode,
+            "workspace_initialized": bool(getattr(request.state, "workspace_initialized", True)),
+            "requested_project_id": str(getattr(request.state, "requested_project_id", "")),
             "loopforge": {
                 "url": engine.settings.loopforge_url,
                 "reachable": lf_ok,
@@ -743,6 +991,9 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
             "agents": [],
             "sandboxes": [],
             "executors": [],
+            "runners": [],
+            "online_runners": [],
+            "runners_online_count": 0,
             "recent_runs": [],
             "auth_error": "",
         }
@@ -756,16 +1007,50 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
                     client.list_executors(),
                     client.list_runs(),
                 )
+                runners: list[dict[str, Any]] = []
+                try:
+                    runners = await client.list_runners()
+                except LoopForgeError:
+                    runners = []
+                online_runners = [r for r in runners if isinstance(r, dict) and r.get("status") == "online"]
                 payload["loopforge"]["authenticated"] = True
                 payload["projects"] = projects
                 payload["workflows"] = workflows
                 payload["agents"] = agents
                 payload["sandboxes"] = sandboxes
                 payload["executors"] = executors
+                payload["runners"] = runners
+                payload["online_runners"] = online_runners
+                payload["runners_online_count"] = len(online_runners)
                 payload["recent_runs"] = runs[:25]
             except LoopForgeError as exc:
                 payload["auth_error"] = str(exc)
         return payload
+
+    @app.get("/vernal-api/runner/health")
+    async def api_runner_health(request: Request, format: str = "json") -> Response:
+        """核对 LoopForge 控制面实际收到的在线 Runner 心跳（供启动脚本与监控面板核验）。"""
+        if not _is_loopback(request):
+            raise HTTPException(status_code=403, detail="执行机心跳诊断接口仅限本机调用")
+        eng = _slot().engine
+        token = eng.settings.effective_loopforge_token()
+        if not token:
+            if format == "raw":
+                return Response(content="unbound:0:", media_type="text/plain")
+            return JSONResponse({"status": "unbound", "online_count": 0, "runners": []})
+        client = LoopForgeClient(eng.settings.loopforge_url, token)
+        try:
+            runners = await client.list_runners()
+        except LoopForgeError as exc:
+            if format == "raw":
+                return Response(content=f"error:0:{exc}", media_type="text/plain")
+            return JSONResponse({"status": "error", "online_count": 0, "error": str(exc), "runners": []})
+        online = [r for r in runners if isinstance(r, dict) and r.get("status") == "online"]
+        names = [str(r.get("name") or r.get("id") or "") for r in online]
+        if format == "raw":
+            state_txt = "online" if online else "offline"
+            return Response(content=f"{state_txt}:{len(online)}:{','.join(names)}", media_type="text/plain")
+        return JSONResponse({"status": "online" if online else "offline", "online_count": len(online), "names": names, "runners": runners})
 
     @app.post("/vernal-api/runtime/config")
     async def api_runtime_config(req: RuntimeConfigRequest) -> dict[str, Any]:
@@ -804,6 +1089,8 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
             except LoopForgeError:
                 pass
         _persist_runtime_config()
+        if engine.settings.loopforge_project_id:
+            slots[engine.settings.loopforge_project_id] = _slot()
         engine.reset_harness()
         engine.db.add_event(
             "runtime.configured",
@@ -835,6 +1122,8 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
                 await client.list_projects()
                 assets = await LoopForgeBridge(engine.settings, engine.db).ensure_project_and_assets()
                 engine.settings.runtime_backend = "loopforge"
+                if assets.get("project_id"):
+                    slots[str(assets["project_id"])] = _slot()
                 engine.reset_harness()
                 _persist_runtime_config()
                 return {
@@ -861,6 +1150,8 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
             _persist_runtime_config()
             raise HTTPException(502, f"登录态已保存，项目或标准 SOP 装配失败：{exc}") from exc
         _persist_runtime_config()
+        if assets.get("project_id"):
+            slots[str(assets["project_id"])] = _slot()
         engine.reset_harness()
         engine.db.add_event(
             "runtime.bound",
@@ -876,23 +1167,15 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
         }
 
     @app.post("/vernal-api/runner/bind-code")
-    async def api_runner_bind_code(format: str = "json") -> Response:
-        """为本机零 Python 启动脚本签发一次性 LoopForge Runner 绑定码。"""
-        token = engine.settings.effective_loopforge_token()
+    async def api_runner_bind_code(request: Request, format: str = "json") -> Response:
+        """为本机零 Python 启动脚本签发一次性 LoopForge Runner 绑定码（仅限宿主机回环调用，禁止跨工作区借令牌）。"""
+        if not _is_loopback(request):
+            raise HTTPException(status_code=403, detail="执行机自动绑定码仅限宿主机本机调用")
+        eng = _slot().engine
+        token = eng.settings.effective_loopforge_token()
         if not token:
-            parent = engine.ws.root.resolve().parent
-            if parent.is_dir():
-                for cfg in sorted(parent.glob("*/.autodev/config.toml")):
-                    try:
-                        cand = Settings.load(cfg).effective_loopforge_token()
-                        if cand:
-                            token = cand
-                            break
-                    except Exception:
-                        continue
-        if not token:
-            raise HTTPException(status_code=401, detail="尚未绑定 LoopForge 登录态，请先在浏览器登录 http://127.0.0.1:8787")
-        client = LoopForgeClient(engine.settings.loopforge_url, token)
+            raise HTTPException(status_code=401, detail="当前项目尚未绑定 LoopForge 登录态，请先在浏览器登录 http://127.0.0.1:8787")
+        client = LoopForgeClient(eng.settings.loopforge_url, token)
         try:
             res = await client.create_runner_bind_code()
         except LoopForgeError as exc:
@@ -905,74 +1188,48 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
         return JSONResponse({"code": code})
 
     @app.post("/vernal-api/project/select")
-    async def api_select_project(req: ProjectSelectRequest) -> dict[str, Any]:
-        """跟随原版顶栏 #projectSwitcher 切换当前挂载的 Vernal 架构工作区，保持单一项目上下文一致。"""
-        nonlocal engine
+    async def api_select_project(request: Request, req: ProjectSelectRequest) -> dict[str, Any]:
+        """初始化或切换到目标项目槽位（按项目独立隔离，不关闭也不干扰其他成员正在操作的项目）。"""
         pid = req.project_id.strip()
-        if not pid or not re.fullmatch(r"[0-9A-Za-z._\-]{1,64}", pid):
+        if not pid or not _PROJECT_ID_RE.fullmatch(pid):
             raise HTTPException(status_code=400, detail="非法的项目标识")
-        if engine.settings.loopforge_project_id == pid:
-            return {"switched": False, "project_id": pid, "workspace": engine.ws.root.name}
-        if _is_planning() or _is_scheduler_running():
-            raise HTTPException(status_code=409, detail="当前项目正在运行规划或调度，请先等待完成或停止后再切换项目")
 
-        parent = engine.ws.root.resolve().parent
-        if parent.name != "workspaces":
-            parent = engine.ws.root.resolve().parent / "workspaces"
-            parent.mkdir(parents=True, exist_ok=True)
+        cookie = request.headers.get("cookie", "")
+        if cookie or not _is_loopback(request) or os.environ.get("VERNAL_REQUIRE_AUTH", "").strip() == "1":
+            await _verify_project_access(cookie, _slot().engine.settings.loopforge_url, pid)
 
-        # 优先查找已绑定到该 LoopForge project_id 的现有工作区（如 orbit-shooter -> vernal-default）
-        target_ws: Workspace | None = None
-        for entry in sorted(parent.iterdir()):
-            if not entry.is_dir() or entry.is_symlink():
-                continue
-            cand = Workspace(entry)
-            if cand.config_path.is_file() and cand.db_path.is_file():
+        cur_slot = _slot()
+        if cur_slot.engine.settings.loopforge_project_id == pid:
+            slots[pid] = cur_slot
+            return {"switched": False, "project_id": pid, "workspace": cur_slot.engine.ws.root.name}
+
+        target_slot = _find_or_open_slot(
+            pid,
+            create=True,
+            project_name=req.project_name,
+            seed_engine=cur_slot.engine,
+        )
+        assert target_slot is not None
+        target_eng = target_slot.engine
+        tok = current_slot_var.set(target_slot)
+        try:
+            if target_eng.settings.effective_loopforge_token():
                 try:
-                    cfg = Settings.load(cand.config_path)
-                    if cfg.loopforge_project_id == pid:
-                        target_ws = cand
-                        break
-                except Exception:
-                    continue
+                    await ensure_vernal_loopforge_assets(_lf_client(), pid, target_eng.settings)
+                except LoopForgeError:
+                    pass
+            _persist_runtime_config()
+        finally:
+            current_slot_var.reset(tok)
 
-        if target_ws is None:
-            ws_dir = parent / pid
-            if (ws_dir / ".autodev" / "state.db").is_file():
-                target_ws = Workspace(ws_dir)
-            else:
-                target_ws = init_workspace(ws_dir, name=req.project_name.strip() or pid, collaboration_mode="files")
-
-        prev_token = engine.settings.loopforge_token
-        prev_url = engine.settings.loopforge_url
-        prev_gitea = engine.settings.gitea_url
-        if on_event in engine.db.listeners:
-            engine.db.listeners.remove(on_event)
-        engine.db.close()
-
-        new_settings = target_ws.load_settings()
-        new_settings.runtime_backend = "loopforge"
-        new_settings.loopforge_url = prev_url
-        new_settings.gitea_url = prev_gitea
-        if prev_token and not new_settings.loopforge_token:
-            new_settings.loopforge_token = prev_token
-        new_settings.loopforge_project_id = pid
-        if not (target_ws.root / ".git").exists():
-            new_settings.collaboration_mode = "files"
-
-        engine = Engine(target_ws, settings=new_settings)
-        engine.db.listeners.append(on_event)
-        if engine.settings.effective_loopforge_token():
-            try:
-                await ensure_vernal_loopforge_assets(_lf_client(), pid, engine.settings)
-            except LoopForgeError:
-                pass
-        _persist_runtime_config()
+        # 仅当调用方未携带 X-Vernal-Project（单用户/旧调用兼容）时更新默认槽位；携带项目头时完全隔离
+        if not request.headers.get("x-vernal-project"):
+            default_slot_ref[0] = target_slot
         return {
             "switched": True,
             "project_id": pid,
-            "workspace": engine.ws.root.name,
-            "workflow_id": engine.settings.loopforge_workflow_id,
+            "workspace": target_eng.ws.root.name,
+            "workflow_id": target_eng.settings.loopforge_workflow_id,
         }
 
 
@@ -1095,7 +1352,7 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
         from autodev.config import SUPPORTED_HARNESSES, normalize_harness_name
 
         valid_h = {"", "auto", *SUPPORTED_HARNESSES}
-        for hfield in ("harness", "director_harness", "coder_harness", "qa_harness"):
+        for hfield in ("harness", "pm_harness", "director_harness", "coder_harness", "qa_harness"):
             raw_val = getattr(req, hfield)
             if raw_val is not None:
                 norm_val = normalize_harness_name(raw_val)
@@ -1104,16 +1361,17 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
                 if hfield == "harness" and not norm_val:
                     norm_val = "auto"
                 setattr(engine.settings, hfield, norm_val)
-                if hfield == "director_harness":
+                if hfield == "director_harness" and req.pm_harness is None:
                     engine.settings.pm_harness = norm_val
 
-        for mfield in ("model", "director_model", "coder_model", "qa_model"):
+        for mfield in ("model", "pm_model", "director_model", "coder_model", "qa_model"):
             mval = getattr(req, mfield)
             if mval is not None:
                 cleaned = mval.strip()
                 setattr(engine.settings, mfield, cleaned)
                 if mfield == "director_model":
-                    engine.settings.pm_model = cleaned
+                    if req.pm_model is None:
+                        engine.settings.pm_model = cleaned
                     engine.settings.planner_model = cleaned
                 elif mfield == "qa_model":
                     engine.settings.reviewer_model = cleaned
@@ -1216,22 +1474,47 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
 
     @app.get("/vernal-api/runtime/analytics")
     async def api_lf_analytics() -> dict[str, Any]:
-        snap = engine.snapshot()
+        eng = _slot().engine
+        snap = eng.snapshot()
         lf_analytics: dict[str, Any] = {}
-        if engine.settings.effective_loopforge_token():
+        lf_ok = False
+        lf_error = ""
+        if eng.settings.effective_loopforge_token():
             try:
                 lf_analytics = await _lf_client().get_analytics()
-            except LoopForgeError:
+                lf_ok = True
+            except LoopForgeError as exc:
                 lf_analytics = {}
-        return {"local_usage": snap["usage_total"], "loopforge": lf_analytics}
+                lf_error = str(exc)
+        else:
+            lf_error = "当前项目尚未绑定 LoopForge Token，无法拉取底座运行统计"
+        linked_runs = [
+            {"task_id": t["task_id"], "title": t["title"], "status": t["status"], "run_id": t["loopforge_run_id"]}
+            for t in snap["tasks"]
+            if t.get("loopforge_run_id")
+        ]
+        return {
+            "project_id": eng.settings.loopforge_project_id,
+            "workspace": eng.ws.root.name,
+            "local_usage": snap["usage_total"],
+            "local_tasks_count": len(snap["tasks"]),
+            "linked_loopforge_runs": linked_runs,
+            "loopforge": lf_analytics,
+            "loopforge_ok": lf_ok,
+            "loopforge_error": lf_error,
+            "sources": {
+                "local": f"Vernal 工作区数据库 ({eng.ws.root.name}/.autodev/state.db)",
+                "loopforge": f"LoopForge 控制面统计 ({eng.settings.loopforge_url}/api/analytics)",
+            },
+        }
 
     def _sources(request: Request) -> dict[str, Path]:
-        local = bool(request.client and request.client.host in ("127.0.0.1", "::1"))
-        return history_sources(engine.ws, include_neighbors=local)
+        local = _is_loopback(request)
+        return history_sources(_slot().engine.ws, include_neighbors=local)
 
     @app.get("/vernal-api/history/workspaces")
     def api_history_sources(request: Request) -> dict[str, Any]:
-        return {"current": engine.ws.root.resolve().name, "workspaces": list(_sources(request))}
+        return {"current": _slot().engine.ws.root.resolve().name, "workspaces": list(_sources(request))}
 
     @app.get("/vernal-api/history/events")
     def api_history_page(request: Request, workspace: str, before: int | None = Query(None, ge=1),
@@ -1243,7 +1526,9 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
 
     @app.get("/vernal-api/events")
     async def api_events(request: Request, after: int | None = Query(None, ge=0)) -> StreamingResponse:
-        cursor = engine.db.last_event_id() if after is None else after
+        slot = _slot()
+        eng = slot.engine
+        cursor = eng.db.last_event_id() if after is None else after
         resumed = request.headers.get("last-event-id", "")
         if resumed.isascii() and resumed.isdigit() and len(resumed) <= 18:
             cursor = max(after or 0, int(resumed))
@@ -1251,12 +1536,12 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
         async def gen():
             wake = asyncio.Event()
             pair = (asyncio.get_running_loop(), wake)
-            subscribers.add(pair)
+            slot.subscribers.add(pair)
             last_id = cursor
             try:
                 while True:
                     wake.clear()
-                    batch = engine.db.events_after(last_id)
+                    batch = eng.db.events_after(last_id)
                     for ev in batch:
                         last_id = ev["event_id"]
                         yield f"id: {last_id}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
@@ -1268,7 +1553,7 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
                         # CLI workers write to the same database from another process.
                         yield ": keepalive\n\n"
             finally:
-                subscribers.discard(pair)
+                slot.subscribers.discard(pair)
 
         return StreamingResponse(
             gen(),

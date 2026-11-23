@@ -4,7 +4,7 @@
  * 2. 注入左侧 Vernal 品牌栏、三大多智能体架构模块入口与顶栏运行底座状态胶囊
  * 3. 完整保留 LoopForge 所有原生页面（AI 工作台 / 需求列表 / 待我确认 / 统计 / 设置 / 执行机器）
  */
-@import url("/vernal-static/vernal-stage.css?v=20261123v1");
+@import url("/vernal-static/vernal-stage.css?v=20261123v3");
 
 :root,
 html[data-theme="light"] {

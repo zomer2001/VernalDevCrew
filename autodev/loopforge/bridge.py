@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
+import shlex
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote, urlencode
 
 from autodev.config import Settings
 from autodev.db import Database, Task
@@ -13,6 +17,75 @@ from autodev.harnesses.base import Usage
 from autodev.loopforge.bootstrap import classify_lane, ensure_vernal_loopforge_assets, lane_workflow_id
 from autodev.loopforge.client import LoopForgeClient, LoopForgeError
 from autodev.models import TaskStatus
+
+
+_RESTORE_PY_SCRIPT = (
+    "import json,pathlib,sys,urllib.request; "
+    "p=pathlib.Path(sys.argv[1]) if sys.argv[1] else None; "
+    'raw=json.loads(p.read_text("utf-8")) if (p and p.is_file()) else json.loads(urllib.request.urlopen(sys.argv[2]).read().decode("utf-8")); '
+    'assert isinstance(raw,dict), "invalid bundle json"; '
+    "nk=sys.argv[3]; "
+    "d=raw.get(nk) if nk else raw; "
+    'assert isinstance(d,dict), "missing bundle map"; '
+    'assert (not nk) or len(d)>0, f"empty bundle: {nk}"; '
+    'assert all(isinstance(v,str) for v in d.values()), "non-string file content in bundle"; '
+    'pathlib.Path(".vernal-baseline.json").write_text(json.dumps(d,ensure_ascii=False),"utf-8") if sys.argv[4]=="1" else None; '
+    '[((f:=pathlib.Path(k)).parent.mkdir(parents=True,exist_ok=True), f.write_text(v,"utf-8")) for k,v in d.items()]'
+)
+
+
+def sign_context_sig(secret: str, project_id: str, resource: str) -> str:
+    """为 Runner 拉取基线/规划上下文生成绑定到项目与资源的短签名，避免局域网越权读取。"""
+    if not secret:
+        return ""
+    msg = f"{project_id}:{resource}".encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:24]
+
+
+def verify_context_sig(secret: str, project_id: str, resource: str, sig: str) -> bool:
+    if not secret or not sig:
+        return False
+    expected = sign_context_sig(secret, project_id, resource)
+    return hmac.compare_digest(expected, sig)
+
+
+_RESTORE_NODE_SCRIPT = (
+    'const fs=require("fs"),path=require("path"); '
+    "(async()=>{"
+    "const [p,url,nk,sb]=process.argv.slice(1);"
+    "let raw;"
+    'if(p&&fs.existsSync(p)){raw=JSON.parse(fs.readFileSync(p,"utf8"));}'
+    'else{const r=await fetch(url);if(!r.ok)throw new Error("HTTP "+r.status+": "+(await r.text()).slice(0,200));raw=await r.json();}'
+    'if(!raw||typeof raw!=="object"||Array.isArray(raw))throw new Error("invalid bundle json");'
+    "const d=nk?raw[nk]:raw;"
+    'if(!d||typeof d!=="object"||Array.isArray(d))throw new Error("missing bundle map: "+(nk||"root"));'
+    'if(nk&&!Object.keys(d).length)throw new Error("empty bundle: "+nk);'
+    'for(const [k,v] of Object.entries(d)){if(typeof v!=="string")throw new Error("non-string file content: "+k);}'
+    'if(sb==="1")fs.writeFileSync(".vernal-baseline.json",JSON.stringify(d),"utf8");'
+    'for(const [k,v] of Object.entries(d)){fs.mkdirSync(path.dirname(k),{recursive:true});fs.writeFileSync(k,v,"utf8");}'
+    "})().catch(e=>{console.error(e&&e.message?e.message:e);process.exit(1);});"
+)
+
+
+def build_restore_command(
+    local_path: str,
+    api_url: str,
+    *,
+    nested_key: str = "",
+    save_baseline: bool = False,
+) -> str:
+    """构造跨 Shell 且兼容零 Python 宿主机（优先 python3，缺失时自动降级 node）的文件还原命令。"""
+    args = " ".join(
+        [
+            shlex.quote(local_path),
+            shlex.quote(api_url),
+            shlex.quote(nested_key),
+            shlex.quote("1" if save_baseline else "0"),
+        ]
+    )
+    py_cmd = f"python3 -c {shlex.quote(_RESTORE_PY_SCRIPT)} {args}"
+    node_cmd = f"node -e {shlex.quote(_RESTORE_NODE_SCRIPT)} {args}"
+    return f"if command -v python3 >/dev/null 2>&1; then {py_cmd}; else {node_cmd}; fi"
 
 
 async def check_runners_online(client: LoopForgeClient) -> str | None:
@@ -274,14 +347,24 @@ class LoopForgeBridge:
                     + inline_json
                 )
             else:
-                api_url = f"{vernal_base_url.rstrip('/')}/vernal-api/tasks/{task.task_id}/baseline.json"
+                q_params: dict[str, str] = {}
+                if self.settings.loopforge_project_id:
+                    q_params["project"] = self.settings.loopforge_project_id
+                sig = sign_context_sig(
+                    self.settings.effective_loopforge_token(),
+                    self.settings.loopforge_project_id,
+                    f"baseline:{task.task_id}",
+                )
+                if sig:
+                    q_params["sig"] = sig
+                qs = f"?{urlencode(q_params)}" if q_params else ""
+                api_url = f"{vernal_base_url.rstrip('/')}/vernal-api/tasks/{quote(task.task_id, safe='')}/baseline.json{qs}"
                 file_list = ", ".join(f"`{k}`" for k in sorted(inputs))
-                restore_cmd = (
-                    "python3 -c 'import json,pathlib,urllib.request; "
-                    f"p=pathlib.Path({baseline_file!r}); "
-                    f"d=json.loads(p.read_text(\"utf-8\")) if p.is_file() else json.loads(urllib.request.urlopen({api_url!r}).read().decode(\"utf-8\")); "
-                    "pathlib.Path(\".vernal-baseline.json\").write_text(json.dumps(d,ensure_ascii=False),\"utf-8\"); "
-                    "[((f:=pathlib.Path(k)).parent.mkdir(parents=True,exist_ok=True), f.write_text(v,\"utf-8\")) for k,v in d.items()]'"
+                restore_cmd = build_restore_command(
+                    baseline_file,
+                    api_url,
+                    nested_key="",
+                    save_baseline=True,
                 )
                 description += (
                     f"\n本次采用文件交接（共 {len(inputs)} 个上游基线文件：{file_list}）。\n"
@@ -393,6 +476,7 @@ class LoopForgeBridge:
             run_id,
             stop_event=stop_event,
             poll_interval=2.5,
+            timeout_sec=float(self.settings.agent_timeout_sec),
             on_progress=_on_progress,
             on_auto_passed=_on_auto_passed,
         )

@@ -36,10 +36,39 @@ export function toast(msg) {
   toast._t = setTimeout(() => el.classList.add("hidden"), 3500);
 }
 
+let _activeProjectId = "";
+
+export function setActiveProjectId(pid) {
+  _activeProjectId = String(pid || "").trim();
+  try {
+    if (_activeProjectId) sessionStorage.setItem("vernal_project_id", _activeProjectId);
+    else sessionStorage.removeItem("vernal_project_id");
+  } catch {}
+}
+
+export function getActiveProjectId() {
+  const sw = document.getElementById("projectSwitcher");
+  if (sw?.value) return String(sw.value).trim();
+  if (_activeProjectId) return _activeProjectId;
+  try {
+    return sessionStorage.getItem("vernal_project_id") || "";
+  } catch {
+    return "";
+  }
+}
+
+export function projectQuerySuffix(sep = "?") {
+  const pid = getActiveProjectId();
+  return pid ? `${sep}project=${encodeURIComponent(pid)}` : "";
+}
+
 export async function api(path, opts = {}) {
+  const pid = getActiveProjectId();
+  const baseHeaders = { "Content-Type": "application/json" };
+  if (pid) baseHeaders["X-Vernal-Project"] = pid;
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     ...opts,
+    headers: { ...baseHeaders, ...(opts.headers || {}) },
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`);

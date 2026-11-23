@@ -237,6 +237,21 @@ def fast_forward(root: Path, ref: str, message: str) -> None:
         raise GitError(out)
 
 
+def has_remote(cwd: Path, remote: str = "origin") -> bool:
+    return git(["remote", "get-url", remote], cwd, check=False).returncode == 0
+
+
+def push_branch(cwd: Path, branch: str, remote: str = "origin") -> tuple[bool, str]:
+    proc = git(["push", remote, branch], cwd, check=False)
+    if proc.returncode == 0:
+        return True, proc.stdout.strip()
+    return False, (proc.stderr or proc.stdout).strip()
+
+
+def reset_hard(cwd: Path, ref: str) -> None:
+    git(["reset", "--hard", ref], cwd)
+
+
 def is_ancestor(cwd: Path, sha: str, ref: str = "HEAD") -> bool:
     return git(["merge-base", "--is-ancestor", sha, ref], cwd, check=False).returncode == 0
 

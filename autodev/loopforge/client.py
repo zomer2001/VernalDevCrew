@@ -123,6 +123,24 @@ class LoopForgeClient:
             raise LoopForgeError(str((data or {}).get("error") or f"HTTP {resp.status_code}"), status_code=resp.status_code)
         return data if isinstance(data, dict) else {}
 
+    async def list_projects_with_cookie(self, cookie_header: str) -> list[dict[str, Any]]:
+        url = f"{self.base_url}/api/projects"
+        headers = {"Accept": "application/json"}
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, trust_env=use_environment_proxy(url)) as client:
+                resp = await client.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            raise LoopForgeError(f"无法连接 LoopForge ({url}): {exc}") from exc
+        if resp.status_code >= 400:
+            raise LoopForgeError(f"HTTP {resp.status_code}", status_code=resp.status_code)
+        try:
+            data = resp.json()
+        except ValueError:
+            return []
+        return data if isinstance(data, list) else []
+
     async def create_token_with_cookie(
         self,
         cookie_header: str,

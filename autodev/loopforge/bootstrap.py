@@ -129,7 +129,108 @@ print(f"vernal-result.json 校验通过（{len(data)} 个顶层字段）")
 """
 
 
-def plan_workflow_id(project_id: str) -> str:
+PACKAGE_FILES_NODE_SCRIPT = """\
+const fs = require("fs");
+const path = require("path");
+const SKIP = new Set(["__pycache__", ".pytest_cache", ".DS_Store", "node_modules", ".git", ".autodev", ".venv", "vernal-files.json", "review-report.md"]);
+const root = process.cwd();
+let baseline = {};
+if (fs.existsSync(".vernal-baseline.json")) {
+  try { baseline = JSON.parse(fs.readFileSync(".vernal-baseline.json", "utf8")); } catch {}
+}
+let explicit = null;
+if (fs.existsSync("vernal-files.json")) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync("vernal-files.json", "utf8"));
+    if (parsed && typeof parsed.files === "object" && Object.keys(parsed.files).length) explicit = parsed.files;
+  } catch {}
+}
+let outFiles = explicit;
+if (!outFiles) {
+  const current = {};
+  const walk = (dir) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (SKIP.has(ent.name) || ent.name.startsWith(".")) continue;
+      const full = path.join(dir, ent.name);
+      if (ent.isSymbolicLink()) continue;
+      if (ent.isDirectory()) walk(full);
+      else if (ent.isFile()) {
+        const rel = path.relative(root, full).split(path.sep).join("/");
+        current[rel] = fs.readFileSync(full, "utf8");
+      }
+    }
+  };
+  walk(root);
+  outFiles = {};
+  for (const [k, v] of Object.entries(current)) if (baseline[k] !== v) outFiles[k] = v;
+  for (const k of Object.keys(baseline)) if (!(k in current)) outFiles[k] = null;
+}
+if (!outFiles || !Object.keys(outFiles).length) {
+  console.error("vernal-files.json 为空：任务未产生任何有效文件变更");
+  process.exit(1);
+}
+fs.writeFileSync("vernal-files.json", JSON.stringify({ files: outFiles }, null, 2), "utf8");
+console.log(`已打包 ${Object.keys(outFiles).length} 个交付文件至 vernal-files.json`);
+"""
+
+VALIDATE_PLAN_JSON_NODE_SCRIPT = """\
+const fs = require("fs");
+if (!fs.existsSync("vernal-result.json")) {
+  console.error("缺少 vernal-result.json：请将满足 JSON Schema 的唯一 JSON 对象写入当前目录的 vernal-result.json");
+  process.exit(1);
+}
+let data;
+try { data = JSON.parse(fs.readFileSync("vernal-result.json", "utf8").trim()); } catch (e) {
+  console.error(`vernal-result.json 不是合法 JSON：${e.message}`);
+  process.exit(1);
+}
+if (!data || typeof data !== "object" || Array.isArray(data) || !Object.keys(data).length) {
+  console.error("vernal-result.json 必须是非空 JSON 对象（object）");
+  process.exit(1);
+}
+if (fs.existsSync(".vernal-schema.json")) {
+  try {
+    const schema = JSON.parse(fs.readFileSync(".vernal-schema.json", "utf8"));
+    const missing = (schema.required || []).filter((k) => !(k in data));
+    if (missing.length) {
+      console.error(`vernal-result.json 缺少必填字段：${missing.join(", ")}`);
+      process.exit(1);
+    }
+  } catch {}
+}
+fs.writeFileSync("vernal-result.json", JSON.stringify(data, null, 2), "utf8");
+console.log(`vernal-result.json 校验通过（${Object.keys(data).length} 个顶层字段）`);
+"""
+
+
+def _dual_shell_script(py_src: str, node_src: str) -> str:
+    return (
+        "set -eu\n"
+        "if command -v python3 >/dev/null 2>&1; then\n"
+        "  python3 - <<'__VERNAL_PY__'\n"
+        f"{py_src.rstrip()}\n"
+        "__VERNAL_PY__\n"
+        "elif command -v node >/dev/null 2>&1; then\n"
+        "  node - <<'__VERNAL_NODE__'\n"
+        f"{node_src.rstrip()}\n"
+        "__VERNAL_NODE__\n"
+        "else\n"
+        '  echo "宿主机缺少 python3 或 node 运行时" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+    )
+
+
+PACKAGE_FILES_SHELL_SCRIPT = _dual_shell_script(PACKAGE_FILES_SCRIPT, PACKAGE_FILES_NODE_SCRIPT)
+VALIDATE_PLAN_JSON_SHELL_SCRIPT = _dual_shell_script(VALIDATE_PLAN_JSON_SCRIPT, VALIDATE_PLAN_JSON_NODE_SCRIPT)
+
+
+def plan_workflow_id(project_id: str, role: str = "director") -> str:
+    r = (role or "director").strip().lower()
+    if r == "pm":
+        return f"{project_id}-vernal-plan-pm-sop"
+    if r in ("qa_lead", "tester", "reviewer"):
+        return f"{project_id}-vernal-plan-qa-sop"
     return f"{project_id}-vernal-plan-sop"
 
 
@@ -265,45 +366,65 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
         _skills("systematic-debugging", "test-driven-development"),
         "6. 修复专项：先写出能稳定复现问题的最小用例并确认失败，再做最小补丁；不得靠放宽断言或吞异常过关。",
     )
-    dir_exec = _executor_id_for(settings.harness_for("director"))
-    dir_model = settings.model_for("director")
-    planner: dict[str, Any] = {
-        "id": f"{project_id}-vernal-planner",
-        "projectId": project_id,
-        "name": "Vernal 架构规划与圆桌专家",
-        "version": 1,
-        "description": "承担架构圆桌辩论、ADR 拍板、研发组蓝图、里程碑拆单与异常仲裁（只读分析并输出 vernal-result.json）",
-        "executorId": dir_exec,
-        "model": dir_model,
-        "effort": "high" if dir_exec == "codex" else "",
-        "rules": [],
-        "skills": [],
-        "mcpServers": [],
-        "loop": {
-            "enabled": False,
-            "maxIterations": 1,
-            "exitCondition": "executor_success",
-            "onExhausted": "fail",
-        },
-        "artifactOutputs": [
-            {
-                "name": "vernal-result.json",
-                "path": "vernal-result.json",
-                "mediaType": "application/json",
-                "required": True,
-            }
-        ],
-        "verification": [],
-        "prompt": (
-            "你是 Vernal 架构规划与圆桌评审专家（只读分析，不直接开发业务代码）。\n"
-            "请仔细阅读当前需求正文中的角色设定、背景资料、约束规则与 JSON Schema：\n"
-            "1. 若需求正文给出了上下文还原命令，请先在当前工作目录执行该命令还原 `PLAN_PROMPT.md`、`inputs/` 与 `.vernal-schema.json`，再完整阅读 `PLAN_PROMPT.md`。\n"
-            "2. 严格按要求的 JSON Schema 生成唯一的 JSON 对象，并以 UTF-8 纯 JSON（不要包含 Markdown 代码块围栏）写入当前目录的 `vernal-result.json`。\n"
-            "3. 不要编写或提交无关的业务源码文件。\n"
-            "4. 结束回合前，若环境中存在 `submit_gate_result` MCP 工具，请调用一次 `submit_gate_result`（参数 `decision=\"pass\"`, `reason=\"已产出合法的 vernal-result.json\"`）。"
-        ),
-    }
-    return [coder, reviewer, frontend, contract, bugfix, planner]
+    def _make_planner(agent_id: str, name: str, desc: str, role_key: str) -> dict[str, Any]:
+        exec_id = _executor_id_for(settings.harness_for(role_key))
+        model_id = settings.model_for(role_key)
+        return {
+            "id": agent_id,
+            "projectId": project_id,
+            "name": name,
+            "version": 1,
+            "description": desc,
+            "executorId": exec_id,
+            "model": model_id,
+            "effort": "high" if exec_id == "codex" else "",
+            "rules": [],
+            "skills": [],
+            "mcpServers": [],
+            "loop": {
+                "enabled": False,
+                "maxIterations": 1,
+                "exitCondition": "executor_success",
+                "onExhausted": "fail",
+            },
+            "artifactOutputs": [
+                {
+                    "name": "vernal-result.json",
+                    "path": "vernal-result.json",
+                    "mediaType": "application/json",
+                    "required": True,
+                }
+            ],
+            "verification": [],
+            "prompt": (
+                "你是 Vernal 架构规划与圆桌评审专家（只读分析，不直接开发业务代码）。\n"
+                "请仔细阅读当前需求正文中的角色设定、背景资料、约束规则与 JSON Schema：\n"
+                "1. 若需求正文给出了上下文还原命令，请先在当前工作目录执行该命令还原 `PLAN_PROMPT.md`、`inputs/` 与 `.vernal-schema.json`，再完整阅读 `PLAN_PROMPT.md`。\n"
+                "2. 严格按要求的 JSON Schema 生成唯一的 JSON 对象，并以 UTF-8 纯 JSON（不要包含 Markdown 代码块围栏）写入当前目录的 `vernal-result.json`。\n"
+                "3. 不要编写或提交无关的业务源码文件。\n"
+                "4. 结束回合前，若环境中存在 `submit_gate_result` MCP 工具，请调用一次 `submit_gate_result`（参数 `decision=\"pass\"`, `reason=\"已产出合法的 vernal-result.json\"`）。"
+            ),
+        }
+
+    planner = _make_planner(
+        f"{project_id}-vernal-planner",
+        "Vernal 架构总监与蓝图规划师",
+        "承担研发总监 ADR 拍板、契约架构评审、蓝图拆单与异常仲裁（只读输出 vernal-result.json）",
+        "director",
+    )
+    planner_pm = _make_planner(
+        f"{project_id}-vernal-planner-pm",
+        "Vernal 圆桌产品经理（PM）",
+        "承担圆桌产品视角评审与 PRD 规格梳理，支持独立配置产品角色模型",
+        "pm",
+    )
+    planner_qa = _make_planner(
+        f"{project_id}-vernal-planner-qa",
+        "Vernal 圆桌 QA 质量总监",
+        "承担圆桌验收红线与测试策略评审，支持与研发总监异构模型交叉把关",
+        "qa_lead",
+    )
+    return [coder, reviewer, frontend, contract, bugfix, planner, planner_pm, planner_qa]
 
 
 def build_vernal_workflows(project_id: str, sandbox_id: str = "local") -> dict[str, dict[str, Any]]:
@@ -338,8 +459,8 @@ def build_vernal_workflows(project_id: str, sandbox_id: str = "local") -> dict[s
                 "name": "打包校验交付清单",
                 "type": "script",
                 "metricStage": "testing",
-                "scriptLanguage": "python",
-                "script": PACKAGE_FILES_SCRIPT,
+                "scriptLanguage": "shell",
+                "script": PACKAGE_FILES_SHELL_SCRIPT,
                 "rejectTo": "implement",
                 "onFailure": "reject",
                 "maxAttempts": 1,
@@ -456,19 +577,28 @@ def build_vernal_workflows(project_id: str, sandbox_id: str = "local") -> dict[s
 _LANE_LABELS = {"frontend": "前端界面", "contract": "契约文档", "bugfix": "缺陷修复"}
 
 
-def build_plan_workflow(project_id: str, sandbox_id: str = "local") -> dict[str, Any]:
-    """架构圆桌、蓝图规划、滚动拆单与总监仲裁共用的两节点只读规划 SOP：起草 → JSON Schema 校验。"""
-    planner_id = f"{project_id}-vernal-planner"
+def build_plan_workflow(project_id: str, sandbox_id: str = "local", role: str = "director") -> dict[str, Any]:
+    """按圆桌/规划岗位构造两节点只读规划 SOP：起草 → JSON Schema 校验（支持跨模型交叉评审）。"""
+    r = (role or "director").strip().lower()
+    if r == "pm":
+        planner_id = f"{project_id}-vernal-planner-pm"
+        wf_name = "Vernal 圆桌产品评审 SOP（PM）"
+    elif r in ("qa_lead", "tester", "reviewer"):
+        planner_id = f"{project_id}-vernal-planner-qa"
+        wf_name = "Vernal 圆桌质量评审 SOP（QA 总监）"
+    else:
+        planner_id = f"{project_id}-vernal-planner"
+        wf_name = "Vernal 架构圆桌与蓝图规划 SOP（总监）"
     return {
-        "id": plan_workflow_id(project_id),
+        "id": plan_workflow_id(project_id, r),
         "projectId": project_id,
-        "name": "Vernal 架构圆桌与蓝图规划 SOP",
+        "name": wf_name,
         "version": 1,
         "status": "published",
         "sandboxProfileId": sandbox_id,
         "metricCategory": "需求开发",
         "sopLane": "产品",
-        "description": "Vernal 顶层圆桌评审、蓝图拆单与异常仲裁统一执行流：专家起草 → JSON 契约校验（不合规自动打回重写）",
+        "description": "Vernal 顶层圆桌评审、蓝图拆单与异常仲裁统一执行流：岗位专家起草 → JSON 契约校验（不合规自动打回重写）",
         "nodes": [
             {
                 "id": "draft",
@@ -484,8 +614,8 @@ def build_plan_workflow(project_id: str, sandbox_id: str = "local") -> dict[str,
                 "name": "校验结构化规划 JSON",
                 "type": "script",
                 "metricStage": "testing",
-                "scriptLanguage": "python",
-                "script": VALIDATE_PLAN_JSON_SCRIPT,
+                "scriptLanguage": "shell",
+                "script": VALIDATE_PLAN_JSON_SHELL_SCRIPT,
                 "rejectTo": "draft",
                 "onFailure": "reject",
                 "maxAttempts": 1,
@@ -504,6 +634,13 @@ def build_plan_workflow(project_id: str, sandbox_id: str = "local") -> dict[str,
         "edges": [
             {"id": "e1", "source": "draft", "target": "validate", "when": "success"},
         ],
+    }
+
+
+def build_plan_workflows(project_id: str, sandbox_id: str = "local") -> dict[str, dict[str, Any]]:
+    return {
+        role: build_plan_workflow(project_id, sandbox_id=sandbox_id, role=role)
+        for role in ("director", "pm", "qa_lead")
     }
 
 
@@ -559,6 +696,52 @@ async def ensure_builtin_assets(client: LoopForgeClient, project_id: str) -> dic
     return done
 
 
+def _upgrade_legacy_workflow(existing: dict[str, Any]) -> dict[str, Any] | None:
+    """识别并升级旧版未改动的纯 Python 脚本节点（保留用户对其它节点、边或自定义脚本的手工定制）。"""
+    nodes = existing.get("nodes")
+    if not isinstance(nodes, list):
+        return None
+    updated = copy.deepcopy(existing)
+    changed = False
+    for node in updated["nodes"]:
+        if not isinstance(node, dict) or node.get("type") != "script":
+            continue
+        lang = str(node.get("scriptLanguage") or "").strip().lower()
+        script = str(node.get("script") or "").strip()
+        if lang == "python" and node.get("id") == "package" and script == PACKAGE_FILES_SCRIPT.strip():
+            node["scriptLanguage"] = "shell"
+            node["script"] = PACKAGE_FILES_SHELL_SCRIPT
+            changed = True
+        elif lang == "python" and node.get("id") == "validate" and script == VALIDATE_PLAN_JSON_SCRIPT.strip():
+            node["scriptLanguage"] = "shell"
+            node["script"] = VALIDATE_PLAN_JSON_SHELL_SCRIPT
+            changed = True
+    return updated if changed else None
+
+
+async def _sync_workflow_template(
+    client: LoopForgeClient,
+    wf: dict[str, Any],
+    existing_wfs: dict[str, dict[str, Any]],
+) -> bool:
+    """幂等同步单个 SOP：不存在则新建并发布；已存在则仅升级未改动的旧版 Python 脚本节点，保留用户手工定制。"""
+    wid = wf["id"]
+    if wid not in existing_wfs:
+        saved = await client.put_workflow(wf)
+        if saved.get("status") != "published":
+            await client.publish_workflow(wid)
+        return True
+    prev = existing_wfs[wid]
+    upgraded = _upgrade_legacy_workflow(prev)
+    if upgraded is not None:
+        await client.put_workflow(upgraded)
+        await client.publish_workflow(wid)
+        return True
+    if prev.get("status") != "published":
+        await client.publish_workflow(wid)
+    return False
+
+
 async def ensure_vernal_loopforge_assets(
     client: LoopForgeClient,
     project_id: str,
@@ -593,32 +776,25 @@ async def ensure_vernal_loopforge_assets(
         await client.put_agent(agent)
         agent_ids.append(agent["id"])
 
-    # 4. 标准 SOP 与专项泳道（若尚未存在则创建并发布；已存在则复用，尊重用户在 UI 上的微调）
+    # 4. 标准 SOP 与专项泳道（新建并发布；已存在时仅自动升级未改动的旧版 Python 节点，保留用户手工定制）
     existing_wfs = {str(w.get("id")): w for w in await client.list_workflows(project_id)}
     templates = build_lane_workflows(project_id, sandbox_id=sandbox_id)
     workflow_ids: dict[str, str] = {}
     lane_workflows: dict[str, str] = {}
     for (mode_key, lane), wf in templates.items():
         wid = wf["id"]
-        if wid not in existing_wfs:
-            saved = await client.put_workflow(wf)
-            if saved.get("status") != "published":
-                await client.publish_workflow(wid)
-        elif existing_wfs[wid].get("status") != "published":
-            await client.publish_workflow(wid)
+        await _sync_workflow_template(client, wf, existing_wfs)
         lane_workflows[f"{mode_key}:{lane}"] = wid
         if lane == "backend":
             workflow_ids[mode_key] = wid
 
-    # 4b. 顶层规划与圆桌 SOP（始终确保存在并已发布）
-    plan_wf = build_plan_workflow(project_id, sandbox_id=sandbox_id)
-    plan_wf_id = plan_wf["id"]
-    if plan_wf_id not in existing_wfs:
-        saved_plan = await client.put_workflow(plan_wf)
-        if saved_plan.get("status") != "published":
-            await client.publish_workflow(plan_wf_id)
-    elif existing_wfs[plan_wf_id].get("status") != "published":
-        await client.publish_workflow(plan_wf_id)
+    # 4b. 顶层规划与圆桌按角色分流 SOP（director / pm / qa_lead，确保多角色异构模型真实生效）
+    plan_workflows: dict[str, str] = {}
+    for prole, pwf in build_plan_workflows(project_id, sandbox_id=sandbox_id).items():
+        pwid = pwf["id"]
+        await _sync_workflow_template(client, pwf, existing_wfs)
+        plan_workflows[prole] = pwid
+    plan_wf_id = plan_workflows["director"]
 
     preferred_mode = "files" if settings.collaboration_mode == "files" else "git"
     selected_wf = workflow_ids[preferred_mode]
@@ -645,6 +821,7 @@ async def ensure_vernal_loopforge_assets(
         "workflow_ids": workflow_ids,
         "lane_workflows": lane_workflows,
         "plan_workflow_id": plan_wf_id,
+        "plan_workflows": plan_workflows,
         "builtin_skills": builtin["skills"],
         "builtin_mcp": builtin["mcp"],
         "selected_workflow_id": settings.loopforge_workflow_id,

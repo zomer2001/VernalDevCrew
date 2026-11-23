@@ -1,4 +1,4 @@
-import {api, toast} from "./js/api.js";
+import {api, setActiveProjectId, toast} from "./js/api.js";
 
 const titles = {overview:"架构总控", council:"架构圆桌", squads:"研发组与蓝图", runtime:"底座与收件箱"};
 const compactTitles = {overview:"总控", council:"圆桌", squads:"蓝图"};
@@ -122,8 +122,24 @@ async function mount(rail, nav, main) {
 
   document.addEventListener("vernal-jump-native", (e) => {
     const targetView = e.detail?.view || "issues";
+    const runId = e.detail?.runId || "";
+    const issueId = e.detail?.issueId || "";
     document.body.classList.remove("vernal-mode");
     nav.querySelectorAll(".vernal-nav.active").forEach((el) => el.classList.remove("active"));
+    if (runId) {
+      if (typeof window.openRunFromId === "function") {
+        window.openRunFromId(runId, {forceRuns: true});
+        return;
+      }
+      location.hash = `#/runs/${encodeURIComponent(runId)}`;
+      return;
+    }
+    if (issueId && typeof window.openIssueDrawer === "function") {
+      const nativeBtn = document.querySelector(`.nav[data-view="issues"]`);
+      if (nativeBtn) nativeBtn.click();
+      window.openIssueDrawer(issueId);
+      return;
+    }
     const nativeBtn = document.querySelector(`.nav[data-view="${targetView}"]`);
     if (nativeBtn) nativeBtn.click();
   });
@@ -146,14 +162,15 @@ async function mount(rail, nav, main) {
   const switcher = document.getElementById("projectSwitcher");
   async function syncSelectedProject(projectId, projectName, notify = false) {
     if (!projectId) return;
+    setActiveProjectId(projectId);
     try {
       const res = await api("/vernal-api/project/select", {
         method: "POST",
         body: JSON.stringify({project_id: projectId, project_name: projectName || projectId}),
       });
-      if (res.switched && reloadProjectContext) {
+      if (reloadProjectContext) {
         await reloadProjectContext();
-        if (notify) toast(`已同步切换至项目「${projectName || projectId}」工作区`);
+        if (notify && res.switched) toast(`已同步切换至项目「${projectName || projectId}」工作区`);
       }
     } catch (err) {
       if (notify) toast(err.message);
@@ -169,23 +186,38 @@ async function mount(rail, nav, main) {
 
   let bound = false;
   async function bind(silent) {
+    let needInitProject = false;
     try {
       const status = await api("/vernal-api/runtime/status");
+      needInitProject = status.workspace_initialized === false;
       bound = Boolean(status.loopforge.authenticated && status.loopforge.project_id && status.loopforge.workflow_id);
       if (status.loopforge.reachable && !bound) {
         const result = await api("/vernal-api/runtime/bind", {method: "POST"});
         bound = Boolean(result.bound);
-        if (bound && reloadProjectContext) await reloadProjectContext();
+        if (bound && reloadProjectContext && !needInitProject) await reloadProjectContext();
       }
     } catch (err) {
       if (!silent) toast(err.message);
     }
-    dot.classList.toggle("warn", !bound);
-    pillText.textContent = bound ? "Vernal 架构中枢 · 已连接" : "点击绑定登录态";
     if (bound && switcher?.value) {
       const opt = switcher.selectedOptions?.[0];
       await syncSelectedProject(switcher.value, opt?.textContent?.trim() || switcher.value, false);
     }
+    dot.classList.toggle("warn", !bound);
+    pillText.textContent = bound ? "Vernal 架构中枢 · 已连接" : "点击绑定登录态";
+  }
+
+  // 若 LoopForge 顶栏 #projectSwitcher 在 bind 之后异步填充完首个项目，自动补同步一次
+  if (switcher) {
+    let lastSyncedId = switcher.value || "";
+    const swObs = new MutationObserver(() => {
+      if (bound && switcher.value && switcher.value !== lastSyncedId) {
+        lastSyncedId = switcher.value;
+        const opt = switcher.selectedOptions?.[0];
+        syncSelectedProject(switcher.value, opt?.textContent?.trim() || switcher.value, false);
+      }
+    });
+    swObs.observe(switcher, {childList: true, subtree: true, attributes: true});
   }
 
   pill.addEventListener("click", () => (bound ? activate("overview") : bind(false)));

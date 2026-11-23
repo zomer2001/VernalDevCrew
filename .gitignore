@@ -15,4 +15,5 @@ deploy/loopforge/.env
 deploy/loopforge/.data/
 deploy/loopforge/.runner/
 deploy/loopforge/bin/
+deploy/loopforge/.vernal-build.stamp
 *.log

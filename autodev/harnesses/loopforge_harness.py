@@ -12,16 +12,20 @@ import time
 from pathlib import Path
 from typing import Any
 
+from urllib.parse import quote, urlencode
+
 from autodev.artifacts import FileExchange
 from autodev.config import Settings, Workspace
 from autodev.db import Database
 from autodev.harnesses.base import ActivityCallback, AgentResult, Harness, Usage, extract_json
 from autodev.loopforge.bootstrap import ensure_vernal_loopforge_assets, plan_workflow_id
 from autodev.loopforge.bridge import (
+    build_restore_command,
     check_runners_online,
     extract_run_text,
     extract_run_usage,
     poll_loopforge_run,
+    sign_context_sig,
 )
 from autodev.loopforge.client import LoopForgeClient, LoopForgeError
 
@@ -128,7 +132,7 @@ class LoopForgeHarness(Harness):
     def _client(self) -> LoopForgeClient:
         return LoopForgeClient(self.settings.loopforge_url, self.settings.effective_loopforge_token())
 
-    async def _ensure_ready(self, client: LoopForgeClient) -> tuple[str, str]:
+    async def _ensure_ready(self, client: LoopForgeClient, role: str = "director") -> tuple[str, str]:
         async with self._assets_lock:
             pid = self.settings.loopforge_project_id.strip()
             if not pid:
@@ -147,7 +151,7 @@ class LoopForgeHarness(Harness):
             if not self._assets_ready:
                 await ensure_vernal_loopforge_assets(client, pid, self.settings)
                 self._assets_ready = True
-            return pid, plan_workflow_id(pid)
+            return pid, plan_workflow_id(pid, role)
 
     def _build_issue_description(
         self,
@@ -187,12 +191,23 @@ class LoopForgeHarness(Harness):
             return inline_candidate
 
         public_url = (self.settings.vernal_public_url or "http://127.0.0.1:8787").rstrip("/")
-        api_url = f"{public_url}/vernal-api/plan-context/{stage_key}.json"
-        restore_cmd = (
-            "python3 -c 'import json,pathlib,urllib.request; "
-            f"p=pathlib.Path({str(bundle_path)!r}); "
-            f"d=json.loads(p.read_text(\"utf-8\")) if p.is_file() else json.loads(urllib.request.urlopen({api_url!r}).read().decode(\"utf-8\")); "
-            "[((f:=pathlib.Path(k)).parent.mkdir(parents=True,exist_ok=True), f.write_text(v,\"utf-8\")) for k,v in d.get(\"files\",{}).items()]'"
+        q_params: dict[str, str] = {}
+        if self.settings.loopforge_project_id:
+            q_params["project"] = self.settings.loopforge_project_id
+        sig = sign_context_sig(
+            self.settings.effective_loopforge_token(),
+            self.settings.loopforge_project_id,
+            f"plan:{stage_key}",
+        )
+        if sig:
+            q_params["sig"] = sig
+        qs = f"?{urlencode(q_params)}" if q_params else ""
+        api_url = f"{public_url}/vernal-api/plan-context/{quote(stage_key, safe='')}.json{qs}"
+        restore_cmd = build_restore_command(
+            str(bundle_path),
+            api_url,
+            nested_key="files",
+            save_baseline=False,
         )
         file_list = ", ".join(f"`{k}`" for k in sorted(ctx_files)[:20]) or "（完整提示词与 Schema）"
         return (
@@ -236,7 +251,7 @@ class LoopForgeHarness(Harness):
             )
 
         try:
-            pid, wf_id = await self._ensure_ready(client)
+            pid, wf_id = await self._ensure_ready(client, role)
         except LoopForgeError as exc:
             return AgentResult(
                 False,
@@ -313,11 +328,29 @@ class LoopForgeHarness(Harness):
                 duration_sec=time.monotonic() - started,
             )
 
+        actual_executor = self.settings.harness_for(role)
+        actual_model = self.settings.model_for(role) or "default"
         (log_dir / "loopforge_run.json").write_text(
-            json.dumps({"project_id": pid, "workflow_id": wf_id, "issue_id": issue_id, "run_id": run_id}, ensure_ascii=False, indent=2),
+            json.dumps(
+                {
+                    "project_id": pid,
+                    "role": role,
+                    "executor": actual_executor,
+                    "model": actual_model,
+                    "workflow_id": wf_id,
+                    "issue_id": issue_id,
+                    "run_id": run_id,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
             "utf-8",
         )
-        self._activity("command", f"已派发到 LoopForge 规划 SOP（Issue {issue_id} / Run {run_id[:12]}）", None)
+        self._activity(
+            "command",
+            f"已派发到 LoopForge 规划 SOP（{role} · {actual_executor}/{actual_model} · Issue {issue_id} / Run {run_id[:12]}）",
+            None,
+        )
 
         def _on_progress(_st: str, summary: str, _run: dict[str, Any]) -> None:
             self._activity("message", f"[{stage_key}] {summary}", None)
