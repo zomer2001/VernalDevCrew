@@ -4,13 +4,145 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any
 
 from autodev.config import Settings
 from autodev.db import Database, Task
+from autodev.harnesses.base import Usage
 from autodev.loopforge.bootstrap import classify_lane, ensure_vernal_loopforge_assets, lane_workflow_id
 from autodev.loopforge.client import LoopForgeClient, LoopForgeError
 from autodev.models import TaskStatus
+
+
+async def check_runners_online(client: LoopForgeClient) -> str | None:
+    """派单前预检：若已注册个人执行机但全部离线，返回明确提示；正常或未绑定个人机返回 None。"""
+    try:
+        runners = await client.list_runners()
+    except LoopForgeError:
+        return None
+    if runners and not any(isinstance(r, dict) and r.get("status") == "online" for r in runners):
+        names = ", ".join(str(r.get("name") or r.get("id")) for r in runners if isinstance(r, dict))
+        return f"执行器当前离线（{names}），已暂停派单避免产生无效失败记录"
+    return None
+
+
+def extract_run_usage(run: dict[str, Any]) -> Usage:
+    """从 LoopForge Run 及各节点遥测字段中聚合 Token 用量。"""
+    usage = Usage()
+    sources: list[dict[str, Any]] = []
+    if isinstance(run.get("usage"), dict):
+        sources.append(run["usage"])
+    for node in (run.get("nodes") or {}).values():
+        if isinstance(node, dict) and isinstance(node.get("usage"), dict):
+            sources.append(node["usage"])
+    for u in sources:
+        usage.input_tokens += int(u.get("inputTokens") or u.get("input_tokens") or 0)
+        usage.cached_tokens += int(u.get("cacheReadTokens") or u.get("cachedTokens") or u.get("cached_tokens") or 0)
+        usage.output_tokens += int(u.get("outputTokens") or u.get("output_tokens") or 0)
+        usage.reasoning_tokens += int(u.get("reasoningTokens") or u.get("reasoning_tokens") or 0)
+    return usage
+
+
+def extract_run_text(run: dict[str, Any]) -> str:
+    """提取 Run 节点输出文本，作为产物缺失时的 JSON 解析兜底。"""
+    parts: list[str] = []
+    for node in (run.get("nodes") or {}).values():
+        if not isinstance(node, dict):
+            continue
+        for key in ("output", "summary", "text", "result"):
+            val = node.get(key)
+            if isinstance(val, str) and val.strip():
+                parts.append(val.strip())
+    if isinstance(run.get("output"), str) and run["output"].strip():
+        parts.append(run["output"].strip())
+    return "\n\n".join(parts)
+
+
+async def poll_loopforge_run(
+    client: LoopForgeClient,
+    run_id: str,
+    *,
+    stop_event: asyncio.Event | None = None,
+    poll_interval: float = 2.5,
+    timeout_sec: float | None = None,
+    on_progress: Callable[[str, str, dict[str, Any]], None] | None = None,
+    on_auto_passed: Callable[[str, str], None] | None = None,
+) -> tuple[bool, dict[str, Any], str]:
+    """统一轮询 LoopForge Run 直到终态，自动放行已完成 CLI 节点的 submit_gate_result 卡点。"""
+    loop = asyncio.get_running_loop()
+    deadline = (loop.time() + timeout_sec) if timeout_sec else None
+    last_summary = ""
+    auto_passed_keys: set[tuple[str, Any, Any]] = set()
+    latest_run: dict[str, Any] = {}
+
+    while stop_event is None or not stop_event.is_set():
+        if deadline is not None and loop.time() >= deadline:
+            return False, latest_run, f"LoopForge Run {run_id} 执行超时 ({int(timeout_sec or 0)}s)"
+        try:
+            run = await client.get_run(run_id)
+        except LoopForgeError as exc:
+            return False, latest_run, f"查询 LoopForge Run {run_id} 失败：{exc}"
+        latest_run = run
+        st = str(run.get("status") or "")
+        nodes = run.get("nodes") or {}
+        wf_nodes = {
+            str(n.get("id")): n
+            for n in ((run.get("workflowSnapshot") or {}).get("nodes") or [])
+            if isinstance(n, dict) and n.get("id")
+        }
+        active_nodes = [
+            f"{nid}:{nr.get('status')}"
+            for nid, nr in nodes.items()
+            if isinstance(nr, dict) and nr.get("status") in ("running", "waiting", "waiting_approval")
+        ]
+
+        # 非人工审批节点仅因 CLI 未回调 submit_gate_result 挂起时自动放行，交由后续确定性脚本/审查把关
+        if st == "waiting":
+            did_auto_pass = False
+            for nid, nr in nodes.items():
+                if not isinstance(nr, dict) or nr.get("status") not in ("waiting", "waiting_approval"):
+                    continue
+                ntype = str((wf_nodes.get(nid) or {}).get("type") or "")
+                nerr = str(nr.get("error") or "")
+                key = (nid, nr.get("attempt"), nr.get("reworkCount"))
+                if ntype != "approval" and "submit_gate_result" in nerr and key not in auto_passed_keys:
+                    auto_passed_keys.add(key)
+                    try:
+                        await client.approve_run(
+                            run_id,
+                            comment="Vernal 自动放行已完成 CLI 回合（submit_gate_result 兜底）",
+                            node_id=nid,
+                        )
+                        if on_auto_passed:
+                            on_auto_passed(nid, "")
+                        did_auto_pass = True
+                    except LoopForgeError as exc:
+                        if on_auto_passed:
+                            on_auto_passed(nid, str(exc))
+            if did_auto_pass:
+                await asyncio.sleep(min(1.0, poll_interval))
+                continue
+
+        summary = f"LoopForge [{st}] " + (", ".join(active_nodes) or "处理中")
+        if summary != last_summary:
+            last_summary = summary
+            if on_progress:
+                on_progress(st, summary, run)
+
+        if st == "succeeded":
+            return True, run, f"LoopForge Run {run_id} 已成功交付"
+        if st in ("failed", "cancelled"):
+            node_errs = [
+                f"{nid}: {nr.get('error')}"
+                for nid, nr in nodes.items()
+                if isinstance(nr, dict) and nr.get("error")
+            ]
+            err = str(run.get("error") or ("; ".join(node_errs)) or f"LoopForge Run {run_id} 结束于 {st}")
+            return False, run, err
+        await asyncio.sleep(poll_interval)
+
+    return False, latest_run, "调度器收到停止信号，已暂停对账（LoopForge 远端任务仍保留现场）"
 
 
 def format_issue_description(task: Task, squad_name: str, contract_hint: str = "") -> str:
@@ -124,13 +256,9 @@ class LoopForgeBridge:
 
         # 派单前预检：若已绑定个人执行机但全部处于 offline，直接中止派单避免连刷失败记录
         if not task.loopforge_run_id:
-            try:
-                runners = await self.client.list_runners()
-                if runners and not any(isinstance(r, dict) and r.get("status") == "online" for r in runners):
-                    names = ", ".join(str(r.get("name") or r.get("id")) for r in runners if isinstance(r, dict))
-                    return False, f"执行器当前离线（{names}），已暂停派单避免产生无效失败记录"
-            except LoopForgeError:
-                pass
+            offline_err = await check_runners_online(self.client)
+            if offline_err:
+                return False, offline_err
 
         trimmed_ctx = context
         if len(trimmed_ctx.encode("utf-8")) > 16_000:
@@ -195,6 +323,10 @@ class LoopForgeBridge:
         elif not task.loopforge_run_id:
             is_rerun = True
             try:
+                await self.client.reopen_issue(issue_id)
+            except LoopForgeError:
+                pass
+            try:
                 await self.client.update_issue(
                     issue_id=issue_id,
                     project_id=self.settings.loopforge_project_id,
@@ -223,89 +355,45 @@ class LoopForgeBridge:
         )
 
         # 以 LoopForge 为单任务执行真相源，每 2.5 秒幂等对账
-        last_summary = ""
-        auto_passed_keys: set[tuple[str, Any, Any]] = set()
-        while not stop_event.is_set():
-            try:
-                run = await self.client.get_run(run_id)
-            except LoopForgeError as exc:
-                return False, f"查询 LoopForge Run {run_id} 失败：{exc}"
-            st = str(run.get("status") or "")
-            nodes = run.get("nodes") or {}
-            wf_nodes = {
-                str(n.get("id")): n
-                for n in ((run.get("workflowSnapshot") or {}).get("nodes") or [])
-                if isinstance(n, dict) and n.get("id")
-            }
-            active_nodes = [
-                f"{nid}:{nr.get('status')}"
-                for nid, nr in nodes.items()
-                if isinstance(nr, dict) and nr.get("status") in ("running", "waiting", "waiting_approval")
-            ]
-
-            # 若非人工审批节点仅因 CLI 未回调 submit_gate_result 而挂起，自动放行交由确定性门禁与审查把关
+        def _on_progress(st: str, summary: str, _run: dict[str, Any]) -> None:
+            self.db.update_slot(slot_id, current_action=summary[:200])
+            self.db.add_event(
+                "loopforge.progress",
+                summary,
+                task_id=task.task_id,
+                actor="VernalBridge",
+            )
             if st == "waiting":
-                did_auto_pass = False
-                for nid, nr in nodes.items():
-                    if not isinstance(nr, dict) or nr.get("status") not in ("waiting", "waiting_approval"):
-                        continue
-                    ntype = str((wf_nodes.get(nid) or {}).get("type") or "")
-                    nerr = str(nr.get("error") or "")
-                    key = (nid, nr.get("attempt"), nr.get("reworkCount"))
-                    if ntype != "approval" and "submit_gate_result" in nerr and key not in auto_passed_keys:
-                        auto_passed_keys.add(key)
-                        try:
-                            await self.client.approve_run(
-                                run_id,
-                                comment="Vernal 自动放行已完成 CLI 回合（submit_gate_result 兜底）",
-                                node_id=nid,
-                            )
-                            self.db.add_event(
-                                "loopforge.auto_passed",
-                                f"节点 {nid} 执行完毕，已自动放行 submit_gate_result 卡点（Run {run_id[:12]}）",
-                                task_id=task.task_id,
-                                actor="VernalBridge",
-                            )
-                            did_auto_pass = True
-                        except LoopForgeError as exc:
-                            self.db.add_event(
-                                "loopforge.auto_pass_warning",
-                                f"自动放行节点 {nid} 失败：{exc}",
-                                task_id=task.task_id,
-                                actor="VernalBridge",
-                            )
-                if did_auto_pass:
-                    await asyncio.sleep(1.0)
-                    continue
-
-            summary = f"LoopForge [{st}] " + (", ".join(active_nodes) or "处理中")
-            if summary != last_summary:
-                last_summary = summary
-                self.db.update_slot(slot_id, current_action=summary[:200])
+                self.db.update_task(task.task_id, status=TaskStatus.REVIEWING)
                 self.db.add_event(
-                    "loopforge.progress",
-                    summary,
+                    "loopforge.waiting_gate",
+                    f"LoopForge Run {run_id} 正在等待人工审批门禁（可在左侧「待我确认」直接审批）",
                     task_id=task.task_id,
                     actor="VernalBridge",
                 )
-                if st == "waiting":
-                    self.db.update_task(task.task_id, status=TaskStatus.REVIEWING)
-                    self.db.add_event(
-                        "loopforge.waiting_gate",
-                        f"LoopForge Run {run_id} 正在等待人工审批门禁（可在左侧「待我确认」直接审批）",
-                        task_id=task.task_id,
-                        actor="VernalBridge",
-                    )
-            if st == "succeeded":
-                return True, f"LoopForge Run {run_id} 已成功交付"
-            if st in ("failed", "cancelled"):
-                node_errs = [
-                    f"{nid}: {nr.get('error')}"
-                    for nid, nr in nodes.items()
-                    if isinstance(nr, dict) and nr.get("error")
-                ]
-                err = str(run.get("error") or ("; ".join(node_errs)) or f"LoopForge Run {run_id} 结束于 {st}")
-                return False, err
-            await asyncio.sleep(2.5)
 
-        return False, "调度器收到停止信号，已暂停对账（LoopForge 远端任务仍保留现场）"
+        def _on_auto_passed(nid: str, err: str) -> None:
+            if err:
+                self.db.add_event(
+                    "loopforge.auto_pass_warning",
+                    f"自动放行节点 {nid} 失败：{err}",
+                    task_id=task.task_id,
+                    actor="VernalBridge",
+                )
+            else:
+                self.db.add_event(
+                    "loopforge.auto_passed",
+                    f"节点 {nid} 执行完毕，已自动放行 submit_gate_result 卡点（Run {run_id[:12]}）",
+                    task_id=task.task_id,
+                    actor="VernalBridge",
+                )
+
+        ok, _run, msg = await poll_loopforge_run(
+            self.client,
+            run_id,
+            stop_event=stop_event,
+            poll_interval=2.5,
+            on_progress=_on_progress,
+            on_auto_passed=_on_auto_passed,
+        )
+        return ok, msg

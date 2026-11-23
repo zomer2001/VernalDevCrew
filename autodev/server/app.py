@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -434,15 +434,27 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
             steps = parse_events_jsonl(lp / "events.jsonl") if (lp and lp.is_dir()) else []
             return {"run": selected, "steps": steps}
 
-        # 远端 LoopForge SOP 运行实况转换
-        if task is not None and task.loopforge_run_id and engine.settings.effective_loopforge_token():
+        # 远端 LoopForge SOP 运行实况转换（同时支持编码任务与圆桌/规划任务）
+        lf_run_id = task.loopforge_run_id if task is not None else ""
+        if not lf_run_id and runs:
+            latest_r = runs[-1]
+            lp = _resolve_log_path(task_id, latest_r)
+            if lp and lp.is_dir() and (lp / "loopforge_run.json").is_file():
+                try:
+                    lf_run_id = str(json.loads((lp / "loopforge_run.json").read_text("utf-8")).get("run_id") or "")
+                except Exception:
+                    lf_run_id = ""
+            if not lf_run_id and latest_r.get("session_id"):
+                lf_run_id = str(latest_r["session_id"])
+
+        if lf_run_id and engine.settings.effective_loopforge_token():
             steps: list[dict[str, Any]] = []
             try:
-                lf_run = await _lf_client().get_run(task.loopforge_run_id)
+                lf_run = await _lf_client().get_run(lf_run_id)
                 steps.append(
                     {
                         "kind": "turn",
-                        "summary": f"LoopForge SOP Run {task.loopforge_run_id} · 状态 {lf_run.get('status', '-')}",
+                        "summary": f"LoopForge SOP Run {lf_run_id} · 状态 {lf_run.get('status', '-')}",
                     }
                 )
                 for nid, nstate in (lf_run.get("nodes") or {}).items():
@@ -458,7 +470,7 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
                             "output": str(nstate.get("output") or nstate.get("error") or ""),
                         }
                     )
-                logs = await _lf_client().get_run_logs(task.loopforge_run_id)
+                logs = await _lf_client().get_run_logs(lf_run_id)
                 log_items = logs.get("logs") if isinstance(logs, dict) and isinstance(logs.get("logs"), list) else logs
                 if isinstance(log_items, list) and log_items:
                     tail = "\n".join(
@@ -475,10 +487,10 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
             return {
                 "run": {
                     "run_id": 0,
-                    "attempt_no": max(1, task.retry_count + 1),
+                    "attempt_no": max(1, (task.retry_count if task is not None else 0) + 1),
                     "stage": "LOOPFORGE_SOP",
-                    "verdict": task.status.value,
-                    "loopforge_run_id": task.loopforge_run_id,
+                    "verdict": task.status.value if task is not None else "LOOPFORGE",
+                    "loopforge_run_id": lf_run_id,
                 },
                 "steps": steps,
             }
@@ -490,6 +502,18 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
         if task is None:
             raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
         return FileExchange(engine.ws, engine.db).baseline(task.depends_on)
+
+    @app.get("/vernal-api/plan-context/{stage_key}.json")
+    def api_plan_context(stage_key: str) -> dict[str, Any]:
+        if not re.fullmatch(r"[0-9A-Za-z._\-]{1,64}", stage_key):
+            raise HTTPException(status_code=400, detail="非法的规划上下文标识")
+        p = engine.ws.state_dir / "baselines" / f"plan-{stage_key}.json"
+        if not p.is_file():
+            raise HTTPException(status_code=404, detail=f"规划上下文不存在: {stage_key}")
+        try:
+            return json.loads(p.read_text("utf-8"))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"读取规划上下文失败: {exc}") from exc
 
     @app.get("/vernal-api/tasks/{task_id}/diff")
     async def api_task_diff(task_id: str) -> dict[str, Any]:
@@ -780,6 +804,7 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
             except LoopForgeError:
                 pass
         _persist_runtime_config()
+        engine.reset_harness()
         engine.db.add_event(
             "runtime.configured",
             f"运行底座配置已更新（backend={engine.settings.runtime_backend}, workflow={engine.settings.loopforge_workflow_id or '-'}）",
@@ -810,6 +835,7 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
                 await client.list_projects()
                 assets = await LoopForgeBridge(engine.settings, engine.db).ensure_project_and_assets()
                 engine.settings.runtime_backend = "loopforge"
+                engine.reset_harness()
                 _persist_runtime_config()
                 return {
                     "bound": True,
@@ -835,6 +861,7 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
             _persist_runtime_config()
             raise HTTPException(502, f"登录态已保存，项目或标准 SOP 装配失败：{exc}") from exc
         _persist_runtime_config()
+        engine.reset_harness()
         engine.db.add_event(
             "runtime.bound",
             f"已复用登录态（{login}）绑定项目 {assets['project_id']} 并自动装配 SOP {assets['selected_workflow_id']}",
@@ -847,6 +874,35 @@ def create_app(engine: Engine, proxy_transport: httpx.AsyncBaseTransport | None 
             "project_id": assets["project_id"],
             "workflow_id": assets["selected_workflow_id"],
         }
+
+    @app.post("/vernal-api/runner/bind-code")
+    async def api_runner_bind_code(format: str = "json") -> Response:
+        """为本机零 Python 启动脚本签发一次性 LoopForge Runner 绑定码。"""
+        token = engine.settings.effective_loopforge_token()
+        if not token:
+            parent = engine.ws.root.resolve().parent
+            if parent.is_dir():
+                for cfg in sorted(parent.glob("*/.autodev/config.toml")):
+                    try:
+                        cand = Settings.load(cfg).effective_loopforge_token()
+                        if cand:
+                            token = cand
+                            break
+                    except Exception:
+                        continue
+        if not token:
+            raise HTTPException(status_code=401, detail="尚未绑定 LoopForge 登录态，请先在浏览器登录 http://127.0.0.1:8787")
+        client = LoopForgeClient(engine.settings.loopforge_url, token)
+        try:
+            res = await client.create_runner_bind_code()
+        except LoopForgeError as exc:
+            raise HTTPException(status_code=exc.status_code or 502, detail=str(exc)) from exc
+        code = str(res.get("code") or "")
+        if not code:
+            raise HTTPException(status_code=502, detail="LoopForge 未返回绑定码")
+        if format == "raw":
+            return Response(content=code, media_type="text/plain")
+        return JSONResponse({"code": code})
 
     @app.post("/vernal-api/project/select")
     async def api_select_project(req: ProjectSelectRequest) -> dict[str, Any]:

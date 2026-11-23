@@ -130,7 +130,14 @@ class Engine:
     @property
     def harness(self) -> Harness:
         if self._harness is None:
-            self._harness = create_harness(self.settings, activity_cb=self._on_activity)
+            if self.settings.runtime_backend == "loopforge" and self.settings.effective_loopforge_token():
+                from autodev.harnesses.loopforge_harness import LoopForgeHarness
+
+                self._harness = LoopForgeHarness(
+                    self.settings, self.db, self.ws, activity_cb=self._on_activity
+                )
+            else:
+                self._harness = create_harness(self.settings, activity_cb=self._on_activity)
         return self._harness
 
     def reset_harness(self) -> None:

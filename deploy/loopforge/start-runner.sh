@@ -5,9 +5,11 @@ FOREGROUND=0
 [[ "${1:-}" == "--foreground" ]] && FOREGROUND=1
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$DIR/../.." && pwd)"
 BIN_DIR="$DIR/bin"
 RUNNER_DIR="$DIR/.runner"
+VERNAL_URL="${VERNAL_URL:-http://127.0.0.1:${VERNAL_PORT:-8787}}"
+LOOPFORGE_URL="${LOOPFORGE_URL:-http://127.0.0.1:8090}"
+RUNNER_CONCURRENCY="${VERNAL_RUNNER_CONCURRENCY:-3}"
 mkdir -p "$BIN_DIR" "$RUNNER_DIR/workspaces"
 
 if [[ -x "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex" && ! -e "$BIN_DIR/codex" ]]; then
@@ -47,13 +49,13 @@ ARCH="$(uname -m)"
 [[ "$ARCH" == "x86_64" ]] && ARCH="amd64"
 
 if [[ ! -x "$BIN_DIR/agentflow-runner" ]]; then
-  curl -fsSL "http://127.0.0.1:8090/runners/agentflow-runner?os=${OS}&arch=${ARCH}" -o "$BIN_DIR/agentflow-runner"
+  curl -fsSL "${LOOPFORGE_URL}/runners/agentflow-runner?os=${OS}&arch=${ARCH}" -o "$BIN_DIR/agentflow-runner"
   chmod +x "$BIN_DIR/agentflow-runner"
 fi
 
 GATE_BIN="$BIN_DIR/agentflow-gate-mcp-${OS}-${ARCH}"
 if [[ ! -x "$GATE_BIN" ]]; then
-  curl -fsSL "http://127.0.0.1:8090/runners/agentflow-gate-mcp?os=${OS}&arch=${ARCH}" -o "$GATE_BIN"
+  curl -fsSL "${LOOPFORGE_URL}/runners/agentflow-gate-mcp?os=${OS}&arch=${ARCH}" -o "$GATE_BIN"
   chmod +x "$GATE_BIN"
 fi
 
@@ -64,29 +66,20 @@ fi
 
 BOOTSTRAP_TOKEN="session-reused"
 if [[ ! -s "$RUNNER_DIR/state.json" ]]; then
-  TOKEN="${AGENTFLOW_TOKEN:-}"
-  if [[ -z "$TOKEN" ]]; then
-    TOKEN="$("$ROOT/.venv/bin/python" -c '
-from pathlib import Path
-from autodev.config import Settings
-for p in sorted((Path("workspaces")).glob("*/.autodev/config.toml")):
-    s = Settings.load(p)
-    if s.effective_loopforge_token():
-        print(s.effective_loopforge_token())
-        break
-' 2>/dev/null || true)"
+  BOOTSTRAP_TOKEN="$(curl -fsS -m 5 -X POST "${VERNAL_URL}/vernal-api/runner/bind-code?format=raw" 2>/dev/null || true)"
+  if [[ -z "$BOOTSTRAP_TOKEN" && -n "${AGENTFLOW_TOKEN:-}" ]]; then
+    RAW_JSON="$(curl -fsS -m 5 -X POST "${LOOPFORGE_URL}/api/runners/bind-codes" \
+      -H "Authorization: Bearer ${AGENTFLOW_TOKEN}" \
+      -H "Origin: ${LOOPFORGE_URL}" \
+      -H "Content-Type: application/json" \
+      -d '{}' 2>/dev/null || true)"
+    BOOTSTRAP_TOKEN="$(printf '%s' "$RAW_JSON" | sed -n 's/.*"code"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
   fi
 
-  if [[ -z "$TOKEN" ]]; then
-    echo "==> 尚未检测到登录 Token，请在登录 http://127.0.0.1:8787 后再次执行 $0 自动挂载本机执行器"
+  if [[ -z "$BOOTSTRAP_TOKEN" ]]; then
+    echo "==> 尚未完成首次登录绑定：请先打开 ${VERNAL_URL} 注册/登录账号，然后重新运行 ./vernal.sh 自动挂载本机执行器"
     exit 0
   fi
-
-  BOOTSTRAP_TOKEN="$(curl -fsS -X POST "http://127.0.0.1:8090/api/runners/bind-codes" \
-    -H "Authorization: Bearer ${TOKEN}" \
-    -H "Origin: http://127.0.0.1:8090" \
-    -H "Content-Type: application/json" \
-    -d '{}' | "$ROOT/.venv/bin/python" -c 'import json,sys; print(json.load(sys.stdin).get("code",""))')"
 fi
 
 export AGENTFLOW_GATE_MCP_BINARY="$GATE_BIN"
@@ -94,12 +87,12 @@ HOST_SHORT="$(hostname -s 2>/dev/null || echo Local)"
 
 CMD=(
   "$BIN_DIR/agentflow-runner"
-  -server "http://127.0.0.1:8090"
+  -server "$LOOPFORGE_URL"
   -token "$BOOTSTRAP_TOKEN"
   -state "$RUNNER_DIR/state.json"
   -workspace "$RUNNER_DIR/workspaces"
   -name "Vernal-${HOST_SHORT}-Runner"
-  -concurrency 2
+  -concurrency "$RUNNER_CONCURRENCY"
   -auto-update=false
 )
 
@@ -108,4 +101,4 @@ if [[ "$FOREGROUND" == "1" ]]; then
 fi
 
 nohup "${CMD[@]}" >"$RUNNER_DIR/runner.log" 2>&1 &
-echo "==> 已拉起本机多引擎执行器 Vernal-${HOST_SHORT}-Runner (PID $!，日志: $RUNNER_DIR/runner.log)"
+echo "==> 已拉起本机多引擎执行器 Vernal-${HOST_SHORT}-Runner (PID $!，并发 ${RUNNER_CONCURRENCY}，日志: $RUNNER_DIR/runner.log)"

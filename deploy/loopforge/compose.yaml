@@ -83,6 +83,7 @@ services:
     environment:
       VERNAL_LOOPFORGE_URL: http://loopforge:8080
       VERNAL_GITEA_URL: http://gitea:3000
+      VERNAL_PUBLIC_URL: ${VERNAL_PUBLIC_URL:-http://127.0.0.1:8787}
     ports:
       - "${VERNAL_BIND:-0.0.0.0}:${VERNAL_PORT:-8787}:8787"
     volumes:

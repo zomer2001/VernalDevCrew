@@ -6,8 +6,8 @@
 
 ## 一、每次如何启动与停止平台
 
-### 1. 日常一键启动（单机使用）
-打开系统自带「终端（Terminal）」，进入项目目录执行一行命令即可：
+### 1. 日常一键启动（免装 Python，纯容器 + 本机 Runner）
+打开系统自带「终端（Terminal）」，进入项目目录执行一行命令即可（**宿主机只需要 Docker 和你自己的 Harness，不再需要安装 Python**）：
 
 ```bash
 cd /Users/zomeryang/Documents/春天/个人科研/lattice-mesh
@@ -16,8 +16,10 @@ cd /Users/zomeryang/Documents/春天/个人科研/lattice-mesh
 
 这条脚本会自动帮你做完三件事：
 1. 检查并启动底层 Docker 容器栈（`LoopForge` + `MySQL` + `Gitea`）；
-2. 自动拉起本机 Mac 的 Codex 执行器守护进程（`agentflow-runner`）；
-3. 启动统一 Web 网关服务。
+2. 通过 Docker 启动容器版 `Vernal` 统一平台（首次会自动构建镜像，之后秒启；若修改了源码想重编可加 `./vernal.sh --build`，本地 Python 调试可加 `./vernal.sh --dev`）；
+3. 自动拉起本机多引擎执行器（`agentflow-runner`，并发 3），同时承接圆桌规划与代码开发任务。
+
+> **首次全新安装小提示**：第一次在浏览器打开 `http://127.0.0.1:8787` 完成注册/登录后，请再执行一次 `./vernal.sh`（或 `./deploy/loopforge/start-runner.sh`），脚本就会自动把本机 Runner 绑定上线；以后每次启动只需执行一次 `./vernal.sh`。
 
 看到终端提示 `Vernal 平台已启动：http://127.0.0.1:8787` 后，直接用浏览器打开：
 - **唯一工作台入口**：http://127.0.0.1:8787
@@ -26,13 +28,10 @@ cd /Users/zomeryang/Documents/春天/个人科研/lattice-mesh
 
 ### 2. 日常如何暂停任务与关闭服务
 - **只暂停当前任务（不断电，明天接着跑）**：在网页「架构总控」右上角点击 **「停止调度」**。已完成的所有里程碑和任务都保存在本地数据库里，下次点 **「启动 Goal」** 会自动从断点继续，绝不会重头再跑。
-- **彻底关闭后台程序**：
-  1. 在运行 `./vernal.sh` 的终端窗口按 `Ctrl + C` 停止网关；
-  2. 若连底层 Docker 容器也想一起关掉释放内存，执行：
-     ```bash
-     docker compose -f deploy/loopforge/compose.yaml stop
-     ```
-     （注意用 `stop` 而不是 `down -v`，所有账号、项目和代码数据都会完好保留。）
+- **一键停止全部后台服务与容器（保留全部数据）**：
+  ```bash
+  ./vernal.sh --stop
+  ```
 
 ---
 

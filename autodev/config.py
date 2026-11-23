@@ -201,6 +201,7 @@ class Settings:
     loopforge_workflow_id: str = ""
     loopforge_repository_id: str = ""
     gitea_url: str = "http://127.0.0.1:3000"
+    vernal_public_url: str = "http://127.0.0.1:8787"
     # git
     base_branch: str = "main"
     protected_paths: list[str] = field(default_factory=lambda: ["contracts/"])
@@ -235,8 +236,14 @@ class Settings:
             setattr(settings, key, value)
         if os.environ.get("VERNAL_LOOPFORGE_URL", "").strip():
             settings.loopforge_url = os.environ["VERNAL_LOOPFORGE_URL"].strip()
+        elif not Path("/.dockerenv").exists() and settings.loopforge_url.rstrip("/") == "http://loopforge:8080":
+            settings.loopforge_url = "http://127.0.0.1:8090"
         if os.environ.get("VERNAL_GITEA_URL", "").strip():
             settings.gitea_url = os.environ["VERNAL_GITEA_URL"].strip()
+        elif not Path("/.dockerenv").exists() and settings.gitea_url.rstrip("/") == "http://gitea:3000":
+            settings.gitea_url = "http://127.0.0.1:3000"
+        if os.environ.get("VERNAL_PUBLIC_URL", "").strip():
+            settings.vernal_public_url = os.environ["VERNAL_PUBLIC_URL"].strip()
         if settings.collaboration_mode not in ("files", "git") or settings.runtime_backend not in ("local", "loopforge"):
             raise ConfigError("无效的协作方式或执行底座")
         if settings.max_concurrency < 1 or settings.max_retries < 1:

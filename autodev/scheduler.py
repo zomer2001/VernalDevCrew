@@ -692,6 +692,7 @@ class Scheduler:
             inputs=before if files else None,
             context=context,
             baseline_file=baseline_file,
+            vernal_base_url=self.settings.vernal_public_url,
         )
         if self.stop_event.is_set():
             self.db.update_task(task.task_id, status=TaskStatus.READY)

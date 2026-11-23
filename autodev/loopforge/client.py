@@ -104,6 +104,10 @@ class LoopForgeClient:
         data = await self._req("PUT", "/api/runners/default", json_body={"runnerId": runner_id})
         return data if isinstance(data, dict) else {}
 
+    async def create_runner_bind_code(self) -> dict[str, Any]:
+        data = await self._req("POST", "/api/runners/bind-codes", json_body={})
+        return data if isinstance(data, dict) else {}
+
     async def auth_current_with_cookie(self, cookie_header: str) -> dict[str, Any]:
         url = f"{self.base_url}/api/auth/current"
         headers = {"Accept": "application/json"}
@@ -228,12 +232,15 @@ class LoopForgeClient:
             if aid:
                 result = await self._req("GET", f"/api/runs/{quote(run['id'], safe='')}/artifacts/{quote(aid, safe='')}")
                 if isinstance(result, dict):
-                    if "files" in result:
-                        import json
-                        return json.dumps(result)
-                    for field in ("content", "text"):
-                        if isinstance(result.get(field), str):
-                            return result[field]
+                    if set(result.keys()) <= {"content", "text", "id", "name", "mediaType"}:
+                        for field in ("content", "text"):
+                            if isinstance(result.get(field), str):
+                                return result[field]
+                    import json
+
+                    return json.dumps(result, ensure_ascii=False)
+                if isinstance(result, str) and result:
+                    return result
         raise LoopForgeError(f"Run {run.get('id', '')} 未提供声明的交付文件 {filename}")
 
     async def get_run_diff(self, run_id: str) -> Any:
@@ -298,6 +305,9 @@ class LoopForgeClient:
 
     async def dispatch_issue(self, issue_id: str, rerun: bool = False) -> dict[str, Any]:
         return await self._req("POST", f"/api/issues/{issue_id}/dispatch", json_body={"rerun": rerun})
+
+    async def reopen_issue(self, issue_id: str) -> dict[str, Any]:
+        return await self._req("POST", f"/api/issues/{issue_id}/reopen", json_body={})
 
     async def approve_run(self, run_id: str, comment: str = "", node_id: str = "") -> dict[str, Any]:
         body: dict[str, Any] = {"comment": comment}
