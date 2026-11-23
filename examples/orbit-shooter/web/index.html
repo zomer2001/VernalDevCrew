@@ -1,0 +1,6 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>碎星航线 · Orbit Patrol</title><link rel="stylesheet" href="game.css"></head>
+<body><main><header><p>ORBIT PATROL</p><h1>碎星航线</h1></header>
+<section class="hud" aria-label="飞行状态"><div>分数<strong id="score">000000</strong></div><div>最高分<strong id="best">000000</strong></div><div>护盾<strong id="life">◆◆◆</strong></div></section>
+<div class="screen"><canvas width="480" height="680" aria-label="飞船射击游戏区"></canvas><div id="cover"><div><small id="signal">FLIGHT CONTROL</small><h2 id="message">准备起航</h2><button id="launch">开始游戏</button></div></div></div>
+<footer><span>方向键或 WASD 移动 · 空格射击<br>触屏拖动飞船自动射击</span><button id="pause" disabled>暂停</button><button id="restart" disabled>重新开始</button></footer></main>
+<script src="../contracts/rules.js"></script><script src="../engine/game.js"></script><script src="screen.js"></script></body></html>

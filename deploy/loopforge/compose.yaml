@@ -1,0 +1,98 @@
+name: autodev-runtime
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: loopforge
+      MYSQL_USER: loopforge
+      MYSQL_PASSWORD: ${LOOPFORGE_DB_PASSWORD:?Run ./up.sh first}
+      MYSQL_ROOT_PASSWORD: ${LOOPFORGE_DB_ROOT_PASSWORD:?Run ./up.sh first}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    ports:
+      - "127.0.0.1:${LOOPFORGE_MYSQL_PORT:-33315}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysqladmin ping -h 127.0.0.1 -u loopforge --silent"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    restart: unless-stopped
+
+  loopforge:
+    image: ${LOOPFORGE_IMAGE:-ghcr.io/tencent/loopforge:0.4.0}
+    ports:
+      - "${LOOPFORGE_BIND:-127.0.0.1}:${AGENTFLOW_HTTP_PORT:-8090}:8080"
+    environment:
+      AGENTFLOW_HTTP_PORT: 8080
+      AGENTFLOW_MYSQL_DSN: loopforge:${LOOPFORGE_DB_PASSWORD}@tcp(mysql:3306)/loopforge
+      AGENTFLOW_SESSION_SECRET: ${AGENTFLOW_SESSION_SECRET:?Run ./up.sh first}
+      AGENTFLOW_AUTH_REQUIRED: "true"
+      AGENTFLOW_ALLOW_SIGNUP: "true"
+      AGENTFLOW_SECURE_COOKIES: "false"
+      AGENTFLOW_ASSISTANT_SESSION_DIR: /data/assistant
+      AGENTFLOW_CONVERSATION_DIR: ${LOOPFORGE_DATA_DIR}/conversations
+      AGENTFLOW_CLARIFY_SESSION_DIR: /data/clarify
+      AGENTFLOW_PLATFORM_MCP_URL: http://loopforge:8080
+      AGENTFLOW_DOCKER_NETWORK: autodev-runtime_default
+      AGENTFLOW_LOCAL_SANDBOX: docker
+      AGENTFLOW_ISOLATED_IMAGE: ${LOOPFORGE_IMAGE:-ghcr.io/tencent/loopforge:0.4.0}
+      HOME: ${LOOPFORGE_DATA_DIR}/home
+      AGENTFLOW_RUNNER_BINARY: /app/bin/agentflow-runner-{os}-{arch}
+      AGENTFLOW_GATE_MCP_BINARY: /app/bin/agentflow-gate-mcp-{os}-{arch}
+      AGENTFLOW_RUNTIME_CLI_DIR: ${LOOPFORGE_DATA_DIR}/cli
+    command: ["-workspaces", "${LOOPFORGE_DATA_DIR}/workspaces"]
+    volumes:
+      - platform-data:/data
+      - ${LOOPFORGE_DATA_DIR}:${LOOPFORGE_DATA_DIR}
+      - ${LOOPFORGE_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=2).close()"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+      start_period: 10s
+    restart: unless-stopped
+
+  gitea:
+    image: gitea/gitea:1.22
+    environment:
+      USER_UID: 1000
+      USER_GID: 1000
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__server__ROOT_URL: http://${GITEA_PUBLIC_HOST:-127.0.0.1}:${GITEA_HTTP_PORT:-3000}/
+      GITEA__server__SSH_PORT: ${GITEA_SSH_PORT:-2222}
+      GITEA__service__DISABLE_REGISTRATION: "false"
+      GITEA__security__INSTALL_LOCK: "false"
+    ports:
+      - "${GITEA_BIND:-127.0.0.1}:${GITEA_HTTP_PORT:-3000}:3000"
+      - "${GITEA_BIND:-127.0.0.1}:${GITEA_SSH_PORT:-2222}:22"
+    volumes:
+      - gitea-data:/data
+    restart: unless-stopped
+
+  vernal:
+    profiles: ["full"]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      VERNAL_LOOPFORGE_URL: http://loopforge:8080
+      VERNAL_GITEA_URL: http://gitea:3000
+    ports:
+      - "${VERNAL_BIND:-0.0.0.0}:${VERNAL_PORT:-8787}:8787"
+    volumes:
+      - ../../workspaces:/app/workspaces
+    depends_on:
+      loopforge:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  platform-data:
+  gitea-data:

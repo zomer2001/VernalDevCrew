@@ -1,0 +1,507 @@
+/* 自动生成：scripts/build_vernal_stage_css.py，请勿手改 */
+#vernalStage {
+  --bg: #f6f8fb;
+  --surface: #ffffff;
+  --surface-subtle: #f8fafc;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --text: #0f172a;
+  --text-secondary: #475569;
+  --muted: #64748b;
+  --primary: #2563eb;
+  --primary-soft: #eff6ff;
+  --indigo: #4f46e5;
+  --indigo-soft: #eef2ff;
+  --ok: #059669;
+  --ok-soft: #ecfdf5;
+  --warn: #d97706;
+  --warn-soft: #fffbeb;
+  --err: #e11d48;
+  --err-soft: #fff1f2;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 8px 28px rgba(15, 23, 42, 0.09);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+#vernalStage, #vernalStage * { box-sizing: border-box; }
+#vernalStage {  margin: 0; }
+#vernalStage {
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+#vernalStage code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: #f1f5f9;
+  color: #1e293b;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+#vernalStage pre {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 8px 0;
+  color: #1e293b;
+}
+#vernalStage .muted { color: var(--muted); }
+#vernalStage .hidden { display: none !important; }
+#vernalStage .shell { display: flex; min-height: 100vh; }
+#vernalStage .sidebar {
+  width: 232px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 16px 12px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+#vernalStage .sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px 16px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+#vernalStage .brand-mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #2563eb, #4f46e5);
+  color: #fff;
+  font-weight: 800;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#vernalStage .brand-title { font-weight: 700; font-size: 14.5px; letter-spacing: -0.2px; }
+#vernalStage .brand-sub { font-size: 11px; color: var(--muted); }
+#vernalStage .nav-list { display: flex; flex-direction: column; gap: 3px; flex: 1; }
+#vernalStage .nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 8px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 13.5px;
+  font-weight: 500;
+  text-align: left;
+  transition: background 0.12s, color 0.12s;
+}
+#vernalStage .nav-item:hover { background: #f1f5f9; color: var(--text); }
+#vernalStage .nav-item.active { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+#vernalStage .nav-icon { font-size: 14px; width: 18px; text-align: center; opacity: 0.85; }
+#vernalStage .nav-pill {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: var(--text-secondary);
+}
+#vernalStage .nav-pill.alert { background: var(--err); color: #fff; }
+#vernalStage .sidebar-footer {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 12px;
+}
+#vernalStage .meta-row { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+#vernalStage .sse-wrap { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-secondary); }
+#vernalStage .sse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--err); display: inline-block; }
+#vernalStage .sse-dot.live { background: var(--ok); }
+#vernalStage .workspace { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+#vernalStage .topbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+#vernalStage .topbar-left, #vernalStage .topbar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#vernalStage .project-title { margin: 0; font-size: 15.5px; font-weight: 700; letter-spacing: -0.2px; }
+#vernalStage .actor-field { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+#vernalStage .actor-field input, #vernalStage input[type="text"], #vernalStage input[type="password"], #vernalStage select, #vernalStage textarea {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  padding: 6px 9px;
+  font-size: 13px;
+  color: var(--text);
+  outline: none;
+}
+#vernalStage .actor-field input { width: 84px; }
+#vernalStage input:focus, #vernalStage select:focus, #vernalStage textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }
+#vernalStage .btn {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+#vernalStage .btn:hover { background: #f8fafc; border-color: #94a3b8; }
+#vernalStage .btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+#vernalStage .btn-primary:hover { background: #1d4ed8; border-color: #1d4ed8; }
+#vernalStage .btn-danger { background: var(--err); border-color: var(--err); color: #fff; }
+#vernalStage .btn-danger:hover { background: #be123c; }
+#vernalStage .btn-sm { padding: 4px 10px; font-size: 12px; }
+#vernalStage .btn-group { display: flex; gap: 6px; flex-wrap: wrap; }
+#vernalStage .tag, #vernalStage .metric-pill, #vernalStage .status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+}
+#vernalStage .tag.ok, #vernalStage .status-pill.APPROVED, #vernalStage .status-pill.MERGED, #vernalStage .status-pill.COMPLETED, #vernalStage .status-pill.PASS {
+  background: var(--ok-soft); border-color: #a7f3d0; color: var(--ok);
+}
+#vernalStage .tag.warn, #vernalStage .status-pill.PLANNED, #vernalStage .status-pill.AWAITING_MERGE, #vernalStage .status-pill.SPECIFIED, #vernalStage .status-pill.WARNING {
+  background: var(--warn-soft); border-color: #fde68a; color: var(--warn);
+}
+#vernalStage .status-pill.READY, #vernalStage .status-pill.IN_PROGRESS, #vernalStage .status-pill.VERIFYING, #vernalStage .status-pill.REVIEWING, #vernalStage .status-pill.RUNNING, #vernalStage .status-pill.INTEGRATING, #vernalStage .status-pill.running {
+  background: var(--primary-soft); border-color: #bfdbfe; color: var(--primary);
+}
+#vernalStage .status-pill.FUSED, #vernalStage .status-pill.FAILED, #vernalStage .status-pill.STALLED, #vernalStage .status-pill.FAIL, #vernalStage .status-pill.NEEDS_FIX {
+  background: var(--err-soft); border-color: #fecdd3; color: var(--err);
+}
+#vernalStage .goal-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  font-size: 12px;
+}
+#vernalStage .gstep {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+}
+#vernalStage .gstep.done { background: var(--ok-soft); border-color: #a7f3d0; color: var(--ok); font-weight: 600; }
+#vernalStage .gstep.active { background: var(--primary-soft); border-color: #93c5fd; color: var(--primary); font-weight: 600; }
+#vernalStage .garrow { color: #cbd5e1; font-weight: 700; }
+#vernalStage .content { padding: 18px 20px 32px; flex: 1; }
+#vernalStage .stack { display: flex; flex-direction: column; gap: 14px; }
+#vernalStage .card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  box-shadow: var(--shadow-sm);
+}
+#vernalStage .card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+#vernalStage .card-head h3 { margin: 0; font-size: 14.5px; font-weight: 700; }
+#vernalStage .card-desc { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+#vernalStage .overview-grid { display: grid; grid-template-columns: 1fr 340px; gap: 16px; align-items: start; }
+@media (max-width: 1120px) {
+#vernalStage .overview-grid { grid-template-columns: 1fr; }
+}
+#vernalStage .overview-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+#vernalStage .legend { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
+#vernalStage .ldot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+#vernalStage .ldot.ready { background: #3b82f6; }
+#vernalStage .ldot.running { background: #4f46e5; }
+#vernalStage .ldot.done { background: #10b981; }
+#vernalStage .ldot.fused { background: #e11d48; }
+#vernalStage .dag-canvas {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  background-color: #fafcff;
+  background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
+  background-size: 18px 18px;
+  min-height: 110px;
+}
+#vernalStage .dag-node { cursor: pointer; }
+#vernalStage .dag-node:hover rect.node-box { stroke: #2563eb; stroke-width: 2; }
+@keyframes pulseRing {
+  0% { opacity: 0.9; r: 4; }
+  70% { opacity: 0.15; r: 8.5; }
+  100% { opacity: 0.9; r: 4; }
+}
+#vernalStage .pulse-dot { animation: pulseRing 1.6s infinite ease-in-out; }
+#vernalStage .roster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+#vernalStage .slot-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 11px 12px;
+  background: var(--surface-subtle);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+#vernalStage .slot-card.working {
+  background: var(--surface);
+  border-color: #93c5fd;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.08);
+  cursor: pointer;
+}
+#vernalStage .slot-card.command.working { border-color: #a5b4fc; box-shadow: 0 2px 8px rgba(79, 70, 229, 0.09); }
+#vernalStage .slot-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-bottom: 6px; }
+#vernalStage .slot-title { font-weight: 700; font-size: 12px; color: var(--text-secondary); }
+#vernalStage .slot-who { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+#vernalStage .eng-badge {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+#vernalStage .eng-badge.codex { background: var(--primary-soft); color: var(--primary); }
+#vernalStage .eng-badge.opencode { background: var(--ok-soft); color: var(--ok); }
+#vernalStage .eng-badge.other { background: #f1f5f9; color: var(--text-secondary); }
+#vernalStage .slot-action {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--primary);
+  background: var(--primary-soft);
+  padding: 4px 7px;
+  border-radius: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#vernalStage .elapsed { font-family: var(--mono); font-size: 11px; color: var(--primary); font-weight: 600; }
+#vernalStage .event-card { max-height: 80vh; display: flex; flex-direction: column; }
+#vernalStage .event-list { display: flex; flex-direction: column; gap: 7px; overflow-y: auto; padding-right: 2px; }
+#vernalStage .ev-item {
+  font-size: 12px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  word-break: break-word;
+}
+#vernalStage .ev-item.ev-command { border-left-color: var(--primary); }
+#vernalStage .ev-item.ev-message { border-left-color: var(--indigo); }
+#vernalStage .ev-item.ev-file { border-left-color: var(--ok); }
+#vernalStage .ev-item.ev-warning { border-left-color: var(--warn); }
+#vernalStage .ev-head { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-bottom: 2px; gap: 6px; }
+#vernalStage .ev-link { color: var(--primary); cursor: pointer; font-weight: 600; text-decoration: underline; }
+#vernalStage .council-layout { display: grid; grid-template-columns: 1fr 360px; gap: 16px; align-items: start; }
+@media (max-width: 1080px) {
+#vernalStage .council-layout { grid-template-columns: 1fr; }
+}
+#vernalStage .council-stream { display: flex; flex-direction: column; gap: 12px; margin-bottom: 14px; }
+#vernalStage .cmsg {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 13px 14px;
+  background: var(--surface-subtle);
+}
+#vernalStage .cmsg.role-pm { border-left: 4px solid #2563eb; }
+#vernalStage .cmsg.role-architect { border-left: 4px solid #7c3aed; }
+#vernalStage .cmsg.role-qa_lead { border-left: 4px solid #d97706; }
+#vernalStage .cmsg.role-director { border-left: 4px solid #059669; background: #f0fdf4; }
+#vernalStage .cmsg.role-human { border-left: 4px solid #0f172a; background: #fffbeb; }
+#vernalStage .cmsg-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+#vernalStage .cmsg-speaker { font-weight: 700; font-size: 13.5px; }
+#vernalStage .cmsg-headline { font-weight: 600; margin-bottom: 8px; color: var(--text); }
+#vernalStage .cmsg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; font-size: 12.5px; }
+@media (max-width: 720px) {
+#vernalStage .cmsg-grid { grid-template-columns: 1fr; }
+}
+#vernalStage .cmsg-box { background: var(--surface); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; }
+#vernalStage .cmsg-box h5 { margin: 0 0 5px; font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+#vernalStage .cmsg-box ul { margin: 0; padding-left: 16px; }
+#vernalStage .interject-box { border-top: 1px solid var(--border); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+#vernalStage .interject-box textarea { width: 100%; resize: vertical; }
+#vernalStage .interject-actions { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+#vernalStage .adr-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface-subtle);
+}
+#vernalStage .adr-id { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--indigo); }
+#vernalStage .squad-columns { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; }
+#vernalStage .squad-col {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  box-shadow: var(--shadow-sm);
+}
+#vernalStage .squad-col h4 { margin: 0 0 3px; font-size: 14px; }
+#vernalStage .squad-sub { font-size: 11.5px; color: var(--muted); margin-bottom: 10px; }
+#vernalStage .task-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 11px;
+  margin-bottom: 8px;
+  background: var(--surface-subtle);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+#vernalStage .task-card:hover { border-color: var(--primary); background: var(--surface); }
+#vernalStage .task-card.APPROVED, #vernalStage .task-card.MERGED { border-left: 3px solid var(--ok); }
+#vernalStage .task-card.IN_PROGRESS, #vernalStage .task-card.VERIFYING, #vernalStage .task-card.REVIEWING { border-left: 3px solid var(--primary); background: var(--surface); }
+#vernalStage .task-card.FUSED { border-left: 3px solid var(--err); background: var(--err-soft); }
+#vernalStage .task-top { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-bottom: 4px; }
+#vernalStage .task-id { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text-secondary); }
+#vernalStage .task-meta { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+#vernalStage .task-live-line {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--primary);
+  background: var(--primary-soft);
+  padding: 3px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#vernalStage .inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+#vernalStage .inline-form input { flex: 1; min-width: 220px; }
+#vernalStage .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin: 10px 0; }
+#vernalStage .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary); }
+#vernalStage .data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
+#vernalStage .data-table th, #vernalStage .data-table td { border: 1px solid var(--border); padding: 7px 9px; text-align: left; vertical-align: top; }
+#vernalStage .data-table th { background: var(--surface-subtle); color: var(--muted); font-weight: 600; }
+#vernalStage .drawer {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.35);
+  backdrop-filter: blur(2px);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 60;
+}
+#vernalStage .drawer-inner {
+  width: min(860px, 96vw);
+  background: var(--surface);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-md);
+  border-left: 1px solid var(--border);
+}
+#vernalStage .drawer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 18px 10px;
+  border-bottom: 1px solid var(--border);
+}
+#vernalStage .drawer-title-row { display: flex; align-items: center; gap: 8px; }
+#vernalStage .drawer-title-row h3 { margin: 0; font-size: 15px; }
+#vernalStage .drawer-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 6px 18px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-subtle);
+}
+#vernalStage .dtab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+#vernalStage .dtab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+#vernalStage .drawer-body { flex: 1; overflow-y: auto; padding: 14px 18px; }
+#vernalStage .trace-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+#vernalStage .trace-step {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 11px;
+  margin-bottom: 8px;
+  background: var(--surface-subtle);
+}
+#vernalStage .trace-step.kind-command { border-left: 3px solid var(--primary); }
+#vernalStage .trace-step.kind-message { border-left: 3px solid var(--indigo); }
+#vernalStage .trace-step.kind-file { border-left: 3px solid var(--ok); }
+#vernalStage .trace-step.kind-warning { border-left: 3px solid var(--warn); }
+#vernalStage .trace-step.kind-turn { border-left: 3px solid var(--border-strong); background: #f1f5f9; }
+#vernalStage .trace-step-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 4px; font-weight: 600; }
+#vernalStage .cmd-line { font-family: var(--mono); font-size: 12px; color: #0f172a; word-break: break-all; }
+#vernalStage details.step-out { margin-top: 6px; }
+#vernalStage details.step-out summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+#vernalStage .diff-view {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+}
+#vernalStage .diff-line { white-space: pre-wrap; word-break: break-all; padding: 0 5px; }
+#vernalStage .diff-add { background: #ecfdf5; color: #065f46; }
+#vernalStage .diff-del { background: #fff1f2; color: #9f1239; }
+#vernalStage .diff-hunk { background: #eff6ff; color: #1d4ed8; margin-top: 4px; }
+#vernalStage .diff-file { color: #0f172a; font-weight: 700; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 6px; }
+#vernalStage .toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  background: #0f172a;
+  color: #ffffff;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  box-shadow: var(--shadow-md);
+  z-index: 100;
+}
+@media (max-width: 820px) {
+#vernalStage .shell { flex-direction: column; }
+#vernalStage .sidebar { width: 100%; height: auto; position: static; border-right: none; border-bottom: 1px solid var(--border); }
+#vernalStage .nav-list { flex-direction: row; overflow-x: auto; }
+#vernalStage .nav-item { width: auto; white-space: nowrap; }
+}

@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vernal · 多智能体架构研发平台</title>
+  <link rel="stylesheet" href="/vernal-static/styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-mark">A</div>
+        <div>
+          <div class="brand-title">Vernal</div>
+          <div class="brand-sub">多智能体架构研发平台</div>
+        </div>
+      </div>
+
+      <nav class="nav-list">
+        <button class="nav-item active" data-view="overview">
+          <span class="nav-icon">◈</span>
+          <span>总控与流程图</span>
+        </button>
+        <button class="nav-item" data-view="council">
+          <span class="nav-icon">◎</span>
+          <span>架构评审圆桌</span>
+          <span id="nav-council-cnt" class="nav-pill hidden">0</span>
+        </button>
+        <button class="nav-item" data-view="squads">
+          <span class="nav-icon">▦</span>
+          <span>研发组与任务</span>
+          <span id="nav-task-cnt" class="nav-pill hidden">0</span>
+        </button>
+        <button class="nav-item" data-view="inbox">
+          <span class="nav-icon">⚑</span>
+          <span>审批与接管箱</span>
+          <span id="nav-inbox-cnt" class="nav-pill alert hidden">0</span>
+        </button>
+        <button class="nav-item" data-view="runtime">
+          <span class="nav-icon">⛁</span>
+          <span>底座与 SOP</span>
+        </button>
+        <button class="nav-item" data-view="docs">
+          <span class="nav-icon">▤</span>
+          <span>资料与蓝图</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="meta-row">
+          <span class="muted">执行底座</span>
+          <span id="side-backend" class="tag">local</span>
+        </div>
+        <div class="meta-row">
+          <span class="muted">实时通道</span>
+          <span class="sse-wrap"><i id="sse-indicator" class="sse-dot"></i><span id="sse-text">连接中</span></span>
+        </div>
+        <div class="meta-row">
+          <span class="muted">Codex</span>
+          <span id="codex-pill" class="tag">检测中</span>
+        </div>
+        <div class="meta-row">
+          <span class="muted">CodeBuddy</span>
+          <span id="codebuddy-pill" class="tag">检测中</span>
+        </div>
+        <div class="meta-row">
+          <span class="muted">OpenCode</span>
+          <span id="opencode-pill" class="tag">检测中</span>
+        </div>
+        <div class="meta-row">
+          <span class="muted">DeepSeek</span>
+          <span id="dsh-pill" class="tag">检测中</span>
+        </div>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="topbar-left">
+          <h1 id="project-name" class="project-title">加载中…</h1>
+          <span id="project-status" class="status-pill">INIT</span>
+          <span id="usage-pill" class="metric-pill">Tokens: 0</span>
+        </div>
+        <div class="topbar-right">
+          <label class="actor-field">
+            <span>成员</span>
+            <input id="actor-input" type="text" placeholder="姓名" />
+          </label>
+          <button id="btn-agent-toggle" class="btn">编队与模型</button>
+          <button id="btn-wish-toggle" class="btn">输入需求</button>
+          <label>协作方式 <select id="collaboration-mode"><option value="files">文件交接</option><option value="git">Git 分支</option></select></label>
+          <button id="btn-ingest" class="btn">摄入资料</button>
+          <button id="btn-plan" class="btn">圆桌与立项</button>
+          <button id="btn-approve" class="btn btn-primary hidden">批准蓝图</button>
+          <button id="btn-start" class="btn btn-primary">启动 Goal</button>
+          <button id="btn-stop" class="btn btn-danger hidden">停止调度</button>
+        </div>
+      </header>
+
+      <form id="agent-config-form" class="card wish-composer" hidden>
+        <div class="card-head" style="margin-bottom:8px">
+          <div>
+            <h3>智能体编队与模型设置（无需手改配置文件）</h3>
+            <p class="card-desc">自动扫描本机已安装的 Harness，支持为圆桌总监、研发组与独立审查官混编不同执行器与模型，保存后自动同步到底层 LoopForge</p>
+          </div>
+          <div class="btn-group">
+            <button type="button" id="btn-agent-rescan" class="btn btn-sm">重新扫描本机 CLI</button>
+            <button type="button" id="btn-agent-close" class="btn btn-sm">收起</button>
+          </div>
+        </div>
+        <div id="agent-runtime-badges" class="inline-form" style="margin-bottom:10px;gap:8px;flex-wrap:wrap"></div>
+        <div class="form-grid">
+          <label class="field">全局默认 Harness
+            <select id="cfg-harness">
+              <option value="auto">auto（自动选用本机已就绪执行器）</option>
+              <option value="codex">Codex CLI</option>
+              <option value="codebuddy">CodeBuddy（腾讯）</option>
+              <option value="opencode">OpenCode</option>
+              <option value="dsh">DeepSeek Harness (dsh)</option>
+              <option value="claude-code">Claude Code</option>
+            </select>
+          </label>
+          <label class="field">全局默认模型
+            <input id="cfg-model" type="text" placeholder="如 gpt-6.2-sol / deepseek-chat（留空走工具默认）" />
+          </label>
+          <label class="field">并行工位数 (max_concurrency)
+            <input id="cfg-concurrency" type="number" min="1" max="16" value="2" />
+          </label>
+          <label class="field">圆桌与总监 Harness（留空跟随全局）
+            <select id="cfg-director-harness">
+              <option value="">跟随全局默认</option>
+              <option value="codex">Codex CLI</option>
+              <option value="codebuddy">CodeBuddy</option>
+              <option value="opencode">OpenCode</option>
+              <option value="dsh">DeepSeek Harness (dsh)</option>
+              <option value="claude-code">Claude Code</option>
+            </select>
+          </label>
+          <label class="field">开发组 Harness（同步 vernal-coder）
+            <select id="cfg-coder-harness">
+              <option value="">跟随全局默认</option>
+              <option value="codex">Codex CLI</option>
+              <option value="codebuddy">CodeBuddy</option>
+              <option value="opencode">OpenCode</option>
+              <option value="dsh">DeepSeek Harness (dsh)</option>
+              <option value="claude-code">Claude Code</option>
+            </select>
+          </label>
+          <label class="field">审查官 Harness（支持异构交叉审查）
+            <select id="cfg-qa-harness">
+              <option value="">跟随全局默认</option>
+              <option value="codex">Codex CLI</option>
+              <option value="codebuddy">CodeBuddy</option>
+              <option value="opencode">OpenCode</option>
+              <option value="dsh">DeepSeek Harness (dsh)</option>
+              <option value="claude-code">Claude Code</option>
+            </select>
+          </label>
+          <label class="field">圆桌与总监模型覆盖（可选）
+            <input id="cfg-director-model" type="text" placeholder="留空跟随全局模型" />
+          </label>
+          <label class="field">开发组模型覆盖（可选）
+            <input id="cfg-coder-model" type="text" placeholder="留空跟随全局模型" />
+          </label>
+          <label class="field">审查官模型覆盖（可选）
+            <input id="cfg-qa-model" type="text" placeholder="留空跟随全局模型" />
+          </label>
+        </div>
+        <div class="inline-form" style="margin-top:8px">
+          <button id="btn-agent-save" type="submit" class="btn btn-primary">保存并同步到底座</button>
+          <span id="cfg-effective-hint" class="muted" style="font-size:12px"></span>
+        </div>
+      </form>
+
+      <form id="wish-form" class="card wish-composer" hidden>
+        <label>需求标题 <input id="wish-title" required placeholder="碎星航线" /></label>
+        <label>需求内容 <textarea id="wish-content" required rows="4"></textarea></label>
+        <button id="btn-wish-submit" class="btn btn-primary">保存并切片</button>
+      </form>
+      <div id="goal-bar" class="goal-bar"></div>
+
+      <main class="content">
+        <!-- 1. 总控与流程图 -->
+        <section id="view-overview" class="view active">
+          <div class="overview-grid">
+            <div class="overview-main">
+              <div class="card">
+                <div class="card-head">
+                  <div>
+                    <h3>架构任务流程图（DAG）</h3>
+                    <p class="card-desc">按里程碑波次与依赖拓扑自动布局，点击任意节点打开实时监视器</p>
+                  </div>
+                  <div class="legend">
+                    <span><i class="ldot ready"></i>就绪</span>
+                    <span><i class="ldot running"></i>执行中</span>
+                    <span><i class="ldot done"></i>已通过/合入</span>
+                    <span><i class="ldot fused"></i>熔断</span>
+                  </div>
+                </div>
+                <div id="dag-canvas" class="dag-canvas"></div>
+              </div>
+
+              <div class="card">
+                <div class="card-head">
+                  <div>
+                    <h3>在岗团队工位实况席</h3>
+                    <p id="roster-summary" class="card-desc">实时展示指挥席与各并发工位当前在岗角色、引擎及手头动作</p>
+                  </div>
+                  <div class="btn-group">
+                    <button id="btn-council-trace" class="btn btn-sm">圆桌总监日志</button>
+                    <button id="btn-planner-trace" class="btn btn-sm">立项规划日志</button>
+                  </div>
+                </div>
+                <div id="roster-grid" class="roster-grid"></div>
+              </div>
+            </div>
+
+            <aside class="card event-card">
+              <div class="card-head">
+                <div>
+                  <h3>项目时间线</h3>
+                  <p class="card-desc">按时间查看智能体、任务和执行记录</p>
+                </div>
+                <span id="event-count" class="tag">0</span>
+              </div>
+              <label class="timeline-source">记录来源 <select id="history-workspace" aria-label="记录来源"></select></label>
+              <p id="history-status" class="card-desc" role="status">正在读取项目记录…</p>
+              <div id="event-list" class="event-list"></div>
+              <button id="history-older" class="btn btn-sm" hidden>加载更早记录</button>
+            </aside>
+          </div>
+        </section>
+
+        <!-- 2. 架构评审圆桌 -->
+        <section id="view-council" class="view">
+          <div class="council-layout">
+            <div class="council-main">
+              <div class="card">
+                <div class="card-head">
+                  <div>
+                    <h3>多智能体架构评审圆桌（Architecture Council）</h3>
+                    <p class="card-desc">第 1 轮：PM / 契约与异构架构师 / QA 总监独立评审 → 第 2 轮：研发总监裁决分歧并输出 ADR</p>
+                  </div>
+                  <button id="btn-run-council" class="btn btn-primary btn-sm">发起新一轮圆桌评审</button>
+                </div>
+                <div id="council-stream" class="council-stream"></div>
+                <div class="interject-box">
+                  <textarea id="council-note" rows="2" placeholder="负责人可直接插话补充要求（例如：先做核心后端与契约测试，SDK 放到 M3），提交后总监将立刻更新 ADR 裁决…"></textarea>
+                  <div class="interject-actions">
+                    <span class="muted">插话将以「最高优先级人类裁决」追加至当前圆桌并重新收敛</span>
+                    <button id="btn-council-interject" class="btn btn-primary btn-sm">插话并重新裁决</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <aside class="council-side">
+              <div class="card">
+                <div class="card-head">
+                  <h3>ADR 架构决策纪要</h3>
+                </div>
+                <div id="council-adrs" class="stack"></div>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <!-- 3. 研发组与任务 -->
+        <section id="view-squads" class="view">
+          <div id="squad-columns" class="squad-columns"></div>
+        </section>
+
+        <!-- 4. 审批与接管收件箱 -->
+        <section id="view-inbox" class="view">
+          <div class="stack">
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3>统一审批与接管收件箱（Needs Review）</h3>
+                  <p class="card-desc">汇总 LoopForge 人工审批门禁、AutoDev 熔断接管任务及里程碑合并签字</p>
+                </div>
+                <button id="btn-refresh-inbox" class="btn btn-sm">刷新收件箱</button>
+              </div>
+              <div id="inbox-list" class="stack"></div>
+            </div>
+            <div class="card">
+              <div class="card-head">
+                <h3>里程碑集成与交付报告</h3>
+              </div>
+              <div id="milestone-list" class="stack"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 5. 底座与 SOP（LoopForge 融合面板） -->
+        <section id="view-runtime" class="view">
+          <div id="runtime-panel" class="stack"></div>
+        </section>
+
+        <!-- 6. 资料与蓝图 -->
+        <section id="view-docs" class="view">
+          <div class="stack">
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3>立项规划控制台</h3>
+                  <p id="plan-summary" class="card-desc">尚未生成规划</p>
+                </div>
+              </div>
+              <div class="inline-form">
+                <select id="plan-mode">
+                  <option value="goal">多智能体圆桌 + 总监分组滚动 Goal 模式</option>
+                  <option value="classic">经典单次全量拆单模式</option>
+                </select>
+                <input id="plan-extra" type="text" placeholder="给圆桌 / 研发总监的补充要求（可选）" />
+                <button id="btn-plan-extra" class="btn btn-primary">按所选模式启动立项</button>
+              </div>
+            </div>
+            <div id="plan-breakdown" class="stack"></div>
+            <div class="card">
+              <div class="card-head"><h3>原始输入资料切片（inputs/）</h3></div>
+              <div id="slice-list" class="stack"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- 实时任务监视器抽屉 -->
+  <div id="drawer" class="drawer hidden">
+    <div class="drawer-inner">
+      <div class="drawer-head">
+        <div>
+          <div class="drawer-title-row">
+            <h3 id="drawer-title">任务监视器</h3>
+            <span id="drawer-live-badge" class="status-pill running hidden">LIVE</span>
+          </div>
+          <div id="drawer-subtitle" class="muted" style="font-size:12px"></div>
+        </div>
+        <button id="drawer-close" class="btn btn-sm">关闭</button>
+      </div>
+      <div class="drawer-tabs">
+        <button class="dtab active" data-dtab="trace">实时步骤流</button>
+        <button class="dtab" data-dtab="diff">实时代码改动</button>
+        <button class="dtab" data-dtab="verify">门禁与审查</button>
+        <button class="dtab" data-dtab="prompt">提示词与命令</button>
+      </div>
+      <div id="drawer-body" class="drawer-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script type="module" src="/vernal-static/js/main.js"></script>
+</body>
+</html>
