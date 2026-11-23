@@ -16,7 +16,8 @@ function element(tag, cls, text) {
 }
 
 async function mount(rail, nav, main) {
-  const response = await fetch("/vernal-static/index.html");
+  const assetVer = new URL(import.meta.url).searchParams.get("v") || String(Date.now());
+  const response = await fetch(`/vernal-static/index.html?v=${encodeURIComponent(assetVer)}`, {cache: "no-store"});
   if (!response.ok) throw Error("无法载入 Vernal 工作台");
   const template = new DOMParser().parseFromString(await response.text(), "text/html");
   const stage = element("section");
@@ -61,6 +62,11 @@ async function mount(rail, nav, main) {
   for (const key of Object.keys(titles)) tabs.append(tab(key, false));
   toolbar.append(tabs, template.querySelector(".topbar-left"), template.querySelector(".topbar-right"));
   const panels = element("div", "vernal-body");
+  panels.append(
+    template.querySelector("#agent-config-form"),
+    template.querySelector("#wish-form"),
+    template.querySelector("#goal-bar")
+  );
   for (const panel of template.querySelectorAll(".content > section")) {
     panel.classList.remove("view");
     panel.classList.add("v-subview");
@@ -68,15 +74,19 @@ async function mount(rail, nav, main) {
   }
   stage.append(
     toolbar,
-    template.querySelector("#agent-config-form"),
-    template.querySelector("#wish-form"),
-    template.querySelector("#goal-bar"),
+    template.querySelector("#project-launcher"),
     panels,
     template.querySelector(".sidebar-footer"),
     template.querySelector("#drawer"),
     template.querySelector("#toast")
   );
   main.append(stage);
+
+  // 为原生 AI 工作台入口补充定位说明，消除“双入口不知道从哪进”的困惑
+  const nativeChatBtn = nav.querySelector('.nav[data-view="workbench"], .nav[data-view="assistant"]');
+  if (nativeChatBtn) {
+    nativeChatBtn.title = "快速对话（单点直聊 / 临时改代码；完整立项请用上方 Vernal 架构总控）";
+  }
 
   const brand = element("button", "vernal-rail-brand");
   brand.title = "Vernal · 架构总控";
@@ -105,7 +115,7 @@ async function mount(rail, nav, main) {
     if (cb) cb.textContent = e.detail.council_count || "";
   });
 
-  ({switchView, reloadProjectContext} = await import("./js/main.js"));
+  ({switchView, reloadProjectContext} = await import(`./js/main.js?v=${encodeURIComponent(assetVer)}`));
 
   function activate(key) {
     if (!switchView) {
@@ -160,14 +170,19 @@ async function mount(rail, nav, main) {
 
   // 跟随顶栏全局 #projectSwitcher 自动切换 Vernal 架构工作区与标准 SOP
   const switcher = document.getElementById("projectSwitcher");
-  async function syncSelectedProject(projectId, projectName, notify = false) {
+  let lastSyncedId = switcher?.value || "";
+  async function syncSelectedProject(projectId, projectName, notify = false, skipSelectApi = false) {
     if (!projectId) return;
+    lastSyncedId = projectId;
     setActiveProjectId(projectId);
     try {
-      const res = await api("/vernal-api/project/select", {
-        method: "POST",
-        body: JSON.stringify({project_id: projectId, project_name: projectName || projectId}),
-      });
+      let res = {switched: true};
+      if (!skipSelectApi) {
+        res = await api("/vernal-api/project/select", {
+          method: "POST",
+          body: JSON.stringify({project_id: projectId, project_name: projectName || projectId}),
+        });
+      }
       if (reloadProjectContext) {
         await reloadProjectContext();
         if (notify && res.switched) toast(`已同步切换至项目「${projectName || projectId}」工作区`);
@@ -176,13 +191,30 @@ async function mount(rail, nav, main) {
       if (notify) toast(err.message);
     }
   }
+  window.vernalSwitchProject = async (projectId, projectName, opts = {}) => {
+    if (!projectId) return;
+    if (switcher) {
+      let opt = Array.from(switcher.options || []).find((o) => o.value === projectId);
+      if (!opt) {
+        opt = document.createElement("option");
+        opt.value = projectId;
+        opt.textContent = projectName || projectId;
+        switcher.append(opt);
+      }
+      switcher.value = projectId;
+      switcher.dispatchEvent(new Event("change", {bubbles: true}));
+    }
+    await syncSelectedProject(projectId, projectName, false, Boolean(opts.skipSelectApi));
+  };
   switcher?.addEventListener("change", () => {
+    if (switcher.value === lastSyncedId) return;
     const opt = switcher.selectedOptions?.[0];
     syncSelectedProject(switcher.value, opt?.textContent?.trim() || switcher.value, true);
   });
 
+  const isNativeDeepLink = /^#\/(runs|issues|approvals|analytics|settings|runners|native-chat)\b/.test(location.hash || "");
   if (pendingView) activate(pendingView);
-  else if (!location.hash || location.hash === "#/" || location.hash.startsWith("#/vernal")) activate("overview");
+  else if (!isNativeDeepLink) activate("overview");
 
   let bound = false;
   async function bind(silent) {
@@ -209,10 +241,8 @@ async function mount(rail, nav, main) {
 
   // 若 LoopForge 顶栏 #projectSwitcher 在 bind 之后异步填充完首个项目，自动补同步一次
   if (switcher) {
-    let lastSyncedId = switcher.value || "";
     const swObs = new MutationObserver(() => {
       if (bound && switcher.value && switcher.value !== lastSyncedId) {
-        lastSyncedId = switcher.value;
         const opt = switcher.selectedOptions?.[0];
         syncSelectedProject(switcher.value, opt?.textContent?.trim() || switcher.value, false);
       }

@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from autodev.artifacts import FileExchange, materialize
+from autodev.artifacts import FileExchange, checked_name, materialize
 from autodev import gitops
 from autodev.config import (
     DEFAULT_CONFIG_TOML,
@@ -77,7 +77,12 @@ class PlanningError(RuntimeError):
         super().__init__("规划未通过校验：\n" + "\n".join(f"- {e}" for e in errors))
 
 
-def init_workspace(root: Path, name: str | None = None, collaboration_mode: str | None = None) -> Workspace:
+def init_workspace(
+    root: Path,
+    name: str | None = None,
+    collaboration_mode: str | None = None,
+    base_branch: str | None = None,
+) -> Workspace:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     ws = Workspace(root)
@@ -86,10 +91,15 @@ def init_workspace(root: Path, name: str | None = None, collaboration_mode: str 
         mode = collaboration_mode or "git"
         if mode not in ("files", "git"):
             raise OpsError("协作方式应为 files 或 git")
-        ws.config_path.write_text(DEFAULT_CONFIG_TOML.replace('collaboration_mode = "git"', f'collaboration_mode = "{mode}"'), "utf-8")
+        cfg_txt = DEFAULT_CONFIG_TOML.replace('collaboration_mode = "git"', f'collaboration_mode = "{mode}"')
+        if base_branch and base_branch.strip():
+            cfg_txt = cfg_txt.replace('base_branch = "main"', f"base_branch = {json.dumps(base_branch.strip())}")
+        ws.config_path.write_text(cfg_txt, "utf-8")
     settings = ws.load_settings()
     if collaboration_mode and settings.collaboration_mode != collaboration_mode:
         raise OpsError("已存在的工作区请在立项前从界面切换协作方式")
+    if base_branch and base_branch.strip():
+        settings.base_branch = base_branch.strip()
     if settings.collaboration_mode == "git":
         gitops.ensure_repo(root, settings.base_branch)
     opencode_files = write_opencode_agent_profiles(root)
@@ -937,9 +947,46 @@ class Engine:
         if ms is None:
             raise OpsError(f"里程碑不存在: {milestone_id}")
         if ms.status == MilestoneStatus.AWAITING_MERGE and self.settings.collaboration_mode == "files":
-            from tempfile import TemporaryDirectory
+            from tempfile import NamedTemporaryFile, TemporaryDirectory
+
+            exchange = FileExchange(self.ws, self.db)
             key = self.db.meta_get(f"delivery:{milestone_id}")
-            files = FileExchange(self.ws, self.db).get(key)
+            files = exchange.get(key)
+            is_inplace = self.db.meta_get("source_mode") == "local_folder"
+            changed_paths: list[str] = []
+            if is_inplace:
+                prev_files = exchange.baseline([])
+                changed_paths = sorted(
+                    p for p in (prev_files.keys() | files.keys()) if prev_files.get(p) != files.get(p)
+                )
+                conflicts: list[str] = []
+                for rel in changed_paths:
+                    safe_rel = checked_name(rel)
+                    target = (self.ws.root / safe_rel).resolve()
+                    if not target.is_relative_to(self.ws.root.resolve()):
+                        raise OpsError(f"拒绝写回越界路径：{rel}")
+                    disk_val: str | None
+                    if target.exists():
+                        if not target.is_file() or target.is_symlink():
+                            conflicts.append(rel)
+                            continue
+                        try:
+                            disk_val = target.read_text("utf-8")
+                        except (OSError, UnicodeDecodeError):
+                            conflicts.append(rel)
+                            continue
+                    else:
+                        disk_val = None
+                    base_val = prev_files.get(rel)
+                    new_val = files.get(rel)
+                    if disk_val != base_val and disk_val != new_val:
+                        conflicts.append(rel)
+                if conflicts:
+                    shown = "、".join(conflicts[:8]) + (f" 等 {len(conflicts)} 个文件" if len(conflicts) > 8 else "")
+                    raise OpsError(
+                        f"原目录存在运行期间的手工修改冲突，已中止写回（里程碑保持待合并，请备份或同步以下文件后重试）：{shown}"
+                    )
+
             root = self.ws.state_dir / "deliveries"
             root.mkdir(exist_ok=True)
             destination = root / key
@@ -948,10 +995,35 @@ class Engine:
                     temp = Path(directory) / "release"
                     materialize(files, temp)
                     temp.rename(destination)
+
+            if is_inplace:
+                ws_root = self.ws.root.resolve()
+                for rel in changed_paths:
+                    safe_rel = checked_name(rel)
+                    target = (ws_root / safe_rel).resolve()
+                    new_val = files.get(rel)
+                    if new_val is None:
+                        if target.is_file():
+                            target.unlink()
+                        parent_dir = target.parent
+                        while parent_dir != ws_root and parent_dir.exists() and not any(parent_dir.iterdir()):
+                            parent_dir.rmdir()
+                            parent_dir = parent_dir.parent
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with NamedTemporaryFile(mode="wb", dir=target.parent, delete=False) as tf:
+                            tf.write(new_val.encode("utf-8"))
+                        Path(tf.name).replace(target)
+
             for task in self.db.list_tasks(milestone_id=milestone_id):
                 self.db.update_task(task.task_id, status=TaskStatus.MERGED)
             self.db.update_milestone(milestone_id, status=MilestoneStatus.MERGED)
-            self.db.add_event("milestone.merged", f"已交付文件 {destination}", actor=actor)
+            msg = (
+                f"已写回原目录（更新 {len(changed_paths)} 个文件）并归档交付至 {destination}"
+                if is_inplace
+                else f"已交付文件 {destination}"
+            )
+            self.db.add_event("milestone.merged", msg, actor=actor)
             if all(m.status == MilestoneStatus.MERGED for m in self.db.list_milestones()):
                 self.set_status(ProjectStatus.COMPLETED)
             return

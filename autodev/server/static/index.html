@@ -80,23 +80,204 @@
         <div class="topbar-left">
           <h1 id="project-name" class="project-title">加载中…</h1>
           <span id="project-status" class="status-pill">INIT</span>
+          <span id="project-source-pill" class="tag hidden"></span>
           <span id="usage-pill" class="metric-pill">Tokens: 0</span>
         </div>
         <div class="topbar-right">
-          <label class="actor-field">
-            <span>成员</span>
-            <input id="actor-input" type="text" placeholder="姓名" />
-          </label>
+          <button id="btn-launcher-toggle" class="btn btn-primary">＋ 新建 / 接管项目</button>
           <button id="btn-agent-toggle" class="btn">编队与模型</button>
-          <button id="btn-wish-toggle" class="btn">输入需求</button>
-          <label>协作方式 <select id="collaboration-mode"><option value="files">文件交接</option><option value="git">Git 分支</option></select></label>
-          <button id="btn-ingest" class="btn">摄入资料</button>
-          <button id="btn-plan" class="btn">圆桌与立项</button>
+          <button id="btn-wish-toggle" class="btn">补充需求</button>
+          <button id="btn-plan" class="btn">开始圆桌与立项</button>
           <button id="btn-approve" class="btn btn-primary hidden">批准蓝图</button>
           <button id="btn-start" class="btn btn-primary">启动 Goal</button>
           <button id="btn-stop" class="btn btn-danger hidden">停止调度</button>
+          <details class="more-actions-menu">
+            <summary class="btn btn-sm">更多</summary>
+            <div class="more-actions-pop">
+              <label class="actor-field">
+                <span>成员</span>
+                <input id="actor-input" type="text" placeholder="姓名" />
+              </label>
+              <label class="more-row">协作方式 <select id="collaboration-mode"><option value="files">文件交接</option><option value="git">Git 分支</option></select></label>
+              <button id="btn-ingest" type="button" class="btn btn-sm">手动重新摄入资料</button>
+            </div>
+          </details>
         </div>
       </header>
+
+      <div id="project-launcher" class="launcher-backdrop" hidden>
+        <section class="launcher-dialog" role="dialog" aria-modal="true" aria-label="新建或接管项目">
+          <header class="launcher-head">
+            <div>
+              <h2>新建或接管项目</h2>
+              <p class="launcher-sub">选择启动方式并写清本轮需求，创建后自动同步到 LoopForge 与左侧「快速对话」</p>
+            </div>
+            <button type="button" id="btn-launcher-close" class="launcher-close" title="收起（Esc）" aria-label="收起">✕</button>
+          </header>
+
+          <nav class="launcher-nav" role="tablist">
+            <button type="button" class="launcher-tab active" data-launch-mode="scratch">
+              <span class="lt-title">从零新建</span>
+              <span class="lt-desc">一句话许愿或贴文档</span>
+            </button>
+            <button type="button" class="launcher-tab" data-launch-mode="local_folder">
+              <span class="lt-title">接管本地目录</span>
+              <span class="lt-desc">原地接管或上传导入</span>
+            </button>
+            <button type="button" class="launcher-tab" data-launch-mode="git_repo">
+              <span class="lt-title">接入 Git 仓库</span>
+              <span class="lt-desc">拉取分支并绑定远端</span>
+            </button>
+          </nav>
+
+          <div class="launcher-body">
+            <!-- 方式 1：从零新建 -->
+            <form id="form-launch-scratch" class="launcher-pane" data-launch-pane="scratch">
+              <div class="lf-row-2">
+                <label class="lf-field">
+                  <span class="lf-label">项目名称 <em>*</em></span>
+                  <input id="launch-scratch-name" required placeholder="例如：碎星航线 / 订单风控中心" />
+                </label>
+                <label class="lf-field">
+                  <span class="lf-label">交付协作方式</span>
+                  <select id="launch-scratch-collab">
+                    <option value="files">文件交接（零配置，推荐新手 / 纯代码项目）</option>
+                    <option value="git">Git 分支（多模块仓库与合入评审）</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="lf-composer">
+                <div class="lf-composer-head">
+                  <span class="lf-label">项目需求与目标规格</span>
+                  <label class="lf-attach-btn">
+                    <span>＋ 附带 .md / .txt 文档</span>
+                    <input id="launch-scratch-docs" type="file" multiple accept=".md,.txt,.json,.yaml,.yml" hidden />
+                  </label>
+                </div>
+                <textarea id="launch-scratch-wish" rows="7" placeholder="详细描述你要做的产品目标、核心功能、技术栈偏好或约束条件…&#10;&#10;支持直接粘贴完整 PRD / 架构文档，也可以点击右上角附带多个 Markdown 文件。"></textarea>
+                <div class="lf-composer-foot">
+                  <span id="launch-scratch-docs-hint" class="muted">支持附带多份 .md / .txt 需求或架构文档</span>
+                </div>
+              </div>
+
+              <footer class="launcher-foot">
+                <label class="check-inline"><input id="launch-scratch-autostart" type="checkbox" checked /> 创建后直接发起多智能体圆桌与拆蓝图</label>
+                <button id="btn-submit-scratch" type="submit" class="btn btn-primary btn-lg">创建项目并开始</button>
+              </footer>
+            </form>
+
+            <!-- 方式 2：接管本地文件夹 -->
+            <div class="launcher-pane" data-launch-pane="local_folder" hidden>
+              <div class="lf-segment" role="tablist">
+                <button type="button" class="lf-seg-btn active" data-local-sub="host">宿主机目录原地接管（推荐）</button>
+                <button type="button" class="lf-seg-btn" data-local-sub="browser">浏览器上传文件夹导入（兜底）</button>
+              </div>
+
+              <form id="form-launch-local-host">
+                <div id="launch-local-host-pane">
+                  <div class="lf-dir-card">
+                    <div class="lf-dir-bar">
+                      <input id="launch-local-path" type="text" placeholder="点选下方目录，或直接粘贴本机绝对路径后点「定位」" />
+                      <button type="button" id="btn-host-dir-go" class="btn btn-sm">定位</button>
+                      <button type="button" id="btn-host-dir-up" class="btn btn-sm">上级</button>
+                      <button type="button" id="btn-host-dir-pick-current" class="btn btn-sm">选定当前</button>
+                    </div>
+                    <div id="host-dir-status" class="lf-dir-meta">正在读取宿主机目录…</div>
+                    <div id="host-dir-list" class="host-dir-list"></div>
+                    <div id="launch-local-selected-hint" class="lf-dir-selected"></div>
+                  </div>
+
+                  <div class="lf-row-1">
+                    <label class="lf-field">
+                      <span class="lf-label">项目显示名称（可选，默认使用目录名）</span>
+                      <input id="launch-local-name" placeholder="留空自动使用所选文件夹名称" />
+                    </label>
+                  </div>
+
+                  <div class="lf-composer">
+                    <div class="lf-composer-head">
+                      <span class="lf-label">本轮改造目标与需求说明（可选）</span>
+                      <span class="muted" style="font-size:12px">自动扫描目录结构与 README 作为上下文</span>
+                    </div>
+                    <textarea id="launch-local-wish" rows="6" placeholder="写清楚你希望多智能体团队在这个现有项目上做什么…&#10;&#10;例如：&#10;1. 梳理现有鉴权逻辑并修复并发刷新 Token 的竞态问题&#10;2. 给订单导出接口补齐单元测试和异常处理&#10;3. 保持现有对外 API 路径兼容"></textarea>
+                  </div>
+
+                  <footer class="launcher-foot">
+                    <label class="check-inline"><input id="launch-local-autostart" type="checkbox" /> 接管后立即启动圆桌评审</label>
+                    <button id="btn-submit-local-host" type="submit" class="btn btn-primary btn-lg">原地接管该目录</button>
+                  </footer>
+                </div>
+              </form>
+
+              <form id="form-launch-local-browser">
+                <div id="launch-local-browser-pane" hidden>
+                  <div class="lf-row-2">
+                    <label class="lf-field">
+                      <span class="lf-label">选择本机文件夹 <em>*</em></span>
+                      <input id="launch-browser-folder" type="file" webkitdirectory directory multiple />
+                      <span id="launch-browser-folder-hint" class="muted" style="font-size:12px">自动跳过 .git / node_modules 与二进制文件</span>
+                    </label>
+                    <label class="lf-field">
+                      <span class="lf-label">项目名称</span>
+                      <input id="launch-browser-name" placeholder="自动取文件夹名称" />
+                    </label>
+                  </div>
+
+                  <div class="lf-composer">
+                    <div class="lf-composer-head">
+                      <span class="lf-label">本轮改造目标与需求说明（可选）</span>
+                    </div>
+                    <textarea id="launch-browser-wish" rows="6" placeholder="描述你想在这个导入项目上新增的功能、重构目标或验收标准…"></textarea>
+                  </div>
+
+                  <footer class="launcher-foot">
+                    <label class="check-inline"><input id="launch-browser-autostart" type="checkbox" /> 导入后立即启动圆桌评审</label>
+                    <button id="btn-submit-local-browser" type="submit" class="btn btn-primary btn-lg">导入文件夹并创建</button>
+                  </footer>
+                </div>
+              </form>
+            </div>
+
+            <!-- 方式 3：接入 Git 仓库与分支 -->
+            <form id="form-launch-git" class="launcher-pane" data-launch-pane="git_repo" hidden>
+              <div class="lf-row-1">
+                <label class="lf-field">
+                  <span class="lf-label">从 LoopForge / Gitea 已有仓库快速填充（可选）</span>
+                  <select id="launch-git-existing"><option value="">-- 可直接选择已有仓库 --</option></select>
+                </label>
+              </div>
+              <div class="lf-row-git">
+                <label class="lf-field">
+                  <span class="lf-label">Git 仓库地址 <em>*</em></span>
+                  <input id="launch-git-url" required placeholder="https://github.com/org/repo.git 或 http://gitea:3000/owner/repo.git" />
+                </label>
+                <label class="lf-field">
+                  <span class="lf-label">目标分支</span>
+                  <input id="launch-git-branch" placeholder="main / feat/xxx（留空用默认）" />
+                </label>
+                <label class="lf-field">
+                  <span class="lf-label">项目名称（可选）</span>
+                  <input id="launch-git-name" placeholder="默认取仓库名" />
+                </label>
+              </div>
+
+              <div class="lf-composer">
+                <div class="lf-composer-head">
+                  <span class="lf-label">本轮开发 / 改造需求说明（可选）</span>
+                  <span class="muted" style="font-size:12px">克隆后绑定为默认仓库，合入后同步推回远端</span>
+                </div>
+                <textarea id="launch-git-wish" rows="6" placeholder="描述在这条分支上需要完成的需求、接口契约、测试要求或不要改动的文件范围…"></textarea>
+              </div>
+
+              <footer class="launcher-foot">
+                <label class="check-inline"><input id="launch-git-autostart" type="checkbox" /> 克隆接入后立即启动圆桌评审</label>
+                <button id="btn-submit-git" type="submit" class="btn btn-primary btn-lg">克隆并接入仓库</button>
+              </footer>
+            </form>
+          </div>
+        </section>
+      </div>
 
       <form id="agent-config-form" class="card wish-composer" hidden>
         <div class="card-head" style="margin-bottom:8px">
@@ -110,6 +291,22 @@
           </div>
         </div>
         <div id="agent-runtime-badges" class="inline-form" style="margin-bottom:10px;gap:8px;flex-wrap:wrap"></div>
+        <div id="cb-key-box" class="cb-key-box" hidden>
+          <div class="cb-key-head">
+            <strong>🔑 CodeBuddy API Key 凭据（LoopForge 底座要求）</strong>
+            <span class="muted" style="font-size:12px">LoopForge 0.4.0 中 Codex / Claude Code 可直接复用本机登录态免 Key，CodeBuddy 需在此填入个人 API Key</span>
+          </div>
+          <div class="inline-form" style="gap:8px;margin-top:6px;flex-wrap:wrap">
+            <select id="cb-key-env" style="min-width:140px">
+              <option value="">国际站 (codebuddy.ai)</option>
+              <option value="internal">国内站 (copilot.tencent.com)</option>
+              <option value="ioa">iOA 企业版</option>
+            </select>
+            <input id="cb-key-input" type="password" style="flex:1;min-width:220px" placeholder="粘贴 CodeBuddy API Key（直接保存到 LoopForge 个人凭据）" />
+            <button type="button" id="btn-cb-key-save" class="btn btn-primary btn-sm">保存 Key 到 LoopForge</button>
+            <button type="button" id="btn-cb-key-jump" class="btn btn-sm">打开 LoopForge 设置页</button>
+          </div>
+        </div>
         <div class="form-grid">
           <label class="field">全局默认 Harness
             <select id="cfg-harness">

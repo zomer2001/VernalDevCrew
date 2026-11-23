@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from autodev import gitops
-from autodev.artifacts import FileExchange
+from autodev.artifacts import MAX_TOTAL as FILE_EXCHANGE_MAX_TOTAL, FileExchange, checked_name
 from autodev.config import Settings, Workspace
 from autodev.council import interject_council, run_council
 from autodev.engine import Engine, OpsError, PlanningError, init_workspace
@@ -36,6 +36,18 @@ from autodev.loopforge.bridge import LoopForgeBridge, verify_context_sig
 from autodev.loopforge.client import LoopForgeClient, LoopForgeError
 from autodev.scheduler import Scheduler
 from autodev.server.history import event_page, history_sources
+from autodev.server.project_launcher import (
+    choose_preferred_harness_from_runtimes,
+    host_projects_root,
+    list_host_directories,
+    load_project_registry,
+    merge_runner_runtimes,
+    register_project_mapping,
+    resolve_safe_host_dir,
+    scan_workspace_source_files_detailed,
+    slugify_project_id,
+    write_codebase_overview_doc,
+)
 from autodev.server.proxy import LoopForgeProxy
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -119,6 +131,34 @@ class ProjectSelectRequest(BaseModel):
     project_name: str = ""
 
 
+class ProjectCreateRequest(BaseModel):
+    mode: str = "scratch"  # scratch | local_folder | git_repo
+    name: str = ""
+    project_id: str = ""
+    wish: str = ""
+    docs: list[dict[str, str]] = []
+    local_path: str = ""
+    git_url: str = ""
+    branch: str = ""
+    collaboration_mode: str = ""
+    start_council: bool = False
+    actor: str = "owner"
+
+
+class ImportFolderRequest(BaseModel):
+    name: str
+    project_id: str = ""
+    wish: str = ""
+    files: list[dict[str, str]] = []
+    start_council: bool = False
+    actor: str = "owner"
+
+
+class CodeBuddyKeyRequest(BaseModel):
+    api_key: str
+    internet_environment: str = ""
+
+
 class ActorRequest(BaseModel):
     actor: str = "owner"
 
@@ -140,6 +180,7 @@ def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport
     all_slots: list[_ProjectSlot] = []
     auth_cache: dict[str, tuple[float, str]] = {}
     proj_perm_cache: dict[str, tuple[float, set[str]]] = {}
+    runner_rt_cache: dict[str, tuple[float, dict[str, dict[str, Any]], dict[str, Any]]] = {}
 
     def _register_slot(eng: Engine) -> _ProjectSlot:
         slot = _ProjectSlot(project_key=eng.settings.loopforge_project_id or eng.ws.root.name, engine=eng)
@@ -186,7 +227,13 @@ def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport
 
         parent = _workspaces_parent()
         target_ws: Workspace | None = None
-        if parent.is_dir():
+        reg = load_project_registry(parent)
+        mapped = reg.get(pid)
+        if isinstance(mapped, dict) and mapped.get("root"):
+            mp = Path(str(mapped["root"]))
+            if mp.is_dir() and (mp / ".autodev" / "state.db").is_file():
+                target_ws = Workspace(mp)
+        if target_ws is None and parent.is_dir():
             for entry in sorted(parent.iterdir()):
                 if not entry.is_dir() or entry.is_symlink():
                     continue
@@ -302,6 +349,11 @@ def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport
     @app.middleware("http")
     async def vernal_project_and_auth_middleware(request: Request, call_next: Any):
         path = request.url.path
+        if path.startswith("/vernal-static/"):
+            resp = await call_next(request)
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+
         if not path.startswith("/vernal-api/"):
             return await call_next(request)
 
@@ -323,8 +375,17 @@ def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport
             resolved = _find_or_open_slot(req_pid, create=False)
             if resolved is not None:
                 target_slot = resolved
-            elif path in ("/vernal-api/project/select", "/vernal-api/runtime/status", "/vernal-api/runtime/bind", "/vernal-api/runner/health"):
-                # 新项目首次打开尚未建本地工作区：允许先查状态与绑定登录态，随后由 /project/select 初始化工作区
+            elif path in (
+                "/vernal-api/project/select",
+                "/vernal-api/project/create",
+                "/vernal-api/project/import-folder",
+                "/vernal-api/host/dirs",
+                "/vernal-api/credentials/codebuddy",
+                "/vernal-api/runtime/status",
+                "/vernal-api/runtime/bind",
+                "/vernal-api/runner/health",
+            ):
+                # 新项目首次打开或创建/接管尚未建本地工作区：允许引导与建项接口先执行
                 uninitialized_bootstrap = True
             else:
                 return JSONResponse({"detail": f"项目工作区尚未初始化：{req_pid}"}, status_code=404)
@@ -368,14 +429,21 @@ def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport
             is_sensitive_op = (
                 request.method in ("POST", "PUT", "PATCH", "DELETE")
                 and path not in ("/vernal-api/runtime/bind", "/vernal-api/runner/bind-code")
-            ) or (not is_local and path.endswith("/files.zip"))
+            ) or (not is_local and (path.endswith("/files.zip") or path == "/vernal-api/host/dirs"))
             use_lf_cookie_auth = bool(cookie) and target_slot.engine.settings.runtime_backend == "loopforge"
 
             if is_sensitive_op and (not is_local or require_auth_env or use_lf_cookie_auth):
                 try:
                     await _verify_cookie_user(cookie, lf_url)
                     check_pid = req_pid or target_slot.engine.settings.loopforge_project_id
-                    if check_pid and path != "/vernal-api/project/select":
+                    skip_perm_paths = (
+                        "/vernal-api/project/select",
+                        "/vernal-api/project/create",
+                        "/vernal-api/project/import-folder",
+                        "/vernal-api/host/dirs",
+                        "/vernal-api/credentials/codebuddy",
+                    )
+                    if check_pid and path not in skip_perm_paths:
                         await _verify_project_access(cookie, lf_url, check_pid)
                 except HTTPException as exc:
                     return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
@@ -392,12 +460,66 @@ def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport
         s = slot or _slot()
         return s.plan_task is not None and not s.plan_task.done()
 
+    async def _fetch_unified_runtimes(
+        eng: Engine,
+        *,
+        cookie: str = "",
+        refresh: bool = False,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+        local_rt = eng.runtimes_status(refresh=refresh)
+        if eng.settings.runtime_backend != "loopforge":
+            return merge_runner_runtimes(local_rt, eng.settings)
+        tok_val = eng.settings.effective_loopforge_token()
+        cache_key = f"{eng.settings.loopforge_url}|{hashlib.sha256((tok_val or cookie).encode('utf-8')).hexdigest()[:16]}"
+        now = time.monotonic()
+        if not refresh:
+            cached = runner_rt_cache.get(cache_key)
+            if cached and now - cached[0] < 3.0:
+                return cached[1], cached[2]
+        runners: list[dict[str, Any]] = []
+        user_info: dict[str, Any] = {}
+        client = LoopForgeClient(eng.settings.loopforge_url, tok_val)
+        if tok_val:
+            try:
+                runners = await client.list_runners()
+            except LoopForgeError:
+                runners = []
+        try:
+            if cookie:
+                user_info = await client.auth_current_with_cookie(cookie)
+            elif tok_val and any(isinstance(r, dict) and r.get("status") == "online" for r in runners):
+                user_info = await client.auth_current()
+        except LoopForgeError:
+            user_info = {}
+        merged, summary = merge_runner_runtimes(local_rt, eng.settings, runners=runners, user_info=user_info)
+        runner_rt_cache[cache_key] = (now, merged, summary)
+        return merged, summary
+
     @app.get("/vernal-api/state")
-    def get_state() -> dict[str, Any]:
-        snap = engine.snapshot()
+    async def get_state(request: Request) -> dict[str, Any]:
+        eng = _slot().engine
+        snap = eng.snapshot()
         snap["scheduler_running"] = _is_scheduler_running()
         snap["planning"] = _is_planning()
-        snap["recent_events"] = engine.db.events_after(max(0, engine.db.last_event_id() - 120))
+        snap["recent_events"] = eng.db.events_after(max(0, eng.db.last_event_id() - 120))
+        runtimes, runner_summary = await _fetch_unified_runtimes(eng, cookie=request.headers.get("cookie", ""))
+        snap["runtimes"] = runtimes
+        snap["runner_summary"] = runner_summary
+        snap["workspace_root"] = str(eng.ws.root)
+        snap["host_dirs_available"] = host_projects_root().is_dir()
+        snap["source_mode"] = eng.db.meta_get("source_mode") or (
+            "git" if (eng.ws.root / ".git").exists() else "scratch"
+        )
+        snap["git_branch"] = ""
+        snap["git_remote"] = ""
+        if (eng.ws.root / ".git").exists():
+            try:
+                snap["git_branch"] = gitops.current_branch(eng.ws.root)
+                proc_rem = gitops.git(["remote", "get-url", "origin"], eng.ws.root, check=False)
+                if proc_rem.returncode == 0:
+                    snap["git_remote"] = proc_rem.stdout.strip()
+            except Exception:
+                pass
         return snap
 
     @app.get("/vernal-api/slices")
@@ -462,6 +584,12 @@ def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport
 
         async def _run_plan() -> None:
             try:
+                # 新人一键点「开始圆桌与立项」时，若尚未摄入资料则自动先摄入，省去多余手动步骤
+                if not eng.db.list_slices():
+                    try:
+                        eng.ingest()
+                    except OpsError:
+                        pass
                 await eng.plan(extra_instructions=req.extra_instructions, mode=req.mode)
             except (OpsError, PlanningError, Exception) as exc:
                 eng.db.add_event("plan.failed", f"规划失败：{exc}")
@@ -1233,6 +1361,467 @@ def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport
         }
 
 
+    @app.get("/vernal-api/host/dirs")
+    def api_host_dirs(path: str = "") -> dict[str, Any]:
+        """浏览宿主机挂载目录，供前端点选本地文件夹原地接管。"""
+        try:
+            return list_host_directories(path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    async def _finalize_launched_project(
+        *,
+        ws: Workspace,
+        pid: str,
+        display_name: str,
+        collab_mode: str,
+        source_mode: str,
+        seed_eng: Engine,
+        git_url: str = "",
+        branch: str = "",
+        wish: str = "",
+        docs: list[dict[str, str]] | None = None,
+        start_council: bool = False,
+        actor: str = "owner",
+        update_default_slot: bool = True,
+    ) -> dict[str, Any]:
+        new_settings = ws.load_settings()
+        new_settings.runtime_backend = seed_eng.settings.runtime_backend
+        new_settings.loopforge_url = seed_eng.settings.loopforge_url
+        new_settings.gitea_url = seed_eng.settings.gitea_url
+        new_settings.vernal_public_url = seed_eng.settings.vernal_public_url
+        if not new_settings.loopforge_token and seed_eng.settings.loopforge_token:
+            new_settings.loopforge_token = seed_eng.settings.loopforge_token
+        new_settings.loopforge_project_id = pid
+        new_settings.collaboration_mode = collab_mode
+        if branch:
+            new_settings.base_branch = branch
+
+        new_eng = Engine(ws, settings=new_settings)
+        new_eng.db.meta_set("source_mode", source_mode)
+        if git_url:
+            new_eng.db.meta_set("git_url", git_url)
+        if branch:
+            new_eng.db.meta_set("git_branch", branch)
+
+        # 写入附带需求文档或初始许愿
+        if docs:
+            ws.inputs_dir.mkdir(parents=True, exist_ok=True)
+            for idx, doc in enumerate(docs, 1):
+                raw_fn = Path(str(doc.get("filename") or f"doc-{idx}.md")).name
+                safe_fn = re.sub(r"[^0-9A-Za-z._\-\u4e00-\u9fff]+", "_", raw_fn).strip("._") or f"doc-{idx}.md"
+                if "." not in safe_fn:
+                    safe_fn += ".md"
+                content = str(doc.get("content") or "")
+                if content.strip():
+                    (ws.inputs_dir / safe_fn).write_text(content, "utf-8")
+        if wish.strip():
+            ws.inputs_dir.mkdir(parents=True, exist_ok=True)
+            (ws.inputs_dir / "01-wish.md").write_text(f"# 项目需求\n\n{wish.strip()}\n", "utf-8")
+
+        if source_mode in ("local_folder", "git_repo", "import_folder"):
+            write_codebase_overview_doc(ws.root, source_mode=source_mode, git_url=git_url, branch=branch)
+            if collab_mode == "files":
+                seed_files, overflow, total_bytes = scan_workspace_source_files_detailed(
+                    ws.root, max_total_bytes=FILE_EXCHANGE_MAX_TOTAL
+                )
+                if overflow:
+                    new_eng.db.close()
+                    sample = "、".join(overflow[:5]) + (f" 等 {len(overflow)} 个文件" if len(overflow) > 5 else "")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"项目源码总大小 {total_bytes / (1024 * 1024):.2f} MiB 超过文件交接模式上限 "
+                            f"（{FILE_EXCHANGE_MAX_TOTAL // (1024 * 1024)} MiB），以下文件无法完整交接给开发任务：{sample}。"
+                            "请精简大文件，或为该目录初始化 Git 后使用 Git 分支模式。"
+                        ),
+                    )
+                if seed_files:
+                    FileExchange(ws, new_eng.db).seed_baseline(seed_files)
+
+        slices = 0
+        try:
+            slices = new_eng.ingest()
+        except OpsError:
+            slices = 0
+
+        register_project_mapping(
+            _workspaces_parent(),
+            pid,
+            ws.root,
+            source_mode=source_mode,
+            git_url=git_url,
+            branch=branch,
+        )
+
+        slot = _register_slot(new_eng)
+        slots[pid] = slot
+        if update_default_slot:
+            default_slot_ref[0] = slot
+
+        lf_synced = False
+        lf_repo_id = ""
+        tok_ctx = current_slot_var.set(slot)
+        try:
+            tok_val = new_eng.settings.effective_loopforge_token()
+            if new_eng.settings.runtime_backend == "loopforge" and tok_val:
+                client = LoopForgeClient(new_eng.settings.loopforge_url, tok_val)
+                try:
+                    existing_projs = await client.list_projects()
+                    proj_obj = next((p for p in existing_projs if str(p.get("id")) == pid), None)
+                    if proj_obj is None:
+                        proj_obj = await client.create_project(
+                            project_id=pid,
+                            name=display_name,
+                            description=f"Vernal 启动台创建（{source_mode}）",
+                        )
+                    if git_url:
+                        repo_id = f"{pid}-repo"
+                        try:
+                            await client.put_repository(
+                                {
+                                    "id": repo_id,
+                                    "projectId": pid,
+                                    "name": display_name,
+                                    "cloneUrl": git_url,
+                                    "repoUrl": git_url,
+                                    "defaultBranch": branch or new_eng.settings.base_branch,
+                                }
+                            )
+                            lf_repo_id = repo_id
+                            new_eng.settings.loopforge_repository_id = repo_id
+                            if isinstance(proj_obj, dict):
+                                await client.put_project({**proj_obj, "id": pid, "name": display_name, "defaultRepositoryId": repo_id})
+                        except LoopForgeError:
+                            pass
+                    await ensure_vernal_loopforge_assets(client, pid, new_eng.settings)
+                    lf_synced = True
+                    proj_perm_cache.clear()
+                except LoopForgeError:
+                    pass
+            _persist_runtime_config()
+            if start_council and slices > 0:
+                async def _auto_plan() -> None:
+                    try:
+                        await new_eng.plan(extra_instructions="", mode=new_eng.settings.planning_mode)
+                    except Exception as exc:
+                        new_eng.db.add_event("plan.failed", f"自动启动圆桌失败：{exc}")
+
+                slot.plan_task = asyncio.create_task(_auto_plan())
+        finally:
+            current_slot_var.reset(tok_ctx)
+
+        new_eng.db.add_event(
+            "project.launched",
+            f"已通过启动台初始化项目「{display_name}」（方式={source_mode}，协作={collab_mode}，切片={slices}）",
+            actor=actor,
+        )
+        return {
+            "ok": True,
+            "project_id": pid,
+            "name": display_name,
+            "workspace_root": str(ws.root),
+            "source_mode": source_mode,
+            "collaboration_mode": collab_mode,
+            "branch": branch or new_eng.settings.base_branch,
+            "slices": slices,
+            "loopforge_synced": lf_synced,
+            "repository_id": lf_repo_id,
+            "council_started": bool(start_council and slices > 0),
+        }
+
+    async def _guard_project_target(
+        request: Request,
+        pid: str,
+        target_dir: Path,
+        *,
+        allow_same_dir: bool = False,
+    ) -> None:
+        """创建或导入前校验同名冲突与多用户项目权限，避免误覆盖已有项目目录。"""
+        parent = _workspaces_parent()
+        reg = load_project_registry(parent)
+        resolved_target = target_dir.resolve()
+        mapped = reg.get(pid)
+        if isinstance(mapped, dict) and mapped.get("root"):
+            mapped_path = Path(str(mapped["root"])).resolve()
+            if not allow_same_dir or mapped_path != resolved_target:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"项目「{pid}」已存在，请更换项目名称，避免覆盖已有工作区",
+                )
+        if pid in slots:
+            existing_root = slots[pid].engine.ws.root.resolve()
+            if not allow_same_dir or existing_root != resolved_target:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"项目「{pid}」已存在，请更换项目名称，避免覆盖已有工作区",
+                )
+        if not allow_same_dir and target_dir.exists() and any(target_dir.iterdir()):
+            raise HTTPException(
+                status_code=409,
+                detail=f"目标工作区目录「{pid}」已存在且非空，请更换项目名称避免覆盖已有文件",
+            )
+        cookie = request.headers.get("cookie", "")
+        eng = _slot().engine
+        if cookie and eng.settings.runtime_backend == "loopforge":
+            try:
+                existing_projs = await LoopForgeClient(eng.settings.loopforge_url).list_projects_with_cookie(cookie)
+                if any(str(p.get("id")) == pid for p in existing_projs):
+                    if not allow_same_dir:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"LoopForge 中已存在同名项目「{pid}」，请更换项目名称",
+                        )
+                    await _verify_project_access(cookie, eng.settings.loopforge_url, pid)
+            except LoopForgeError:
+                pass
+
+    @app.post("/vernal-api/project/create")
+    async def api_create_project(request: Request, req: ProjectCreateRequest) -> dict[str, Any]:
+        """统一项目启动台：支持从零新建、原地接管本地文件夹、克隆已有 Git 仓库与分支。"""
+        mode = (req.mode or "scratch").strip().lower()
+        if mode not in ("scratch", "local_folder", "git_repo"):
+            raise HTTPException(status_code=422, detail=f"不支持的创建方式：{mode}")
+
+        seed_eng = _slot().engine
+        parent = _workspaces_parent()
+        parent.mkdir(parents=True, exist_ok=True)
+        update_default = not bool(request.headers.get("x-vernal-project"))
+
+        if mode == "scratch":
+            display_name = req.name.strip() or "新项目"
+            pid = req.project_id.strip() or slugify_project_id(display_name, fallback="proj")
+            if not _PROJECT_ID_RE.fullmatch(pid):
+                raise HTTPException(status_code=400, detail="项目标识仅支持字母、数字、点、下划线和短横线")
+            collab = req.collaboration_mode.strip().lower() or "files"
+            if collab not in ("files", "git"):
+                raise HTTPException(status_code=422, detail="协作方式仅支持 files 或 git")
+            ws_dir = parent / pid
+            await _guard_project_target(request, pid, ws_dir, allow_same_dir=False)
+            ws = init_workspace(ws_dir, name=display_name, collaboration_mode=collab)
+            return await _finalize_launched_project(
+                ws=ws,
+                pid=pid,
+                display_name=display_name,
+                collab_mode=collab,
+                source_mode="scratch",
+                seed_eng=seed_eng,
+                wish=req.wish,
+                docs=req.docs,
+                start_council=req.start_council,
+                actor=req.actor,
+                update_default_slot=update_default,
+            )
+
+        if mode == "local_folder":
+            if not req.local_path.strip():
+                raise HTTPException(status_code=400, detail="请选择或填写本机项目文件夹路径")
+            try:
+                folder = resolve_safe_host_dir(req.local_path)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            display_name = req.name.strip() or folder.name
+            pid = req.project_id.strip() or slugify_project_id(display_name, fallback="local")
+            if not _PROJECT_ID_RE.fullmatch(pid):
+                raise HTTPException(status_code=400, detail="非法的项目标识")
+            await _guard_project_target(request, pid, folder, allow_same_dir=True)
+            is_git = (folder / ".git").exists()
+            detected_branch = ""
+            detected_remote = ""
+            if is_git:
+                try:
+                    detected_branch = gitops.current_branch(folder)
+                    pr = gitops.git(["remote", "get-url", "origin"], folder, check=False)
+                    if pr.returncode == 0:
+                        detected_remote = pr.stdout.strip()
+                except Exception:
+                    pass
+            collab = req.collaboration_mode.strip().lower() or ("git" if is_git else "files")
+            if collab not in ("files", "git"):
+                collab = "git" if is_git else "files"
+            if collab == "files":
+                _, overflow, total_bytes = scan_workspace_source_files_detailed(
+                    folder, max_total_bytes=FILE_EXCHANGE_MAX_TOTAL
+                )
+                if overflow:
+                    sample = "、".join(overflow[:5]) + (f" 等 {len(overflow)} 个文件" if len(overflow) > 5 else "")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"目录文本源码总大小 {total_bytes / (1024 * 1024):.2f} MiB 超过文件交接上限 "
+                            f"（{FILE_EXCHANGE_MAX_TOTAL // (1024 * 1024)} MiB），受影响文件：{sample}。"
+                            "请精简无关大文件，或使用 Git 模式接管。"
+                        ),
+                    )
+            target_branch = req.branch.strip() or detected_branch
+            ws = init_workspace(folder, name=display_name, collaboration_mode=collab, base_branch=target_branch or None)
+            return await _finalize_launched_project(
+                ws=ws,
+                pid=pid,
+                display_name=display_name,
+                collab_mode=collab,
+                source_mode="local_folder",
+                seed_eng=seed_eng,
+                git_url=detected_remote,
+                branch=target_branch,
+                wish=req.wish,
+                docs=req.docs,
+                start_council=req.start_council,
+                actor=req.actor,
+                update_default_slot=update_default,
+            )
+
+        # mode == "git_repo"
+        git_url = req.git_url.strip()
+        if not git_url:
+            raise HTTPException(status_code=400, detail="请填写 Git 仓库地址")
+        repo_basename = git_url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git") or "git-project"
+        display_name = req.name.strip() or repo_basename
+        pid = req.project_id.strip() or slugify_project_id(display_name, fallback="repo")
+        if not _PROJECT_ID_RE.fullmatch(pid):
+            raise HTTPException(status_code=400, detail="非法的项目标识")
+        target_dir = parent / pid
+        await _guard_project_target(request, pid, target_dir, allow_same_dir=False)
+        branch = req.branch.strip()
+        clone_args = ["clone"]
+        if branch:
+            clone_args.extend(["--branch", branch])
+        clone_args.extend([git_url, str(target_dir)])
+        proc = gitops.git(clone_args, parent, check=False)
+        if proc.returncode != 0:
+            err_msg = (proc.stderr or proc.stdout).strip() or "git clone 失败"
+            raise HTTPException(status_code=400, detail=f"克隆仓库失败：{err_msg}")
+
+        actual_branch = branch
+        try:
+            actual_branch = gitops.current_branch(target_dir)
+        except Exception:
+            pass
+        ws = init_workspace(target_dir, name=display_name, collaboration_mode="git", base_branch=actual_branch or None)
+        return await _finalize_launched_project(
+            ws=ws,
+            pid=pid,
+            display_name=display_name,
+            collab_mode="git",
+            source_mode="git_repo",
+            seed_eng=seed_eng,
+            git_url=git_url,
+            branch=actual_branch,
+            wish=req.wish,
+            docs=req.docs,
+            start_council=req.start_council,
+            actor=req.actor,
+            update_default_slot=update_default,
+        )
+
+    @app.post("/vernal-api/project/import-folder")
+    async def api_import_folder(request: Request, req: ImportFolderRequest) -> dict[str, Any]:
+        """浏览器原生文件夹选择（webkitdirectory）兜底导入：与文件交接共用 4 MiB 上限，写盘前完整校验冲突与体积。"""
+        display_name = req.name.strip() or "导入项目"
+        pid = req.project_id.strip() or slugify_project_id(display_name, fallback="import")
+        if not _PROJECT_ID_RE.fullmatch(pid):
+            raise HTTPException(status_code=400, detail="非法的项目标识")
+        if not req.files:
+            raise HTTPException(status_code=400, detail="未收到任何文件")
+        if len(req.files) > 500:
+            raise HTTPException(status_code=400, detail="单次浏览器导入最多支持 500 个文本文件，大型仓库请使用「原地接管本地文件夹」或「接入 Git 仓库」")
+
+        parent = _workspaces_parent()
+        target_dir = parent / pid
+        await _guard_project_target(request, pid, target_dir, allow_same_dir=False)
+
+        # 写盘前先校验全部有效文件的总大小，与 FileExchange.MAX_TOTAL（4 MiB）严格一致，避免“导入成功但开发任务丢文件”
+        staged: list[tuple[str, bytes]] = []
+        overflow: list[str] = []
+        total_bytes = 0
+        for item in req.files:
+            rel = str(item.get("path") or "").replace("\\", "/").lstrip("/")
+            content = str(item.get("content") or "")
+            if not rel or ".." in Path(rel).parts:
+                continue
+            parts = Path(rel).parts
+            if any(p in (".git", "node_modules", "__pycache__", ".venv", ".autodev", "inputs") for p in parts):
+                continue
+            try:
+                safe_rel = checked_name(rel)
+            except ValueError:
+                continue
+            encoded = content.encode("utf-8", errors="ignore")
+            if total_bytes + len(encoded) > FILE_EXCHANGE_MAX_TOTAL:
+                overflow.append(safe_rel)
+                total_bytes += len(encoded)
+                continue
+            total_bytes += len(encoded)
+            staged.append((safe_rel, encoded))
+
+        if overflow:
+            sample = "、".join(overflow[:5]) + (f" 等 {len(overflow)} 个文件" if len(overflow) > 5 else "")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"导入文本总大小 {total_bytes / (1024 * 1024):.2f} MiB 超过文件交接上限 "
+                    f"（{FILE_EXCHANGE_MAX_TOTAL // (1024 * 1024)} MiB），无法完整交给开发任务；"
+                    f"超限受影响文件：{sample}。请精简大文件或改用「接入 Git 仓库」/「原地接管 Git 目录」。"
+                ),
+            )
+        if not staged:
+            raise HTTPException(status_code=400, detail="没有可导入的有效文本源码文件")
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        root_resolved = target_dir.resolve()
+        for safe_rel, encoded in staged:
+            dest = (root_resolved / safe_rel).resolve()
+            if not dest.is_relative_to(root_resolved):
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(encoded)
+        imported = len(staged)
+
+        ws = init_workspace(target_dir, name=display_name, collaboration_mode="files")
+        result = await _finalize_launched_project(
+            ws=ws,
+            pid=pid,
+            display_name=display_name,
+            collab_mode="files",
+            source_mode="import_folder",
+            seed_eng=_slot().engine,
+            wish=req.wish,
+            start_council=req.start_council,
+            actor=req.actor,
+            update_default_slot=not bool(request.headers.get("x-vernal-project")),
+        )
+        result["imported_files"] = imported
+        return result
+
+    @app.post("/vernal-api/credentials/codebuddy")
+    async def api_save_codebuddy_key(request: Request, req: CodeBuddyKeyRequest) -> dict[str, Any]:
+        """直接在 Vernal 编队面板保存当前登录用户的 CodeBuddy API Key 到底层 LoopForge 个人凭据。"""
+        api_key = req.api_key.strip()
+        if not api_key:
+            raise HTTPException(status_code=400, detail="请输入有效的 CodeBuddy API Key")
+        env_val = req.internet_environment.strip()
+        if env_val not in ("", "internal", "ioa"):
+            raise HTTPException(status_code=422, detail="网络环境仅支持国际站（留空）、国内站（internal）或 iOA（ioa）")
+
+        eng = _slot().engine
+        cookie = request.headers.get("cookie", "")
+        tok_val = eng.settings.effective_loopforge_token()
+        client = LoopForgeClient(eng.settings.loopforge_url, tok_val)
+        try:
+            me = await (client.auth_current_with_cookie(cookie) if cookie else client.auth_current())
+        except LoopForgeError as exc:
+            raise HTTPException(status_code=401, detail=f"获取当前登录用户失败：{exc}") from exc
+        user_obj = me.get("user") if isinstance(me.get("user"), dict) else me
+        uid = (user_obj or {}).get("id")
+        if not uid:
+            raise HTTPException(status_code=401, detail="未能识别当前 LoopForge 用户 ID，请先在网页完成登录")
+        try:
+            await client.save_user_codebuddy_key(uid, api_key, env_val, cookie_header=cookie)
+        except LoopForgeError as exc:
+            raise HTTPException(status_code=exc.status_code or 502, detail=f"保存 CodeBuddy API Key 失败：{exc}") from exc
+        runner_rt_cache.clear()
+        return {"ok": True, "codebuddy_api_key_configured": True, "internet_environment": env_val}
+
     @app.post("/vernal-api/wish")
     def api_wish(req: WishRequest) -> dict[str, Any]:
         """许愿式需求录入：写入 inputs/ 并立即切片，供圆桌评审使用。"""
@@ -1268,12 +1857,21 @@ def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport
         rt_block = "[runtime]\n" + "".join(
             f"{key} = {json.dumps(getattr(engine.settings, key), ensure_ascii=False)}\n" for key in keys
         ) + "\n"
+        git_block = (
+            "[git]\n"
+            f"base_branch = {json.dumps(engine.settings.base_branch, ensure_ascii=False)}\n"
+            f"protected_paths = {json.dumps(engine.settings.protected_paths, ensure_ascii=False)}\n\n"
+        )
         import re
 
         if re.search(r"(?m)^\[runtime\]\s*$", text):
             text = re.sub(r"(?ms)^\[runtime\]\s*.*?(?=^\[|\Z)", lambda _m: rt_block, text)
         else:
             text = text.rstrip("\n") + "\n\n" + rt_block
+        if re.search(r"(?m)^\[git\]\s*$", text):
+            text = re.sub(r"(?ms)^\[git\]\s*.*?(?=^\[|\Z)", lambda _m: git_block, text)
+        else:
+            text = text.rstrip("\n") + "\n\n" + git_block
         with NamedTemporaryFile(mode="w", encoding="utf-8", dir=cfg_path.parent, delete=False) as tmp:
             tmp.write(text)
         Path(tmp.name).replace(cfg_path)
@@ -1336,14 +1934,18 @@ def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport
         Path(tmp.name).replace(cfg_path)
 
     @app.post("/vernal-api/agent/rescan")
-    def api_agent_rescan() -> dict[str, Any]:
-        from autodev.config import detect_preferred_harness
-
-        runtimes = engine.runtimes_status(refresh=True)
+    async def api_agent_rescan(request: Request) -> dict[str, Any]:
+        eng = _slot().engine
+        runtimes, runner_summary = await _fetch_unified_runtimes(
+            eng,
+            cookie=request.headers.get("cookie", ""),
+            refresh=True,
+        )
         return {
             "ok": True,
             "runtimes": runtimes,
-            "preferred_harness": detect_preferred_harness(engine.settings),
+            "runner_summary": runner_summary,
+            "preferred_harness": choose_preferred_harness_from_runtimes(runtimes, eng.settings),
         }
 
     @app.post("/vernal-api/agent/config")

@@ -86,15 +86,63 @@ class LoopForgeClient:
         name: str,
         description: str = "",
         workflow_id: str = "",
+        default_repository_id: str = "",
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"id": project_id, "name": name, "description": description}
         if workflow_id:
             body["workflowId"] = workflow_id
+        if default_repository_id:
+            body["defaultRepositoryId"] = default_repository_id
         return await self._req("POST", "/api/projects", json_body=body)
+
+    async def put_project(self, project: dict[str, Any]) -> dict[str, Any]:
+        data = await self._req("PUT", "/api/projects", json_body=project)
+        return data if isinstance(data, dict) else {}
 
     async def list_repositories(self) -> list[dict[str, Any]]:
         data = await self._req("GET", "/api/repositories")
         return data if isinstance(data, list) else []
+
+    async def put_repository(self, repo: dict[str, Any]) -> dict[str, Any]:
+        data = await self._req("PUT", "/api/repositories", json_body=repo)
+        return data if isinstance(data, dict) else {}
+
+    async def auth_current(self) -> dict[str, Any]:
+        data = await self._req("GET", "/api/auth/current")
+        return data if isinstance(data, dict) else {}
+
+    async def save_user_codebuddy_key(
+        self,
+        user_id: int | str,
+        api_key: str,
+        internet_env: str = "",
+        *,
+        cookie_header: str = "",
+    ) -> dict[str, Any]:
+        path = f"/api/users/{quote(str(user_id), safe='')}/credentials"
+        body: dict[str, Any] = {
+            "codeBuddyApiKey": api_key.strip(),
+            "codeBuddyInternetEnvironment": internet_env.strip(),
+        }
+        if cookie_header:
+            url = f"{self.base_url}{path}"
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Origin": self.base_url,
+                "Cookie": cookie_header,
+            }
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout, trust_env=use_environment_proxy(url)) as client:
+                    resp = await client.put(url, headers=headers, json=body)
+            except httpx.HTTPError as exc:
+                raise LoopForgeError(f"无法连接 LoopForge ({url}): {exc}") from exc
+            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            if resp.status_code >= 400:
+                raise LoopForgeError(str((data or {}).get("error") or f"HTTP {resp.status_code}"), status_code=resp.status_code)
+            return data if isinstance(data, dict) else {"ok": True}
+        data = await self._req("PUT", path, json_body=body)
+        return data if isinstance(data, dict) else {"ok": True}
 
     async def list_runners(self) -> list[dict[str, Any]]:
         data = await self._req("GET", "/api/runners")

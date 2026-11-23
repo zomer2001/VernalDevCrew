@@ -4,7 +4,7 @@
  * 2. 注入左侧 Vernal 品牌栏、三大多智能体架构模块入口与顶栏运行底座状态胶囊
  * 3. 完整保留 LoopForge 所有原生页面（AI 工作台 / 需求列表 / 待我确认 / 统计 / 设置 / 执行机器）
  */
-@import url("/vernal-static/vernal-stage.css?v=20261123v3");
+@import url("/vernal-static/vernal-stage.css?v=20261123v6");
 
 :root,
 html[data-theme="light"] {
@@ -310,9 +310,25 @@ body.vernal-mode:not(.management-mode) .app-shell {
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
 }
 #vernalStage .vernal-body {
-  padding: 16px 22px 48px;
-  max-width: 1640px;
+  padding: 22px 28px 56px;
+  max-width: 1480px;
   margin: 0 auto;
+}
+#vernalStage.vernal-hero-active .vernal-body {
+  display: none !important;
+}
+#vernalStage .overview-grid {
+  gap: 20px;
+}
+#vernalStage .card {
+  padding: 20px 22px;
+  border-radius: 12px;
+}
+#vernalStage .wish-composer {
+  margin-bottom: 18px;
+}
+#vernalStage .goal-bar:not(:empty) {
+  margin-bottom: 16px;
 }
 #vernalStage .dag-canvas {
   background-color: #ffffff;

@@ -84,10 +84,13 @@ services:
       VERNAL_LOOPFORGE_URL: http://loopforge:8080
       VERNAL_GITEA_URL: http://gitea:3000
       VERNAL_PUBLIC_URL: ${VERNAL_PUBLIC_URL:-http://127.0.0.1:8787}
+      VERNAL_HOST_PROJECTS_DIR: /host-projects
+      VERNAL_HOST_PROJECTS_DISPLAY: ${VERNAL_HOST_PROJECTS_DIR:-../../workspaces}
     ports:
       - "${VERNAL_BIND:-0.0.0.0}:${VERNAL_PORT:-8787}:8787"
     volumes:
       - ../../workspaces:/app/workspaces
+      - ${VERNAL_HOST_PROJECTS_DIR:-../../workspaces}:/host-projects
     depends_on:
       loopforge:
         condition: service_healthy

@@ -84,6 +84,36 @@ class FileExchange:
             raise ValueError(f"文件版本校验失败 {key}")
         return json.loads(data)
 
+    def seed_baseline(self, files: dict[str, str]) -> str:
+        """写入导入/接管已有项目的初始代码基线，使文件交接模式下的所有任务都能拿到原代码；超限时显式报错绝不静默丢文件。"""
+        cleaned: dict[str, str] = {}
+        overflow: list[str] = []
+        total = 0
+        for name in sorted(files):
+            body = files[name]
+            if not isinstance(body, str):
+                continue
+            try:
+                key_name = checked_name(name)
+            except ValueError:
+                continue
+            raw_bytes = body.encode("utf-8")
+            if total + len(raw_bytes) > MAX_TOTAL:
+                overflow.append(key_name)
+                total += len(raw_bytes)
+                continue
+            total += len(raw_bytes)
+            cleaned[key_name] = body
+        if overflow:
+            sample = "、".join(overflow[:5]) + (f" 等 {len(overflow)} 个文件" if len(overflow) > 5 else "")
+            raise ValueError(
+                f"源码总大小 {total / (1024 * 1024):.2f} MiB 超过文件交接上限（{MAX_TOTAL // (1024 * 1024)} MiB），"
+                f"受影响文件：{sample}。请精简大文件或改用 Git 分支模式。"
+            )
+        digest_key = self.put(cleaned)
+        self.db.meta_set("seed_baseline_digest", digest_key)
+        return digest_key
+
     def baseline(self, dependencies: list[str]) -> dict[str, str]:
         tasks = {t.task_id: t for t in self.db.list_tasks()}
         order = topo_sort({i: t.depends_on for i, t in tasks.items()})
@@ -93,6 +123,11 @@ class FileExchange:
             if tid in needed:
                 needed.update(tasks[tid].depends_on)
         files: dict[str, str] = {}
+        seed_key = self.db.meta_get("seed_baseline_digest")
+        if seed_key:
+            seed_data = self.get(seed_key)
+            if isinstance(seed_data, dict):
+                files.update({k: v for k, v in seed_data.items() if isinstance(v, str)})
         for tid in order:
             if tid not in needed:
                 continue

@@ -2,6 +2,7 @@ import { $, actorName, api, fmtElapsed, projectQuerySuffix, root, toast } from "
 import { bindCouncilActions, refreshCouncil } from "./council.js";
 import { renderDAG } from "./dag.js";
 import { handleLiveDrawerEvent, initDrawer, openReportModal, openTaskDrawer } from "./drawer.js";
+import { initLauncher } from "./launcher.js";
 import { renderDocsAndPlan, renderGoalBar, renderRoster, renderSquadColumns } from "./roster.js";
 import { refreshInbox, refreshRuntimePanel } from "./runtime.js";
 
@@ -13,6 +14,7 @@ let planDoc = null;
 let lastEventId = 0;
 let activeView = "overview";
 const timeline = createTimeline(openTaskDrawer);
+let launcher = null;
 
 $("actor-input").value = localStorage.getItem("autodev_actor") || "owner";
 $("actor-input").addEventListener("input", () => localStorage.setItem("autodev_actor", actorName()));
@@ -54,26 +56,41 @@ function renderAll() {
   st.textContent = state.planning ? "PLANNING" : state.status;
   st.className = `status-pill ${state.planning ? "RUNNING" : state.status}`;
 
+  const srcPill = $("project-source-pill");
+  if (srcPill) {
+    const modeLabels = {
+      local_folder: "📁 原地接管",
+      git_repo: "🌿 Git 仓库",
+      import_folder: "📦 已导入目录",
+      scratch: state.settings?.collaboration_mode === "git" ? "🌿 Git 项目" : "📄 文件交接",
+    };
+    const baseTxt = modeLabels[state.source_mode] || "📄 文件交接";
+    srcPill.textContent = state.git_branch ? `${baseTxt} · ${state.git_branch}` : baseTxt;
+    srcPill.title = state.workspace_root || "";
+    srcPill.classList.remove("hidden");
+  }
+
   $("side-backend").textContent = state.settings?.runtime_backend || "local";
   $("side-backend").className = `tag ${state.settings?.runtime_backend === "loopforge" ? "ok" : ""}`;
 
   const rt = state.runtimes || {};
+  const rs = state.runner_summary || {};
   const renderPill = (elId, info, activeModel = "") => {
     const el = $(elId);
     if (!el || !info) return;
     if (!info.installed) {
-      el.textContent = "未装";
-      el.className = "tag";
+      el.textContent = info.runner_online === false ? "Runner离线" : "未装";
+      el.className = info.runner_online === false ? "tag warn" : "tag";
     } else if (info.ready) {
       el.textContent = activeModel || "就绪";
       el.className = "tag ok";
     } else {
-      el.textContent = "待配Key";
+      el.textContent = "需配Key";
       el.className = "tag warn";
     }
     el.title = `${info.note || ""}${info.bin ? " · " + info.bin : ""}`;
   };
-  renderPill("codex-pill", rt.codex, state.settings?.effective_harness === "codex" ? (state.settings?.model || "就绪") : "就绪");
+  renderPill("codex-pill", rt.codex, state.settings?.effective_harness === "codex" ? (state.settings?.model || "免Key就绪") : "免Key就绪");
   renderPill("codebuddy-pill", rt.codebuddy);
   renderPill("opencode-pill", rt.opencode);
   renderPill("dsh-pill", rt.dsh);
@@ -83,17 +100,58 @@ function renderAll() {
     const entries = [
       ["codex", "Codex"],
       ["codebuddy", "CodeBuddy"],
+      ["claude-code", "Claude Code"],
       ["opencode", "OpenCode"],
       ["dsh", "DeepSeek Harness"],
-      ["claude-code", "Claude Code"],
     ];
-    badgesEl.innerHTML = `<span class="muted" style="font-size:12px">本机扫描结果：</span>` + entries.map(([k, label]) => {
-      const info = rt[k] || {};
-      const cls = !info.installed ? "" : info.ready ? "ok" : "warn";
-      const statusTxt = !info.installed ? "未安装" : info.ready ? "已就绪" : "待配凭据";
-      const tip = `${info.note || ""}${info.bin ? " (" + info.bin + ")" : ""}`.replace(/"/g, "&quot;");
-      return `<span class="tag ${cls}" title="${tip}">${label} · ${statusTxt}</span>`;
-    }).join("");
+    const sourceLabel =
+      rs.source === "loopforge_runner"
+        ? `LoopForge 在线 Runner（${(rs.runner_names || []).join(", ")}）：`
+        : state.settings?.runtime_backend === "loopforge"
+          ? "LoopForge Runner 离线（请运行 ./vernal.sh）："
+          : "本机扫描结果：";
+    badgesEl.innerHTML =
+      `<span class="muted" style="font-size:12px">${sourceLabel}</span>` +
+      entries
+        .map(([k, label]) => {
+          const info = rt[k] || {};
+          const cls = !info.installed ? "" : info.ready ? "ok" : "warn";
+          const statusTxt = !info.installed
+            ? "未检测"
+            : info.ready
+              ? info.needs_api_key
+                ? "Key已配·就绪"
+                : "免Key就绪"
+              : "需配API Key";
+          const tip = `${info.note || ""}${info.bin ? " (" + info.bin + ")" : ""}`.replace(/"/g, "&quot;");
+          const clickAttr = k === "codebuddy" ? ' data-open-cb-key="1" style="cursor:pointer"' : "";
+          return `<span class="tag ${cls}" title="${tip}"${clickAttr}>${label} · ${statusTxt}</span>`;
+        })
+        .join("");
+    badgesEl.querySelectorAll("[data-open-cb-key]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const box = $("cb-key-box");
+        if (box) box.hidden = !box.hidden;
+      });
+    });
+  }
+  const cbBox = $("cb-key-box");
+  if (cbBox && state.settings?.runtime_backend === "loopforge") {
+    const cbInfo = rt.codebuddy || {};
+    const cbSelected = [
+      state.settings.harness,
+      state.settings.director_harness,
+      state.settings.raw_coder_harness,
+      state.settings.qa_harness,
+    ].includes("codebuddy");
+    if ((cbInfo.installed && !cbInfo.ready) || (cbSelected && !cbInfo.ready)) {
+      cbBox.hidden = false;
+    } else if (cbInfo.ready && !cbBox._userToggled) {
+      cbBox.hidden = true;
+    }
+    if ($("cb-key-env") && rs.codebuddy_internet_environment !== undefined && !$("cb-key-env")._touched) {
+      $("cb-key-env").value = rs.codebuddy_internet_environment || "";
+    }
   }
   const effHint = $("cfg-effective-hint");
   if (effHint && state.settings) {
@@ -103,12 +161,19 @@ function renderAll() {
   const u = state.usage_total || { input: 0, cached: 0, output: 0, reasoning: 0 };
   $("usage-pill").textContent = `Tokens ${(u.input + u.output).toLocaleString()} · 缓存 ${u.cached.toLocaleString()}`;
 
+  const needsPlan = ["CREATED", "INGESTED", "SPECIFIED"].includes(state.status);
+  const btnPlan = $("btn-plan");
+  if (btnPlan) {
+    btnPlan.classList.toggle("btn-primary", needsPlan && !state.planning && (state.slices_count > 0 || state.source_mode !== "scratch"));
+    btnPlan.classList.toggle("hidden", state.scheduler_running || state.status === "COMPLETED");
+  }
   $("btn-approve").classList.toggle("hidden", state.status !== "PLANNED");
   $("btn-start").classList.toggle(
     "hidden",
     state.scheduler_running || ["CREATED", "INGESTED", "SPECIFIED", "PLANNED"].includes(state.status)
   );
   $("btn-stop").classList.toggle("hidden", !state.scheduler_running);
+  launcher?.syncAutoOpen(state);
 
   const modeSel = $("plan-mode");
   if (modeSel && !modeSel._touched) modeSel.value = state.settings?.planning_mode || "goal";
@@ -278,6 +343,47 @@ export async function reloadProjectContext() {
 
 initDrawer();
 bindCouncilActions(refresh, openTaskDrawer);
+launcher = initLauncher({
+  onProjectReady: async () => {
+    await reloadProjectContext();
+  },
+  onSwitchView: (v) => switchView(v),
+});
+$("btn-launcher-toggle")?.addEventListener("click", () => {
+  const panel = $("project-launcher");
+  if (!panel) return;
+  if (panel.hidden) launcher.open();
+  else launcher.close();
+});
+$("cb-key-env")?.addEventListener("change", (e) => {
+  e.target._touched = true;
+});
+$("btn-cb-key-save")?.addEventListener("click", async () => {
+  const key = $("cb-key-input")?.value?.trim() || "";
+  const env = $("cb-key-env")?.value || "";
+  if (!key) {
+    toast("请先粘贴 CodeBuddy API Key");
+    return;
+  }
+  const btn = $("btn-cb-key-save");
+  if (btn) btn.disabled = true;
+  try {
+    await api("/vernal-api/credentials/codebuddy", {
+      method: "POST",
+      body: JSON.stringify({ api_key: key, internet_environment: env }),
+    });
+    if ($("cb-key-input")) $("cb-key-input").value = "";
+    toast("CodeBuddy API Key 已保存到 LoopForge 个人凭据，Runner 现已就绪");
+    await refresh();
+  } catch (err) {
+    toast(`保存失败：${err.message}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+$("btn-cb-key-jump")?.addEventListener("click", () => {
+  document.dispatchEvent(new CustomEvent("vernal-jump-native", { detail: { view: "settings" } }));
+});
 refresh().then(() => {
   lastEventId = state.recent_events.at(-1)?.event_id || 0;
   timeline.start(state);

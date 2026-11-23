@@ -111,6 +111,8 @@ echo "==> 正在通过 Docker 启动 Vernal 统一平台（宿主机免装 Pytho
   export VERNAL_PORT="$PORT"
   export VERNAL_BIND="$BIND_HOST"
   export VERNAL_PUBLIC_URL="${VERNAL_PUBLIC_URL:-http://127.0.0.1:${PORT}}"
+  # 默认仅挂载项目工作区目录，不暴露整个用户主目录；需原地接管外部目录时显式传 VERNAL_HOST_PROJECTS_DIR=~/你的代码目录
+  export VERNAL_HOST_PROJECTS_DIR="${VERNAL_HOST_PROJECTS_DIR:-$ROOT/workspaces}"
   docker compose -f "$COMPOSE_FILE" --profile full up -d $BUILD_FLAG vernal
 )
 if [[ -n "$BUILD_FLAG" && -n "$CUR_FP" ]]; then

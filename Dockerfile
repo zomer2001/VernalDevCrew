@@ -6,14 +6,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     nodejs \
     ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && git config --system --add safe.directory '*'
 
 WORKDIR /app
 
+# 先仅安装 pyproject.toml 中的运行依赖（绕开 hatchling 隔离构建，且修改业务代码时完全命中 Docker 层缓存）
 COPY pyproject.toml README.md ./
-COPY autodev ./autodev
+RUN python3 -c "import subprocess, sys, tomllib; deps = tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']; subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', *deps])" \
+  && printf '#!/bin/sh\nexec python3 -m autodev.cli "$@"\n' > /usr/local/bin/vernal \
+  && cp /usr/local/bin/vernal /usr/local/bin/autodev \
+  && chmod +x /usr/local/bin/vernal /usr/local/bin/autodev
 
-RUN pip install --no-cache-dir -e . && mkdir -p /app/workspaces
+ENV PYTHONPATH=/app
+COPY autodev ./autodev
+RUN mkdir -p /app/workspaces
 
 EXPOSE 8787
 
