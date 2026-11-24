@@ -1,4 +1,6 @@
 .venv
+.git
+deploy/loopforge/.env
 .pytest_cache
 __pycache__
 workspaces
@@ -6,3 +8,4 @@ deploy/loopforge/.data
 deploy/loopforge/.runner
 deploy/loopforge/bin
 .DS_Store
+dist/

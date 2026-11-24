@@ -168,3 +168,27 @@ def test_loopforge_issue_formatter_includes_guard_command(tmp_path: Path) -> Non
         assert "modules/order/" in desc
     finally:
         eng.db.close()
+
+
+def test_recovers_completed_roles_after_partial_council_failure(tmp_path):
+    from autodev.engine import PlanningError
+    import pytest
+
+    ws = init_workspace(tmp_path / "resume", collaboration_mode="files")
+    (ws.inputs_dir / "spec.md").write_text("Implement add_two.")
+    harness = _make_council_harness()
+    eng = Engine(ws, settings=Settings(planning_mode="goal", collaboration_mode="files", max_concurrency=3), harness=harness)
+    good_pm = harness.role_handlers["pm"]
+    harness.role_handlers["pm"] = lambda *args: {"incomplete": True}
+    try:
+        eng.ingest()
+        with pytest.raises(PlanningError):
+            asyncio.run(run_council(eng))
+        assert [m["speaker_role"] for m in eng.db.list_council_messages()] == ["architect", "qa_lead"]
+        harness.calls.clear()
+        harness.role_handlers["pm"] = good_pm
+        asyncio.run(run_council(eng))
+        assert [c.role for c in harness.calls] == ["pm", "director"]
+        assert len(eng.db.list_council_messages()) == 4
+    finally:
+        eng.db.close()

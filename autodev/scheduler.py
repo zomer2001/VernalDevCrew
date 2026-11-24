@@ -14,9 +14,10 @@ from typing import TextIO
 
 from pydantic import ValidationError
 
-from autodev import gitops, verifier
+from autodev import gitops, local_git, verifier
+from autodev.harnesses.link_worker import personal_worker, track_issue
 from autodev.artifacts import FileExchange, materialize, snapshot, apply_output
-from autodev.loopforge.bridge import LoopForgeBridge
+from autodev.loopforge.bridge import LoopForgeBridge, sign_context_sig
 from autodev.loopforge.client import LoopForgeError
 from autodev.dag import topo_sort
 from autodev.db import Milestone, Task, now_iso
@@ -107,10 +108,13 @@ class Scheduler:
 
     # ---------- 主循环 ----------
     def check_runtime(self) -> None:
+        local_source = self.db.meta_get("git_delivery_source")
+        if self.settings.collaboration_mode == "git" and self.db.meta_get("source_mode") == "local_folder" and not local_source:
+            raise OpsError("旧工作区位于原仓库内，请用新项目名称重新接入本机 Git 目录")
         if self.settings.runtime_backend == "loopforge":
             if not LoopForgeBridge(self.settings, self.db).is_configured():
                 raise OpsError("请先登录并绑定 LoopForge 项目，调度尚未启动")
-            if self.settings.collaboration_mode == "git" and not self.settings.loopforge_repository_id:
+            if self.settings.collaboration_mode == "git" and not (local_source or self.settings.loopforge_repository_id):
                 raise OpsError("Git 交付需要绑定与本地 origin 对应的 LoopForge 仓库")
 
     async def run(self, watch: bool = False) -> ProjectStatus:
@@ -150,9 +154,13 @@ class Scheduler:
                         else:
                             self._unlock_ready(ms.milestone_id)
                             ms_tasks = self.db.list_tasks(milestone_id=ms.milestone_id)
+                            ms_tasks = [t for t in ms_tasks if t.status != TaskStatus.CANCELLED]
+                            if not ms_tasks:
+                                self.db.update_milestone(ms.milestone_id, status=MilestoneStatus.MERGED)
+                                continue
                             if (
                                 ms_tasks
-                                and all(t.status == TaskStatus.APPROVED for t in ms_tasks)
+                                and all(t.status in (TaskStatus.APPROVED, TaskStatus.MERGED) for t in ms_tasks)
                                 and not self.running_tasks
                             ):
                                 await self._integrate_milestone(ms)
@@ -187,6 +195,9 @@ class Scheduler:
                     m.status == MilestoneStatus.MERGED for m in self.db.list_milestones()
                 )
                 final_status = ProjectStatus.COMPLETED if all_merged else ProjectStatus.STALLED
+                active = self._active_milestone()
+                if active and active.status == MilestoneStatus.AWAITING_MERGE:
+                    final_status = ProjectStatus.APPROVED
                 self.engine.set_status(final_status)
                 self.db.add_event(
                     "scheduler.stopped",
@@ -388,8 +399,11 @@ class Scheduler:
         file_mode = self.settings.collaboration_mode == "files"
         before = exchange.baseline(task.depends_on) if file_mode else {}
         protected = [] if task.role in ("contract", "bootstrap") else self.settings.protected_paths
+        link = personal_worker(self.engine)
         try:
-            if self.settings.runtime_backend == "loopforge":
+            if link:
+                await track_issue(self.engine, task_id, "in_progress")
+            if self.settings.runtime_backend == "loopforge" and not link:
                 await self._execute_remote(task, squad_cn, slot_id, exchange, before, protected)
                 return
             try:
@@ -460,7 +474,9 @@ class Scheduler:
                             task_id=task_id,
                             actor=coder_ident["label"],
                         )
-                        base_prompt = build_coder_prompt(task, slices, contracts, self.settings)
+                        base_prompt = build_coder_prompt(
+                            task, slices, contracts, self.settings, decisions=self.db.list_decisions(active_only=True)
+                        )
                         full_prompt = base_prompt + build_fallback_context(
                             ("" if file_mode else gitops.diff_stat(wt, base_sha)), task.last_feedback or "", task.steer_note
                         )
@@ -474,7 +490,9 @@ class Scheduler:
                             extra_env=shared_env,
                         )
                 else:
-                    prompt = build_coder_prompt(task, slices, contracts, self.settings)
+                    prompt = build_coder_prompt(
+                        task, slices, contracts, self.settings, decisions=self.db.list_decisions(active_only=True)
+                    )
                     if task.steer_note or task.last_feedback:
                         prompt += build_fallback_context(
                             ("" if file_mode else gitops.diff_stat(wt, base_sha)), task.last_feedback or "", task.steer_note
@@ -603,7 +621,13 @@ class Scheduler:
             )
             r_run_id = self.db.start_run(task_id, attempt, "REVIEW", rev_ident["harness"], agent_label=rev_ident["label"])
             r_log = self.ws.runs_dir / task_id / f"attempt-{attempt}-review"
-            review_prompt = build_review_prompt(task, slices, summarize_verify(results), json.dumps(exchange.get(artifact_key), ensure_ascii=False) if file_mode else gitops.diff_since(wt, base_sha))
+            review_prompt = build_review_prompt(
+                task,
+                slices,
+                summarize_verify(results),
+                json.dumps(exchange.get(artifact_key), ensure_ascii=False) if file_mode else gitops.diff_since(wt, base_sha),
+                decisions=self.db.list_decisions(active_only=True),
+            )
             r_res = await self.engine.harness.run_structured_readonly(
                 review_prompt,
                 schema_path=self.engine.schemas["review_verdict"],
@@ -667,6 +691,13 @@ class Scheduler:
             await self._fail_attempt(task, f"独立审查未通过：\n{detail}", wt)
         finally:
             current_actor.reset(a_tok)
+            if link:
+                status = self.db.get_task(task_id).status
+                try:
+                    await track_issue(self.engine, task_id, "done" if status in (TaskStatus.APPROVED, TaskStatus.MERGED)
+                                      else "closed" if status == TaskStatus.CANCELLED else "todo")
+                except LoopForgeError as exc:
+                    self.db.add_event("link.issue_sync_failed", str(exc), task_id=task_id)
 
     async def _execute_remote(self, task, squad, slot, exchange, before, protected):
         bridge = LoopForgeBridge(self.settings, self.db)
@@ -680,10 +711,25 @@ class Scheduler:
             bp = bdir / f"{task.task_id}.json"
             bp.write_text(json.dumps(before, ensure_ascii=False), "utf-8")
             baseline_file = str(bp.resolve())
-        if not files and not task.loopforge_run_id:
+        managed_git = not files and bool(self.db.meta_get("git_delivery_source"))
+        git_context = {}
+        if not files and (managed_git or not task.loopforge_run_id):
             wt, base = self._prepare_worktree(task)
             task = self.db.get_task(task.task_id)
-            gitops.git(["push", "origin", f"{base}:refs/heads/{task.branch_name}"], wt)
+            if managed_git:
+                use_mirror = self.db.meta_get("gitea_mirror") == "1"
+                pack_dir = None if use_mirror else self.ws.state_dir / "git-snapshots"
+                snapshot = await asyncio.to_thread(local_git.prepare_snapshot, wt, base, pack_dir)
+                pid = self.settings.loopforge_project_id
+                sig = sign_context_sig(self.settings.project_signing_key(), pid, f"git:{snapshot}")
+                if use_mirror:
+                    from autodev import local_git_bridge
+                    remote = await local_git_bridge.task_remote(wt, self.settings, self.db, task.task_id, snapshot)
+                    git_context["git_restore"] = local_git_bridge.restore_command(remote, snapshot)
+                else:
+                    git_context["git_restore"] = local_git.restore_command(self.settings.vernal_public_url, pid, snapshot, sig)
+            else:
+                gitops.git(["push", "origin", f"{base}:refs/heads/{task.branch_name}"], wt)
         ok, msg = await bridge.execute_task(
             task,
             squad,
@@ -692,6 +738,8 @@ class Scheduler:
             inputs=before if files else None,
             context=context,
             baseline_file=baseline_file,
+            vernal_base_url=self.settings.vernal_public_url,
+            **git_context,
         )
         if self.stop_event.is_set():
             self.db.update_task(task.task_id, status=TaskStatus.READY)
@@ -727,6 +775,11 @@ class Scheduler:
                     materialize(after, Path(directory))
                     await self._check_files(task.verify_cmds, Path(directory), task.task_id)
                 self.db.update_task(task.task_id, artifact_digest=key)
+            elif managed_git:
+                artifact = await bridge.client.named_artifact(run, "vernal-patch.json")
+                sha = local_git.apply_patch(wt, base, artifact, task.allowed_paths, protected)
+                await self._check_files(task.verify_cmds, wt, task.task_id)
+                self.db.update_task(task.task_id, candidate_commit_sha=sha)
             else:
                 record = await bridge.client.named_artifact(run, "mr-body.md")
                 hashes = set(re.findall(r"(?i)\b[0-9a-f]{40}\b", record))
@@ -756,7 +809,7 @@ class Scheduler:
 
     async def _integrate_files(self, ms: Milestone) -> None:
         exchange = FileExchange(self.ws, self.db)
-        tasks = self.db.list_tasks(milestone_id=ms.milestone_id)
+        tasks = [t for t in self.db.list_tasks(milestone_id=ms.milestone_id) if t.status != TaskStatus.CANCELLED]
         try:
             files = exchange.baseline([t.task_id for t in tasks])
             key = exchange.put(files)
@@ -863,7 +916,7 @@ class Scheduler:
             gitops.delete_branch(root, branch)
             gitops.create_worktree(root, int_wt, branch, self.settings.base_branch)
 
-            tasks = self.db.list_tasks(milestone_id=ms.milestone_id)
+            tasks = [t for t in self.db.list_tasks(milestone_id=ms.milestone_id) if t.status != TaskStatus.CANCELLED]
             by_id = {t.task_id: t for t in tasks}
             order = topo_sort({t.task_id: [d for d in t.depends_on if d in by_id] for t in tasks})
 

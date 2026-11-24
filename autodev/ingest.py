@@ -177,7 +177,7 @@ def iter_input_files(inputs_dir: Path) -> list[Path]:
         return []
     return sorted(
         p for p in inputs_dir.rglob("*")
-        if p.is_file() and p.suffix.lower() in SUPPORTED_EXT and not any(part.startswith(".") for part in p.parts)
+        if p.is_file() and p.suffix.lower() in SUPPORTED_EXT and not any(part.startswith(".") for part in p.relative_to(inputs_dir).parts)
     )
 
 

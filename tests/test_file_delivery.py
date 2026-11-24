@@ -61,6 +61,9 @@ def test_files_handoff_to_verified_release(tmp_path, monkeypatch, backend):
         files = {"engine/game.js":"engine"} if rid == "1" else {"web/index.html":"play"}
         return {"id":rid, "status":"succeeded", "artifacts":[
             {"name":"vernal-files.json", "content":json.dumps({"files":files})}]}
+    async def runners(_):
+        return [{"id": "native", "status": "online", "isDefault": True, "runtimes": [{"provider": "codex"}]}]
+    monkeypatch.setattr(LoopForgeClient, "list_runners", runners)
     monkeypatch.setattr(LoopForgeClient,"create_issue",create)
     monkeypatch.setattr(LoopForgeClient,"dispatch_issue",dispatch)
     monkeypatch.setattr(LoopForgeClient,"get_run",get_run)
@@ -78,6 +81,12 @@ def test_files_handoff_to_verified_release(tmp_path, monkeypatch, backend):
             assert result.status_code == 200
             with zipfile.ZipFile(io.BytesIO(result.content)) as archive:
                 assert archive.read("web/index.html")==b"play"
+            entry = engine.db.meta_get("preview:M1")
+            assert entry == "web/index.html"
+            preview = client.get(f"/vernal-api/preview/demo/M1/{entry}")
+            assert preview.status_code == 200 and preview.text == "play"
+            assert "sandbox" in preview.headers["content-security-policy"]
+            assert client.get("/vernal-api/preview/demo/M1/missing.txt").status_code == 404
         assert bool(issues) == (backend == "loopforge")
     finally:
         engine.db.close()
@@ -175,6 +184,47 @@ def test_bridge_auto_passes_submit_gate_result_waiting_node(tmp_path, monkeypatc
         eng.db.close()
 
 
+@pytest.mark.parametrize(
+    ("report", "expected_action", "may_release"),
+    [("# PASS\n四项测试通过", "approve", True),
+     ("# REJECT\n加二负数用例失败", "reject", False),
+     ("审查未完成", None, False),
+     (None, None, False)],
+)
+def test_review_gate_checks_current_report_even_for_succeeded_runs(report, expected_action, may_release):
+    from autodev.loopforge.bridge import poll_loopforge_run
+
+    node = {"id": "review", "type": "agent", "rejectTo": "implement",
+            "artifactOutputs": [{"name": "review-report.md", "required": True}]}
+    def artifact(nid, attempt, text, timestamp):
+        return {"nodeId": nid, "attempt": attempt, "name": "review-report.md",
+                "content": text, "createdAt": timestamp}
+
+    old = "2026-01-01T00:00:00Z"
+    current = "2026-01-01T00:02:00Z"
+    records = [artifact("implement", 2, "# PASS", current), artifact("review", 1, "# PASS", old),
+               artifact("review", 2, "# PASS", old)]
+    if report is not None:
+        records.append(artifact("review", 2, report, current))
+    run = {"id": "run-1", "workflowSnapshot": {"nodes": [node]}, "artifacts": records}
+    info = {"attempt": 2, "startedAt": "2026-01-01T00:01:00Z", "reworkCount": 1}
+    waiting = {**run, "status": "waiting", "nodes": {"review": {
+        **info, "status": "waiting_approval", "error": "未收到 submit_gate_result"}}}
+    succeeded = {**run, "status": "succeeded", "nodes": {"review": {**info, "status": "succeeded"}}}
+    client = LoopForgeClient("http://lf.test")
+    client.get_run = AsyncMock(side_effect=[waiting, succeeded])
+    client.approve_run = AsyncMock()
+    client.reject_run = AsyncMock()
+    ok, _, _ = asyncio.run(poll_loopforge_run(client, "run-1", poll_interval=0))
+    assert ok is may_release
+    assert client.approve_run.await_count == int(expected_action == "approve")
+    assert client.reject_run.await_count == int(expected_action == "reject")
+    if expected_action == "reject":
+        client.reject_run.assert_awaited_once_with(
+            "run-1", reason="加二负数用例失败", node_id="review", target_node="implement"
+        )
+
+
 def test_file_validation_and_parallel_conflict(tmp_path):
     ws=init_workspace(tmp_path/"new",collaboration_mode="files")
     eng=Engine(ws)
@@ -206,7 +256,7 @@ def test_single_issue_reused_on_retry_and_runner_offline_fuses(tmp_path, monkeyp
     dispatches = []
 
     async def fake_runners(_):
-        return [{"id": "r1", "name": "Mac", "status": "online"}]
+        return [{"id": "r1", "name": "Mac", "status": "online", "isDefault": True, "runtimes": [{"provider": "codex"}]}]
 
     async def fake_create(_, **kw):
         created_issues.append(kw["title"])

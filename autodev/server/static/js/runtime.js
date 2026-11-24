@@ -1,4 +1,15 @@
-import { $, actorName, api, esc, toast } from "./api.js";
+import { $, actorName, api, esc, projectQuerySuffix, toast } from "./api.js";
+
+function deliveryHistory(state, milestoneId) {
+  return (state.deliveries || []).filter(d => d.milestone_id === milestoneId).map(d => {
+    const version = Number(d.version_no);
+    if (d.collab_mode === "files") {
+      return `<a class="btn btn-sm" download href="/vernal-api/milestones/${encodeURIComponent(milestoneId)}/files.zip?version=${version}${projectQuerySuffix("&")}">下载 v${version} ZIP</a>`;
+    }
+    return `<div>v${version} <code>${esc(d.archive_branch)}</code> · <code>${esc(d.rolling_branch)}</code>
+      ${d.compare_url ? `<a href="${esc(d.compare_url)}" target="_blank" rel="noopener">去创建或查看合并请求</a>` : ""}</div>`;
+  }).join("");
+}
 
 export async function refreshInbox(state, onRefresh, onOpenTask, onOpenReport) {
   const el = $("inbox-list");
@@ -51,6 +62,7 @@ export async function refreshInbox(state, onRefresh, onOpenTask, onOpenReport) {
       <div class="task-top"><strong>[里程碑合并签字] ${esc(m.milestone_id)} · ${esc(m.title)}</strong><span class="status-pill AWAITING_MERGE">AWAITING_MERGE</span></div>
       <p class="muted" style="margin:4px 0 8px">${esc(m.goal)}</p>
       <div class="btn-group">
+        ${deliveryHistory(state, m.milestone_id)}
         <button class="btn btn-primary btn-sm" data-merge="${esc(m.milestone_id)}">确认交付</button>
         ${m.report_path ? `<button class="btn btn-sm" data-report="${esc(m.milestone_id)}">查看交付报告</button>` : ""}
       </div>
@@ -113,11 +125,11 @@ export async function refreshInbox(state, onRefresh, onOpenTask, onOpenReport) {
     });
     el.querySelectorAll("[data-merge]").forEach((b) => {
       b.addEventListener("click", async () => {
-        await api(`/vernal-api/milestones/${encodeURIComponent(b.dataset.merge)}/merge`, {
+        const result = await api(`/vernal-api/milestones/${encodeURIComponent(b.dataset.merge)}/merge`, {
           method: "POST",
           body: JSON.stringify({ actor: actorName() }),
         });
-        toast(`里程碑 ${b.dataset.merge} 已合入主干`);
+        toast(result.delivery_branch ? `已交付到分支 ${result.delivery_branch}` : `里程碑 ${b.dataset.merge} 已合入主干`);
         onRefresh();
       });
     });
@@ -143,7 +155,14 @@ export async function refreshInbox(state, onRefresh, onOpenTask, onOpenReport) {
               <div class="btn-group">
                 ${m.status === "AWAITING_MERGE" ? `<button class="btn btn-primary btn-sm" data-m-merge="${esc(m.milestone_id)}">确认交付</button>` : ""}
                 ${m.status === "FAILED" ? `<button class="btn btn-primary btn-sm" data-m-reint="${esc(m.milestone_id)}">重新集成</button>` : ""}
-                ${m.status === "MERGED" && state.settings.collaboration_mode === "files" ? `<a class="btn btn-sm" href="/vernal-api/milestones/${encodeURIComponent(m.milestone_id)}/files.zip" download>下载交付文件</a>` : ""}
+                ${m.status === "MERGED" && m.preview_entry ? `<a class="btn btn-sm" target="_blank" rel="noopener" href="/vernal-api/preview/${encodeURIComponent(state.project_key)}/${encodeURIComponent(m.milestone_id)}/${m.preview_entry.split("/").map(encodeURIComponent).join("/")}">静态预览</a>` : ""}
+                ${m.status === "MERGED" && state.settings.collaboration_mode === "files" ? `<details><summary>推送 Git</summary>
+                  <input data-export-url type="url" placeholder="留空使用内置 Gitea，或填写 HTTPS 仓库地址" />
+                  <input data-export-user placeholder="远端用户名" /><input data-export-token type="password" autocomplete="new-password" placeholder="远端访问令牌" />
+                  <button type="button" class="btn btn-sm" data-export-release="${esc(m.milestone_id)}">推送已验收版本</button></details>` : ""}
+                ${deliveryHistory(state, m.milestone_id)}
+                ${m.delivery_branch ? `<code>交付分支 ${esc(m.delivery_branch)}</code>` : ""}
+                ${m.status === "MERGED" && state.settings.collaboration_mode === "files" ? `<a class="btn btn-sm" href="/vernal-api/milestones/${encodeURIComponent(m.milestone_id)}/files.zip${projectQuerySuffix("?")}" download>下载交付文件</a>` : ""}
                 ${m.report_path ? `<button class="btn btn-sm" data-m-report="${esc(m.milestone_id)}">交付报告</button>` : ""}
               </div>
             </div>`;
@@ -152,8 +171,8 @@ export async function refreshInbox(state, onRefresh, onOpenTask, onOpenReport) {
       : `<div class="muted">尚无里程碑。</div>`;
     msEl.querySelectorAll("[data-m-merge]").forEach((b) =>
       b.addEventListener("click", async () => {
-        await api(`/vernal-api/milestones/${encodeURIComponent(b.dataset.mMerge)}/merge`, { method: "POST", body: JSON.stringify({ actor: actorName() }) });
-        toast("已合入主干");
+        const result = await api(`/vernal-api/milestones/${encodeURIComponent(b.dataset.mMerge)}/merge`, { method: "POST", body: JSON.stringify({ actor: actorName() }) });
+        toast(result.delivery_branch ? `已交付到分支 ${result.delivery_branch}` : "已合入主干");
         onRefresh();
       })
     );
@@ -164,6 +183,17 @@ export async function refreshInbox(state, onRefresh, onOpenTask, onOpenReport) {
         onRefresh();
       })
     );
+    msEl.querySelectorAll("[data-export-release]").forEach((button) => button.addEventListener("click", async () => {
+      const panel = button.closest("details");
+      button.disabled = true;
+      try {
+        const info = await api(`/vernal-api/milestones/${encodeURIComponent(button.dataset.exportRelease)}/export-git`,
+          {method: "POST", body: JSON.stringify({url: panel.querySelector("[data-export-url]").value.trim(),
+           username: panel.querySelector("[data-export-user]").value, token: panel.querySelector("[data-export-token]").value})});
+        toast(`已推送交付分支 ${info.branch}`);
+      } catch (err) { toast(err.message); }
+      finally { panel.querySelector("[data-export-token]").value = ""; button.disabled = false; }
+    }));
     msEl.querySelectorAll("[data-m-report]").forEach((b) =>
       b.addEventListener("click", async () => {
         const r = await api(`/vernal-api/milestones/${encodeURIComponent(b.dataset.mReport)}/report`);
@@ -176,9 +206,42 @@ export async function refreshInbox(state, onRefresh, onOpenTask, onOpenReport) {
 export async function refreshRuntimePanel(onRefresh) {
   const el = $("runtime-panel");
   if (!el) return;
-  const st = await api("/vernal-api/runtime/status");
+  const [st, an] = await Promise.all([
+    api("/vernal-api/runtime/status"),
+    api("/vernal-api/runtime/analytics").catch((err) => ({ loopforge_ok: false, loopforge_error: err.message, local_tasks_count: 0, linked_loopforge_runs: [] })),
+  ]);
   const lf = st.loopforge || {};
   const gt = st.gitea || {};
+  const linkedRunsHtml = (an.linked_loopforge_runs || []).length
+    ? (an.linked_loopforge_runs || [])
+        .map(
+          (item) => `<button type="button" class="btn btn-sm" data-jump-lf-runs="${esc(item.run_id)}" style="margin:2px 4px 2px 0">${esc(item.task_id)} · ${esc(item.run_id.slice(0, 12))} ↗</button>`
+        )
+        .join("")
+    : `<span class="muted">当前项目尚无关联到 LoopForge 的任务运行记录</span>`;
+  const analyticsCardHtml = `
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h3>运行统计与数据来源对照</h3>
+          <p class="card-desc">清晰区分本地工作区统计与 LoopForge 控制面统计，避免查询异常被误认为“无数据”</p>
+        </div>
+        <button type="button" class="btn btn-sm" data-jump-lf-view="analytics">打开 LoopForge 原生统计 ↗</button>
+      </div>
+      <div class="roster-grid" style="margin-bottom:10px">
+        <div class="slot-card">
+          <div class="slot-head"><span class="slot-title">Vernal 本地工作区</span><span class="tag ok">${esc(an.workspace || "-")}</span></div>
+          <div style="font-size:13px">任务数 <strong>${an.local_tasks_count ?? 0}</strong> · Tokens <strong>${((an.local_usage?.input || 0) + (an.local_usage?.output || 0)).toLocaleString()}</strong></div>
+          <div class="muted" style="font-size:11px;margin-top:4px">${esc(an.sources?.local || "本地 SQLite")}</div>
+        </div>
+        <div class="slot-card ${an.loopforge_ok ? "working" : ""}">
+          <div class="slot-head"><span class="slot-title">LoopForge 原生统计</span><span class="tag ${an.loopforge_ok ? "ok" : "warn"}">${an.loopforge_ok ? "已同步" : "未获取"}</span></div>
+          <div style="font-size:13px">${an.loopforge_ok ? `总运行数 <strong>${esc(an.loopforge?.totalRuns ?? an.loopforge?.runs ?? st.recent_runs?.length ?? 0)}</strong>` : `<span style="color:#be123c">${esc(an.loopforge_error || "查询失败")}</span>`}</div>
+          <div class="muted" style="font-size:11px;margin-top:4px">${esc(an.sources?.loopforge || "LoopForge /api/analytics")}</div>
+        </div>
+      </div>
+      <div style="font-size:12px"><span class="muted">已关联原生 Run 的任务：</span>${linkedRunsHtml}</div>
+    </div>`;
 
   const sopsTable = st.workflows?.length
     ? `<table class="data-table"><thead><tr><th>SOP 名称</th><th>ID</th><th>版本</th><th>沙箱配置</th><th>节点数</th></tr></thead><tbody>${st.workflows
@@ -229,7 +292,7 @@ export async function refreshRuntimePanel(onRefresh) {
         <div class="slot-card ${lf.reachable ? "working" : ""}">
           <div class="slot-head"><span class="slot-title">LoopForge 控制面</span><span class="tag ${lf.reachable ? "ok" : "warn"}">${lf.reachable ? "ONLINE" : "OFFLINE"}</span></div>
           <div style="font-weight:600">${esc(lf.url)}</div>
-          <div class="muted" style="font-size:12px;margin-top:4px">${lf.authenticated ? `已鉴权 · ${st.projects.length} 个项目 · ${st.workflows.length} 套 SOP` : lf.reachable ? "服务已存活（首次打开注册管理员并在「接入方式 → 我的 Token」生成 afp_ Token）" : "未启动（可运行 ./deploy/loopforge/up.sh）"}</div>
+          <div class="muted" style="font-size:12px;margin-top:4px">${lf.authenticated ? `已鉴权 · ${st.projects.length} 个项目 · ${st.workflows.length} 套 SOP · ${st.runners_online_count > 0 ? `在线执行机 ${st.runners_online_count} 台（${esc((st.online_runners || []).map((r) => r.name || r.id).join(", "))}）` : "⚠️ 暂无在线执行机心跳"}` : lf.reachable ? "服务已存活（首次打开注册管理员并在「接入方式 → 我的 Token」生成 afp_ Token）" : "未启动（可运行 ./deploy/loopforge/up.sh）"}</div>
         </div>
         <div class="slot-card ${gt.reachable ? "working" : ""}">
           <div class="slot-head"><span class="slot-title">内网 Gitea 仓库服务</span><span class="tag ${gt.reachable ? "ok" : "warn"}">${gt.reachable ? "ONLINE" : "OFFLINE"}</span></div>
@@ -268,6 +331,8 @@ export async function refreshRuntimePanel(onRefresh) {
         <span class="muted" style="font-size:12px">可用异构沙箱：${sandboxesHtml}</span>
       </div>
     </div>
+
+    ${analyticsCardHtml}
 
     <div class="card">
       <div class="card-head"><h3>LoopForge 可用 SOP 流水线模板 (${st.workflows.length})</h3></div>
@@ -309,6 +374,17 @@ export async function refreshRuntimePanel(onRefresh) {
     } catch (err) {
       toast(`保存失败：${err.message}`);
     }
+  });
+
+  el.querySelectorAll("[data-jump-lf-runs]").forEach((b) => {
+    b.addEventListener("click", () => {
+      document.dispatchEvent(new CustomEvent("vernal-jump-native", { detail: { view: "runs", runId: b.dataset.jumpLfRuns } }));
+    });
+  });
+  el.querySelectorAll("[data-jump-lf-view]").forEach((b) => {
+    b.addEventListener("click", () => {
+      document.dispatchEvent(new CustomEvent("vernal-jump-native", { detail: { view: b.dataset.jumpLfView } }));
+    });
   });
 
   el.querySelectorAll("[data-lf-retry]").forEach((b) => {

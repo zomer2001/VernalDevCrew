@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 
 from autodev.loopforge.client import use_environment_proxy
 
-OVERLAY_VERSION = "20261123v1"
+OVERLAY_VERSION = "20261124v8"
 
 HOP_BY_HOP_REQUEST_HEADERS = frozenset(
     {

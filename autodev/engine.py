@@ -10,8 +10,8 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from autodev.artifacts import FileExchange, materialize
-from autodev import gitops
+from autodev.artifacts import FileExchange, checked_name, materialize
+from autodev import gitops, local_git
 from autodev.config import (
     DEFAULT_CONFIG_TOML,
     Settings,
@@ -77,7 +77,12 @@ class PlanningError(RuntimeError):
         super().__init__("规划未通过校验：\n" + "\n".join(f"- {e}" for e in errors))
 
 
-def init_workspace(root: Path, name: str | None = None, collaboration_mode: str | None = None) -> Workspace:
+def init_workspace(
+    root: Path,
+    name: str | None = None,
+    collaboration_mode: str | None = None,
+    base_branch: str | None = None,
+) -> Workspace:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     ws = Workspace(root)
@@ -86,10 +91,15 @@ def init_workspace(root: Path, name: str | None = None, collaboration_mode: str 
         mode = collaboration_mode or "git"
         if mode not in ("files", "git"):
             raise OpsError("协作方式应为 files 或 git")
-        ws.config_path.write_text(DEFAULT_CONFIG_TOML.replace('collaboration_mode = "git"', f'collaboration_mode = "{mode}"'), "utf-8")
+        cfg_txt = DEFAULT_CONFIG_TOML.replace('collaboration_mode = "git"', f'collaboration_mode = "{mode}"')
+        if base_branch and base_branch.strip():
+            cfg_txt = cfg_txt.replace('base_branch = "main"', f"base_branch = {json.dumps(base_branch.strip())}")
+        ws.config_path.write_text(cfg_txt, "utf-8")
     settings = ws.load_settings()
     if collaboration_mode and settings.collaboration_mode != collaboration_mode:
         raise OpsError("已存在的工作区请在立项前从界面切换协作方式")
+    if base_branch and base_branch.strip():
+        settings.base_branch = base_branch.strip()
     if settings.collaboration_mode == "git":
         gitops.ensure_repo(root, settings.base_branch)
     opencode_files = write_opencode_agent_profiles(root)
@@ -129,8 +139,19 @@ class Engine:
 
     @property
     def harness(self) -> Harness:
+        from autodev.harnesses.link_worker import LinkWorkerHarness, personal_worker
+        link = personal_worker(self)
+        if link:
+            return LinkWorkerHarness(self, link)
         if self._harness is None:
-            self._harness = create_harness(self.settings, activity_cb=self._on_activity)
+            if self.settings.runtime_backend == "loopforge" and self.settings.effective_loopforge_token():
+                from autodev.harnesses.loopforge_harness import LoopForgeHarness
+
+                self._harness = LoopForgeHarness(
+                    self.settings, self.db, self.ws, activity_cb=self._on_activity
+                )
+            else:
+                self._harness = create_harness(self.settings, activity_cb=self._on_activity)
         return self._harness
 
     def reset_harness(self) -> None:
@@ -228,6 +249,8 @@ class Engine:
         for m in self.db.list_milestones():
             d = m.to_dict()
             d["status"] = m.status.value
+            d["delivery_branch"] = self.db.meta_get(f"delivery_branch:{m.milestone_id}")
+            d["preview_entry"] = self.db.meta_get(f"preview:{m.milestone_id}")
             milestones.append(d)
 
         total = {"input": 0, "cached": 0, "output": 0, "reasoning": 0}
@@ -250,6 +273,7 @@ class Engine:
             "worker_slots": self.db.list_slots(),
             "runtimes": self.runtimes_status(),
             "milestones": milestones,
+            "deliveries": self.db.list_milestone_deliveries(),
             "tasks": tasks,
             "usage_total": total,
             "settings": {
@@ -258,6 +282,7 @@ class Engine:
                 "enable_council": self.settings.enable_council,
                 "enable_pm_spec": self.settings.enable_pm_spec,
                 "runtime_backend": self.settings.runtime_backend,
+                "execution_pool": self.settings.execution_pool,
                 "loopforge_url": self.settings.loopforge_url,
                 "loopforge_configured": bool(self.settings.effective_loopforge_token() and self.settings.loopforge_project_id),
                 "gitea_url": self.settings.gitea_url,
@@ -310,9 +335,19 @@ class Engine:
         if self.settings.collaboration_mode == "git":
             gitops.commit_paths(self.ws.root, paths, message, **author)
 
+    def link_context_slices(self) -> list[DocSlice]:
+        if self.db.meta_get("source_mode") != "host_link":
+            return []
+        context = ingest_directory(self.ws.state_dir / "link-context", self.settings.slice_max_chars,
+                                   self.settings.slice_min_chars)
+        for item in context:
+            item.slice_id = f"LINK-{item.slice_id}"
+        return context
+
     def ingest(self) -> int:
         self._ensure_not_running()
         slices = ingest_directory(self.ws.inputs_dir, self.settings.slice_max_chars, self.settings.slice_min_chars)
+        slices.extend(self.link_context_slices())
         if not slices:
             raise OpsError(f"{self.ws.inputs_dir} 中没有可解析的资料（支持 md/txt/proto/yaml/json/pdf/docx 等）")
         self.db.replace_slices(slices)
@@ -608,14 +643,6 @@ class Engine:
         self.set_status(ProjectStatus.PLANNED if self.settings.require_plan_approval else ProjectStatus.APPROVED)
 
     # ---------- 研发总监：滚动展开下一里程碑 ----------
-    def _next_task_seq(self) -> int:
-        mx = 0
-        for t in self.db.list_tasks():
-            m = re.search(r"(\d+)$", t.task_id)
-            if m:
-                mx = max(mx, int(m.group(1)))
-        return mx + 1
-
     async def expand_milestone_wave(self, milestone_id: str, max_attempts: int = 3) -> MilestoneWavePlan:
         ms = self.db.get_milestone(milestone_id)
         if ms is None:
@@ -640,7 +667,7 @@ class Engine:
             repo_files=(sorted(FileExchange(self.ws, self.db).baseline([])) if self.settings.collaboration_mode == "files" else gitops.list_repo_files(self.ws.root)),
             contracts=read_contracts(self.ws.root, self.settings.protected_paths),
             completed_tasks=completed,
-            next_task_seq=self._next_task_seq(),
+            next_task_seq=self.db.next_task_number(),
             settings=self.settings,
         )
         prompt = base_prompt
@@ -726,7 +753,7 @@ class Engine:
     async def arbitrate_task(self, task: Task, reason: str, wt: Path | None) -> DirectorDecision | None:
         if task.arbitration_count >= self.settings.director_max_arbitrations:
             return None
-        next_patch_id = f"{task.task_id}-P{task.arbitration_count + 1}"
+        next_patch_id = f"T-{self.db.next_task_number():03d}"
         ident = self._occupy_command_slot("director", "_director", f"正在仲裁阻塞任务 {task.task_id}…")
         t_tok = current_task.set("_director")
         s_tok = current_slot.set("command")
@@ -787,6 +814,7 @@ class Engine:
                 return decision
 
             if decision.action == "PATCH_CONTRACT" and decision.contract_patch.title.strip():
+                next_patch_id = self.db.next_task_id()
                 cp = decision.contract_patch
                 known = {s.slice_id for s in self.db.list_slices()}
                 patch_task = normalize_task(
@@ -926,13 +954,70 @@ class Engine:
             self.set_status(ProjectStatus.APPROVED)
 
     def merge_milestone(self, milestone_id: str, actor: str) -> None:
+        with self.db.transaction():
+            self._merge_milestone(milestone_id, actor)
+
+    def _merge_milestone(self, milestone_id: str, actor: str) -> None:
+        history = self.db.list_milestone_deliveries(milestone_id)
+        version = history[-1]["version_no"] + 1 if history else 1
+        previous = history[-1]["commit_sha"] if history else ""
         ms = self.db.get_milestone(milestone_id)
         if ms is None:
             raise OpsError(f"里程碑不存在: {milestone_id}")
         if ms.status == MilestoneStatus.AWAITING_MERGE and self.settings.collaboration_mode == "files":
-            from tempfile import TemporaryDirectory
+            from tempfile import NamedTemporaryFile, TemporaryDirectory
+
+            exchange = FileExchange(self.ws, self.db)
             key = self.db.meta_get(f"delivery:{milestone_id}")
-            files = FileExchange(self.ws, self.db).get(key)
+            files = exchange.get(key)
+            is_inplace = self.db.meta_get("source_mode") == "local_folder"
+            changed_paths: list[str] = []
+            if is_inplace:
+                prev_key = self.db.meta_get("last_inplace_digest") or self.db.meta_get("seed_baseline_digest")
+                prev_files = exchange.get(prev_key) if prev_key else {}
+                changed_paths = sorted(
+                    p for p in (prev_files.keys() | files.keys()) if prev_files.get(p) != files.get(p)
+                )
+                ws_root = self.ws.root.resolve()
+
+                def inplace_target(name):
+                    target = ws_root / checked_name(name)
+                    parent = target
+                    while parent != ws_root:
+                        if parent.is_symlink():
+                            raise OpsError(f"原目录路径冲突，拒绝通过符号链接写回：{name}")
+                        parent = parent.parent
+                    return target
+
+                conflicts: list[str] = []
+                for rel in changed_paths:
+                    target = inplace_target(rel)
+                    disk_val: str | None
+                    if target.exists():
+                        if not target.is_file() or target.is_symlink():
+                            conflicts.append(rel)
+                            continue
+                        try:
+                            disk_val = target.read_text("utf-8")
+                        except (OSError, UnicodeDecodeError):
+                            conflicts.append(rel)
+                            continue
+                    else:
+                        disk_val = None
+                    base_val = prev_files.get(rel)
+                    new_val = files.get(rel)
+                    if disk_val != base_val and disk_val != new_val:
+                        conflicts.append(rel)
+                if conflicts:
+                    shown = "、".join(conflicts[:8]) + (f" 等 {len(conflicts)} 个文件" if len(conflicts) > 8 else "")
+                    raise OpsError(
+                        f"原目录存在运行期间的手工修改冲突，已中止写回（里程碑保持待合并，请备份或同步以下文件后重试）：{shown}"
+                    )
+
+            entries = sorted((path for path in files if path.lower().endswith(".html")),
+                             key=lambda path: (Path(path).name != "index.html", len(Path(path).parts), path))
+            if entries:
+                self.db.meta_set(f"preview:{milestone_id}", entries[0])
             root = self.ws.state_dir / "deliveries"
             root.mkdir(exist_ok=True)
             destination = root / key
@@ -941,22 +1026,102 @@ class Engine:
                     temp = Path(directory) / "release"
                     materialize(files, temp)
                     temp.rename(destination)
+
+            if is_inplace:
+                for rel in changed_paths:
+                    target = inplace_target(rel)
+                    new_val = files.get(rel)
+                    if new_val is None:
+                        if target.is_file():
+                            target.unlink()
+                        parent_dir = target.parent
+                        while parent_dir != ws_root and parent_dir.exists() and not any(parent_dir.iterdir()):
+                            parent_dir.rmdir()
+                            parent_dir = parent_dir.parent
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with NamedTemporaryFile(mode="wb", dir=target.parent, delete=False) as tf:
+                            tf.write(new_val.encode("utf-8"))
+                        Path(tf.name).replace(target)
+
+                self.db.meta_set("last_inplace_digest", key)
+            self.db.record_milestone_delivery(milestone_id, version, "files", artifact_digest=key)
             for task in self.db.list_tasks(milestone_id=milestone_id):
-                self.db.update_task(task.task_id, status=TaskStatus.MERGED)
+                if task.status != TaskStatus.CANCELLED:
+                    self.db.update_task(task.task_id, status=TaskStatus.MERGED)
             self.db.update_milestone(milestone_id, status=MilestoneStatus.MERGED)
-            self.db.add_event("milestone.merged", f"已交付文件 {destination}", actor=actor)
+            msg = (
+                f"已写回原目录（更新 {len(changed_paths)} 个文件）并归档交付至 {destination}"
+                if is_inplace
+                else f"已交付文件 {destination}"
+            )
+            self.db.add_event("milestone.merged", msg, actor=actor)
             if all(m.status == MilestoneStatus.MERGED for m in self.db.list_milestones()):
                 self.set_status(ProjectStatus.COMPLETED)
             return
         if ms.status != MilestoneStatus.AWAITING_MERGE or not ms.branch_name:
             raise OpsError(f"{milestone_id} 当前状态 {ms.status}，不能合并")
         root, base = self.ws.root, self.settings.base_branch
+        source = self.db.meta_get("git_delivery_source")
+        if not source and self.db.meta_get("source_mode") == "local_folder":
+            raise OpsError("旧工作区位于原仓库内，请从本机目录以新的项目名称建立独立 Git 副本后交付")
         if gitops.current_branch(root) != base:
             raise OpsError(f"主仓库当前不在 {base} 分支，请先切换")
         if not gitops.is_clean(root):
             raise OpsError("主仓库工作区存在未提交改动，请先提交或清理后再合并")
+        prev_sha = gitops.head_sha(root)
         gitops.fast_forward(root, ms.branch_name, f"autodev: merge milestone {milestone_id}")
+        merged_sha = gitops.head_sha(root)
+        pushed_remote = False
+        from autodev import local_git_bridge
+        project = self.settings.loopforge_project_id or root.name
+        prefix = self.db.meta_get("delivery_branch_prefix") or f"vernal/{project}/"
+        delivery_branch = prefix + milestone_id
+        published_branch = delivery_branch
+        # A Git branch cannot also be the parent of other branches.
+        archive = f"{delivery_branch}-versions/v{version}"
+        git_url = self.db.meta_get("git_url") or ""
+        target = Path(source) if source else root
+        remote_access = self.db.meta_get("private_remote")
+        def publish(branch, expected):
+            if remote_access:
+                local_git_bridge.publish_private_remote(root, remote_access, branch, merged_sha, expected)
+            elif self.db.meta_get("gitea_mirror") == "1":
+                local_git_bridge.deliver(project, root, branch, merged_sha, expected)
+            local_git.publish(target, root, project, milestone_id, merged_sha, branch=branch, expected=expected)
+            if not source and gitops.has_remote(root, "origin"):
+                ref = "refs/heads/" + branch
+                local_git_bridge._push_with_lease(lambda args: gitops.git(args, root).stdout,
+                                                  "origin", ref, merged_sha, expected)
+
+        try:
+            publish(archive, "")
+            try:
+                publish(delivery_branch, previous or "")
+            except local_git.LeaseConflict:
+                if version == 1:
+                    raise
+                published_branch = archive
+                self.db.add_event("milestone.delivery_conflict",
+                                  f"检测到交付分支存在人工新提交，保留人工提交，第 {version} 版已发布至 {archive}", actor=actor)
+            if not source and gitops.has_remote(root, "origin"):
+                ok_push, detail = gitops.push_branch(root, base, remote="origin")
+                if not ok_push:
+                    raise gitops.GitError(detail)
+                pushed_remote = True
+        except (gitops.GitError, OSError) as exc:
+            gitops.reset_hard(root, prev_sha)
+            context = f"推送 {base} 到远端 origin 失败" if not source and gitops.has_remote(root, "origin") else "交付分支写入失败"
+            raise OpsError(f"{context}，里程碑仍待交付：{exc}") from exc
+        if not git_url:
+            git_url = gitops.git(["remote", "get-url", "origin"], target, check=False).stdout.strip()
+        self.db.meta_set(f"delivery_branch:{milestone_id}", published_branch)
+        self.db.record_milestone_delivery(milestone_id, version, "git", commit_sha=merged_sha,
+                                          prev_commit_sha=previous or None, rolling_branch=delivery_branch,
+                                          archive_branch=archive, compare_url=local_git.compare_url(git_url, base, archive))
         for t in self.db.list_tasks(milestone_id=milestone_id):
+            if t.status == TaskStatus.CANCELLED:
+                continue
             self.db.update_task(t.task_id, status=TaskStatus.MERGED, assigned_slot=None, active_agent_label=None)
             if t.worktree_path:
                 gitops.remove_worktree(root, Path(t.worktree_path))
@@ -964,8 +1129,11 @@ class Engine:
         gitops.remove_worktree(root, self.ws.integration_dir / milestone_id)
         self.db.update_milestone(milestone_id, status=MilestoneStatus.MERGED)
         self.db.meta_set("contract_hash", gitops.tree_fingerprint(root, self.settings.protected_paths))
+        push_note = " 并推送至 origin" if pushed_remote else ""
+        if published_branch:
+            push_note = f"，已交付到原仓库分支 {published_branch}"
         self.db.add_event(
-            "milestone.merged", f"{milestone_id} 已合入 {base}（{gitops.head_sha(root)[:10]}）", actor=actor
+            "milestone.merged", f"{milestone_id} 已合入 {base}{push_note}（{merged_sha[:10]}）", actor=actor
         )
         if all(m.status == MilestoneStatus.MERGED for m in self.db.list_milestones()):
             self.set_status(ProjectStatus.COMPLETED)

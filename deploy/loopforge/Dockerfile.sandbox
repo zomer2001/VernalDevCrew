@@ -1,0 +1,23 @@
+ARG LOOPFORGE_IMAGE=ghcr.io/tencent/loopforge:0.4.0
+FROM ${LOOPFORGE_IMAGE}
+USER root
+ARG DSH_PACKAGE=@deepseek-ai/dsh@0.2.2-rc.1
+ARG OPENCODE_PACKAGE=opencode-ai
+ARG CLI_FALLBACK_REGISTRY=https://registry.npmjs.org
+RUN set -eu; missing=0; for cmd in python3 node npm git curl; do command -v "$cmd" >/dev/null || missing=1; done; \
+    if [ "$missing" = 1 ]; then \
+      if command -v apt-get >/dev/null; then apt-get update && apt-get install -y --no-install-recommends python3 nodejs npm git curl ca-certificates && rm -rf /var/lib/apt/lists/*; \
+      elif command -v apk >/dev/null; then apk add --no-cache python3 nodejs npm git curl ca-certificates; \
+      else echo "Cannot install sandbox dependencies on $(uname -m)" >&2; exit 1; fi; \
+    fi
+RUN set -eu; install_cli() { binary="$1"; package="$2"; \
+      if "$binary" --version >/dev/null 2>&1; then return; fi; \
+      if npm install -g --include=optional "$package" && "$binary" --version; then return; fi; \
+      echo "Retrying $package for $(uname -m) using $CLI_FALLBACK_REGISTRY" >&2; \
+      npm install -g --include=optional --registry "$CLI_FALLBACK_REGISTRY" "$package" && "$binary" --version; \
+    }; install_cli dsh "$DSH_PACKAGE"; install_cli opencode "$OPENCODE_PACKAGE"
+RUN set -eu; for cli in dsh opencode; do \
+      resolved="$(command -v "$cli")"; \
+      if [ ! -x "/usr/local/bin/$cli" ]; then ln -s "$resolved" "/usr/local/bin/$cli"; fi; \
+      "/usr/local/bin/$cli" --version || { echo "$cli failed on $(uname -m)" >&2; exit 1; }; \
+    done

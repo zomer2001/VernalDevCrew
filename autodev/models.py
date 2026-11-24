@@ -19,6 +19,7 @@ class TaskStatus(StrEnum):
     REVIEWING = "REVIEWING"
     APPROVED = "APPROVED"
     FUSED = "FUSED"
+    CANCELLED = "CANCELLED"
     MERGED = "MERGED"
 
 

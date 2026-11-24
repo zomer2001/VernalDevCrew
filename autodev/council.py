@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +14,7 @@ from autodev.db import DocSlice, now_iso
 from autodev.ingest import summarize
 from autodev.models import CouncilConsensus, CouncilOpinion, ProjectStatus
 from autodev.prompts import (
+    PLANNER_FULLTEXT_BUDGET,
     build_council_consensus_prompt,
     build_council_opinion_prompt,
     build_plan_fix_prompt,
@@ -28,11 +30,40 @@ ROUND1_ROLES: tuple[tuple[str, str], ...] = (
 )
 
 
+def _incomplete_opinions(engine: "Engine", messages, prompts, signature, slices) -> dict:
+    if not messages or any(m["kind"] == "consensus" for m in messages):
+        return {}
+    saved_signature = engine.db.meta_get("council_input_signature")
+    if saved_signature and saved_signature != signature:
+        return {}
+    proposals = {}
+    for msg in messages:
+        if msg["kind"] != "proposal" or msg["round_no"] != 1:
+            continue
+        role = msg["speaker_role"]
+        if role not in prompts or role in proposals:
+            return {}
+        if not saved_signature:
+            # Previous releases recorded the exact specialist prompt in the execution log.
+            path = engine.ws.runs_dir / "_council" / f"r1-{role}" / "prompt.md"
+            if sum(s.char_count for s in slices) > PLANNER_FULLTEXT_BUDGET or not path.is_file():
+                return {}
+            if path.read_text("utf-8") != prompts[role]:
+                return {}
+        try:
+            CouncilOpinion.model_validate(msg["body"])
+        except ValidationError:
+            return {}
+        proposals[role] = msg
+    return proposals
+
+
 async def run_council(
     engine: "Engine",
     *,
     extra_instructions: str = "",
     clear_history: bool = True,
+    resume_incomplete: bool = True,
 ) -> CouncilConsensus:
     from autodev.engine import OpsError, PlanningError, current_actor, current_slot, current_task
 
@@ -40,13 +71,26 @@ async def run_council(
     if not slices:
         raise OpsError("还没有资料切片，请先运行 ingest")
 
-    if clear_history:
+    messages = engine.db.list_council_messages()
+    human_notes = [m["headline"] for m in messages if m["kind"] == "human"]
+    prompts = {role: build_council_opinion_prompt(role, slices, extra_instructions, human_notes)
+               for role, _ in ROUND1_ROLES}
+    inputs = json.dumps([prompts, [s.content for s in slices]], ensure_ascii=False)
+    signature = hashlib.sha256(inputs.encode()).hexdigest()
+    cached = _incomplete_opinions(engine, messages, prompts, signature, slices) if resume_incomplete else {}
+    if not cached and clear_history:
         engine.db.clear_council_messages()
+        if human_notes:
+            human_notes = []
+            prompts = {role: build_council_opinion_prompt(role, slices, extra_instructions)
+                       for role, _ in ROUND1_ROLES}
+            inputs = json.dumps([prompts, [s.content for s in slices]], ensure_ascii=False)
+            signature = hashlib.sha256(inputs.encode()).hexdigest()
+    engine.db.meta_set("council_input_signature", signature)
+    if cached:
+        roles = "、".join(cn for role, cn in ROUND1_ROLES if role in cached)
+        engine.db.add_event("council.resumed", f"沿用已完成的评审意见：{roles}", task_id="_council")
     engine.db.ensure_slots(engine.settings.max_concurrency)
-
-    human_notes = [
-        m["headline"] for m in engine.db.list_council_messages() if m.get("kind") == "human"
-    ]
     engine.db.add_event(
         "council.started",
         "多智能体架构评审圆桌启动（第 1 轮：PM / 契约架构师 / QA 总监独立评审 → 第 2 轮：研发总监裁决 ADR）",
@@ -77,7 +121,7 @@ async def run_council(
             t_tok = current_task.set(f"_council_{role}")
             s_tok = current_slot.set(slot_id)
             a_tok = current_actor.set(ident["label"])
-            prompt = build_council_opinion_prompt(role, slices, extra_instructions, human_notes)
+            prompt = prompts[role]
             log_dir = engine.ws.runs_dir / "_council" / f"r1-{role}"
             run_id = engine.db.start_run(f"_council_{role}", 1, f"COUNCIL:{role}", ident["harness"], agent_label=ident["label"])
             try:
@@ -137,7 +181,20 @@ async def run_council(
                 current_slot.reset(s_tok)
                 current_task.reset(t_tok)
 
-    opinions = list(await asyncio.gather(*[_run_specialist(r, cn) for r, cn in ROUND1_ROLES]))
+    missing = [(role, cn) for role, cn in ROUND1_ROLES if role not in cached]
+    results = await asyncio.gather(*(_run_specialist(role, cn) for role, cn in missing),
+                                   return_exceptions=True)
+    errors = []
+    for (role, name), result in zip(missing, results):
+        if isinstance(result, asyncio.CancelledError):
+            raise result
+        if isinstance(result, Exception):
+            errors.extend(result.errors if isinstance(result, PlanningError) else [f"{name}：{result}"])
+        else:
+            cached[role] = result
+    if errors:
+        raise PlanningError(errors)
+    opinions = [cached[role] for role, _ in ROUND1_ROLES]
     return await synthesize_council(engine, opinions=opinions, extra_instructions=extra_instructions)
 
 
@@ -238,6 +295,12 @@ async def synthesize_council(
                 )
                 engine.db.meta_set("prd_vision", consensus.executive_summary)
                 engine.set_status(ProjectStatus.SPECIFIED)
+                try:
+                    from autodev.steering import sync_council_adrs_to_decisions
+
+                    await sync_council_adrs_to_decisions(engine, consensus)
+                except Exception:
+                    pass
                 engine.db.add_event(
                     "council.consensus",
                     f"圆桌拍板完成：形成 {len(consensus.adrs)} 项 ADR 决策，裁决 {len(consensus.resolved_debates)} 项分歧",

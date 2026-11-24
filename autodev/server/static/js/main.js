@@ -1,9 +1,11 @@
-import { $, actorName, api, fmtElapsed, toast, root } from "./api.js";
+import { $, actorName, api, esc, fmtElapsed, projectQuerySuffix, root, toast } from "./api.js";
 import { bindCouncilActions, refreshCouncil } from "./council.js";
 import { renderDAG } from "./dag.js";
 import { handleLiveDrawerEvent, initDrawer, openReportModal, openTaskDrawer } from "./drawer.js";
+import { initLauncher } from "./launcher.js";
 import { renderDocsAndPlan, renderGoalBar, renderRoster, renderSquadColumns } from "./roster.js";
 import { refreshInbox, refreshRuntimePanel } from "./runtime.js";
+import { initSteering, renderSteering } from "./steering.js";
 
 import { createTimeline } from "./timeline.js";
 
@@ -13,6 +15,7 @@ let planDoc = null;
 let lastEventId = 0;
 let activeView = "overview";
 const timeline = createTimeline(openTaskDrawer);
+let launcher = null;
 
 $("actor-input").value = localStorage.getItem("autodev_actor") || "owner";
 $("actor-input").addEventListener("input", () => localStorage.setItem("autodev_actor", actorName()));
@@ -54,26 +57,48 @@ function renderAll() {
   st.textContent = state.planning ? "PLANNING" : state.status;
   st.className = `status-pill ${state.planning ? "RUNNING" : state.status}`;
 
+  const srcPill = $("project-source-pill");
+  if (srcPill) {
+    const modeLabels = {
+      local_folder: state.settings?.collaboration_mode === "git" ? "本机 Git 副本" : "本机目录",
+      host_link: "本机目录桥接",
+      git_repo: "🌿 Git 仓库",
+      import_folder: "📦 已导入目录",
+      scratch: state.settings?.collaboration_mode === "git" ? "🌿 Git 项目" : "📄 文件交接",
+    };
+    const baseTxt = modeLabels[state.source_mode] || "📄 文件交接";
+    srcPill.textContent = state.git_branch ? `${baseTxt} · ${state.git_branch}` : baseTxt;
+    srcPill.title = state.workspace_root || "";
+    srcPill.classList.remove("hidden");
+  }
+
   $("side-backend").textContent = state.settings?.runtime_backend || "local";
   $("side-backend").className = `tag ${state.settings?.runtime_backend === "loopforge" ? "ok" : ""}`;
 
   const rt = state.runtimes || {};
+  const rs = state.runner_summary || {};
+  if ($("pool-pill")) $("pool-pill").textContent = rs.effective_pool === "public_docker" ? "公用 Docker" :
+    (rs.effective_pool === "local_runner" ? "本机 Runner" : "本地调试");
+  const pool = rs.pools?.public_docker;
+  if ($("pool-status") && pool) $("pool-status").textContent =
+    `本机在线：${rs.runner_names?.join("、") || "无"}。公用镜像：${pool.image_ready ? "已校验" : "待构建"}。公用 Key：${pool.key_configured ? "已配置" : "未配置"}。公用账号：${pool.identity_configured ? "已连接配置" : "待配置"}。`;
   const renderPill = (elId, info, activeModel = "") => {
     const el = $(elId);
-    if (!el || !info) return;
+    if (!el) return;
+    if (!info) { el.textContent = "执行池未提供"; el.className = "tag"; el.title = ""; return; }
     if (!info.installed) {
-      el.textContent = "未装";
-      el.className = "tag";
+      el.textContent = info.runner_online === false ? "Runner离线" : "未装";
+      el.className = info.runner_online === false ? "tag warn" : "tag";
     } else if (info.ready) {
       el.textContent = activeModel || "就绪";
       el.className = "tag ok";
     } else {
-      el.textContent = "待配Key";
+      el.textContent = info.api_key_configured === null ? "凭据待核实" : "需配Key";
       el.className = "tag warn";
     }
     el.title = `${info.note || ""}${info.bin ? " · " + info.bin : ""}`;
   };
-  renderPill("codex-pill", rt.codex, state.settings?.effective_harness === "codex" ? (state.settings?.model || "就绪") : "就绪");
+  renderPill("codex-pill", rt.codex, state.settings?.effective_harness === "codex" ? (state.settings?.model || "免Key就绪") : "免Key就绪");
   renderPill("codebuddy-pill", rt.codebuddy);
   renderPill("opencode-pill", rt.opencode);
   renderPill("dsh-pill", rt.dsh);
@@ -83,17 +108,58 @@ function renderAll() {
     const entries = [
       ["codex", "Codex"],
       ["codebuddy", "CodeBuddy"],
+      ["claude-code", "Claude Code"],
       ["opencode", "OpenCode"],
       ["dsh", "DeepSeek Harness"],
-      ["claude-code", "Claude Code"],
     ];
-    badgesEl.innerHTML = `<span class="muted" style="font-size:12px">本机扫描结果：</span>` + entries.map(([k, label]) => {
-      const info = rt[k] || {};
-      const cls = !info.installed ? "" : info.ready ? "ok" : "warn";
-      const statusTxt = !info.installed ? "未安装" : info.ready ? "已就绪" : "待配凭据";
-      const tip = `${info.note || ""}${info.bin ? " (" + info.bin + ")" : ""}`.replace(/"/g, "&quot;");
-      return `<span class="tag ${cls}" title="${tip}">${label} · ${statusTxt}</span>`;
-    }).join("");
+    const sourceLabel =
+      rs.effective_pool === "public_docker" ? "公用 Docker 沙箱" : rs.source === "loopforge_runner"
+        ? `LoopForge 在线 Runner（${(rs.runner_names || []).join(", ")}）：`
+        : state.settings?.runtime_backend === "loopforge"
+          ? "LoopForge Runner 离线（请运行 ./vernal.sh）："
+          : "本机扫描结果：";
+    badgesEl.innerHTML =
+      `<span class="muted" style="font-size:12px">${esc(sourceLabel)}</span>` +
+      entries
+        .map(([k, label]) => {
+          const info = rt[k] || {};
+          const cls = !info.installed ? "" : info.ready ? "ok" : "warn";
+          const statusTxt = !info.installed
+            ? "未检测"
+            : info.ready
+              ? info.needs_api_key
+                ? "Key已配·就绪"
+                : "免Key就绪"
+              : info.api_key_configured === null ? "凭据待核实" : "需配API Key";
+          const tip = esc(`${info.note || ""}${info.bin ? " (" + info.bin + ")" : ""}`);
+          const clickAttr = k === "codebuddy" ? ' data-open-cb-key="1" style="cursor:pointer"' : "";
+          return `<span class="tag ${cls}" title="${tip}"${clickAttr}>${label} · ${statusTxt}</span>`;
+        })
+        .join("");
+    badgesEl.querySelectorAll("[data-open-cb-key]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const box = $("cb-key-box");
+        if (box) box.hidden = !box.hidden;
+      });
+    });
+  }
+  const cbBox = $("cb-key-box");
+  if (cbBox && state.settings?.runtime_backend === "loopforge") {
+    const cbInfo = rt.codebuddy || {};
+    const cbSelected = [
+      state.settings.harness,
+      state.settings.director_harness,
+      state.settings.raw_coder_harness,
+      state.settings.qa_harness,
+    ].includes("codebuddy");
+    if ((cbInfo.installed && !cbInfo.ready) || (cbSelected && !cbInfo.ready)) {
+      cbBox.hidden = false;
+    } else if (cbInfo.ready && !cbBox._userToggled) {
+      cbBox.hidden = true;
+    }
+    if ($("cb-key-env") && rs.codebuddy_internet_environment !== undefined && !$("cb-key-env")._touched) {
+      $("cb-key-env").value = rs.codebuddy_internet_environment || "";
+    }
   }
   const effHint = $("cfg-effective-hint");
   if (effHint && state.settings) {
@@ -103,12 +169,19 @@ function renderAll() {
   const u = state.usage_total || { input: 0, cached: 0, output: 0, reasoning: 0 };
   $("usage-pill").textContent = `Tokens ${(u.input + u.output).toLocaleString()} · 缓存 ${u.cached.toLocaleString()}`;
 
+  const needsPlan = ["CREATED", "INGESTED", "SPECIFIED"].includes(state.status);
+  const btnPlan = $("btn-plan");
+  if (btnPlan) {
+    btnPlan.classList.toggle("btn-primary", needsPlan && !state.planning && (state.slices_count > 0 || state.source_mode !== "scratch"));
+    btnPlan.classList.toggle("hidden", state.scheduler_running || state.status === "COMPLETED");
+  }
   $("btn-approve").classList.toggle("hidden", state.status !== "PLANNED");
   $("btn-start").classList.toggle(
     "hidden",
     state.scheduler_running || ["CREATED", "INGESTED", "SPECIFIED", "PLANNED"].includes(state.status)
   );
   $("btn-stop").classList.toggle("hidden", !state.scheduler_running);
+  launcher?.syncAutoOpen(state);
 
   const modeSel = $("plan-mode");
   if (modeSel && !modeSel._touched) modeSel.value = state.settings?.planning_mode || "goal";
@@ -127,7 +200,8 @@ function renderAll() {
   }
   const fused = (state.tasks || []).filter((t) => t.status === "FUSED").length;
   const awMs = (state.milestones || []).filter((m) => m.status === "AWAITING_MERGE").length;
-  const localPending = fused + awMs + (state.status === "PLANNED" ? 1 : 0);
+  const awSt = (state.checkpoints || []).filter((c) => c.status === "AWAITING_APPROVAL").length;
+  const localPending = fused + awMs + awSt + (state.status === "PLANNED" ? 1 : 0);
   const ic = $("nav-inbox-cnt");
   if (ic && activeView !== "inbox") {
     ic.textContent = String(localPending);
@@ -136,9 +210,10 @@ function renderAll() {
 
   if ($("collaboration-mode")) {
     $("collaboration-mode").value = state.settings.collaboration_mode || "git";
-    $("collaboration-mode").disabled = state.planning || state.scheduler_running || state.milestones.length > 0;
+    $("collaboration-mode").disabled = state.source_mode === "host_link" || state.planning || state.scheduler_running || state.milestones.length > 0;
   }
   renderGoalBar(state);
+  renderSteering(state, { onRefresh: refresh, onSelectTask: openTaskDrawer });
   renderDAG(state, openTaskDrawer);
   renderRoster(state, openTaskDrawer);
   renderSquadColumns(state, openTaskDrawer);
@@ -221,7 +296,7 @@ let activeEventSource = null;
 
 function connectSSE() {
   if (activeEventSource) activeEventSource.close();
-  const es = new EventSource(`/vernal-api/events?after=${lastEventId}`);
+  const es = new EventSource(`/vernal-api/events?after=${lastEventId}${projectQuerySuffix("&")}`);
   activeEventSource = es;
   es.onopen = () => {
     timeline.setConnected(true);
@@ -239,6 +314,7 @@ function connectSSE() {
       if (ev.event_id > lastEventId) {
         lastEventId = ev.event_id;
         timeline.append(ev);
+        if (ev.event_type === "link.conflict") toast(ev.message);
         handleLiveDrawerEvent(ev);
         if (ev.task_id && state?.tasks) {
           const t = state.tasks.find((x) => x.task_id === ev.task_id);
@@ -278,6 +354,48 @@ export async function reloadProjectContext() {
 
 initDrawer();
 bindCouncilActions(refresh, openTaskDrawer);
+initSteering({ onRefresh: refresh, getState: () => state, onSelectTask: openTaskDrawer });
+launcher = initLauncher({
+  onProjectReady: async () => {
+    await reloadProjectContext();
+  },
+  onSwitchView: (v) => switchView(v),
+});
+$("btn-launcher-toggle")?.addEventListener("click", () => {
+  const panel = $("project-launcher");
+  if (!panel) return;
+  if (panel.hidden) launcher.open();
+  else launcher.close();
+});
+$("cb-key-env")?.addEventListener("change", (e) => {
+  e.target._touched = true;
+});
+$("btn-cb-key-save")?.addEventListener("click", async () => {
+  const key = $("cb-key-input")?.value?.trim() || "";
+  const env = $("cb-key-env")?.value || "";
+  if (!key) {
+    toast("请先粘贴 CodeBuddy API Key");
+    return;
+  }
+  const btn = $("btn-cb-key-save");
+  if (btn) btn.disabled = true;
+  try {
+    await api("/vernal-api/credentials/codebuddy", {
+      method: "POST",
+      body: JSON.stringify({ api_key: key, internet_environment: env }),
+    });
+    if ($("cb-key-input")) $("cb-key-input").value = "";
+    toast("CodeBuddy API Key 已保存到 LoopForge 个人凭据，Runner 现已就绪");
+    await refresh();
+  } catch (err) {
+    toast(`保存失败：${err.message}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+$("btn-cb-key-jump")?.addEventListener("click", () => {
+  document.dispatchEvent(new CustomEvent("vernal-jump-native", { detail: { view: "settings" } }));
+});
 refresh().then(() => {
   lastEventId = state.recent_events.at(-1)?.event_id || 0;
   timeline.start(state);
@@ -288,6 +406,12 @@ refresh().then(() => {
 function populateAgentConfigForm() {
   if (!state?.settings || !$("agent-config-form")) return;
   const s = state.settings;
+  $("cfg-pool").value = s.execution_pool || "auto";
+  const publicPool = state.runner_summary?.pools?.public_docker || {};
+  $("pool-deepseek-url").value = publicPool.deepseek_base_url || "";
+  $("pool-openai-url").value = publicPool.openai_base_url || "";
+  $("pool-model").value = publicPool.default_model || "";
+  $("pool-reasoning").value = publicPool.reasoning_model || "";
   $("cfg-harness").value = s.harness || "auto";
   $("cfg-model").value = s.model || "";
   $("cfg-concurrency").value = String(s.max_concurrency || 2);
@@ -315,11 +439,32 @@ $("btn-agent-close")?.addEventListener("click", () => {
 $("btn-agent-rescan")?.addEventListener("click", async () => {
   try {
     const res = await api("/vernal-api/agent/rescan", { method: "POST" });
-    toast(`扫描完成，推荐执行器：${res.preferred_harness}`);
+    toast(`扫描完成，推荐执行器：${res.preferred_harness || "暂无可选执行器"}`);
     await refresh();
   } catch (err) {
     toast(`扫描失败：${err.message}`);
   }
+});
+$("save-public-pool")?.addEventListener("click", async () => {
+  const payload = {deepseek_base_url: $("pool-deepseek-url").value, openai_base_url: $("pool-openai-url").value,
+    default_model: $("pool-model").value, reasoning_model: $("pool-reasoning").value};
+  if ($("pool-deepseek-key").value) payload.deepseek_api_key = $("pool-deepseek-key").value;
+  if ($("pool-openai-key").value) payload.openai_api_key = $("pool-openai-key").value;
+  try {
+    const saved = await api("/vernal-api/runtime/public-pool", {method: "POST", body: JSON.stringify(payload)});
+    $("pool-deepseek-key").value = ""; $("pool-openai-key").value = "";
+    await refresh(); toast(saved.setup_message || (saved.service_login ? `配置已保存。项目中的公用执行账号：${saved.service_login}` : "公用额度池配置已保存"));
+  } catch (err) { toast(err.message); }
+});
+$("copy-runner-command")?.addEventListener("click", async () => {
+  try {
+    const res = await api("/vernal-api/runner/connect", {method: "POST"});
+    const field = $("runner-command");
+    field.hidden = false; field.value = res.command; field.select();
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(res.command); toast("本机 CLI 接入命令已复制");
+    } else { toast("请复制已选中的命令，在个人电脑终端执行"); }
+  } catch (err) { toast(err.message); }
 });
 $("agent-config-form")?.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -329,6 +474,7 @@ $("agent-config-form")?.addEventListener("submit", async (event) => {
     const res = await api("/vernal-api/agent/config", {
       method: "POST",
       body: JSON.stringify({
+        execution_pool: $("cfg-pool").value,
         harness: $("cfg-harness").value,
         model: $("cfg-model").value,
         max_concurrency: Number($("cfg-concurrency").value || 2),

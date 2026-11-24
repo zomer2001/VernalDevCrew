@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from ipaddress import ip_address
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -31,6 +32,7 @@ class LoopForgeClient:
         self.base_url = base_url.rstrip("/")
         self.token = token.strip()
         self.timeout = timeout
+        self.issue_user_id: int | str | None = None
 
     def _headers(self) -> dict[str, str]:
         h = {"Accept": "application/json", "Content-Type": "application/json"}
@@ -86,22 +88,84 @@ class LoopForgeClient:
         name: str,
         description: str = "",
         workflow_id: str = "",
+        default_repository_id: str = "",
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"id": project_id, "name": name, "description": description}
         if workflow_id:
             body["workflowId"] = workflow_id
+        if default_repository_id:
+            body["defaultRepositoryId"] = default_repository_id
         return await self._req("POST", "/api/projects", json_body=body)
+
+    async def put_project(self, project: dict[str, Any]) -> dict[str, Any]:
+        data = await self._req("PUT", "/api/projects", json_body=project)
+        return data if isinstance(data, dict) else {}
 
     async def list_repositories(self) -> list[dict[str, Any]]:
         data = await self._req("GET", "/api/repositories")
         return data if isinstance(data, list) else []
 
+    async def put_repository(self, repo: dict[str, Any]) -> dict[str, Any]:
+        data = await self._req("PUT", "/api/repositories", json_body=repo)
+        return data if isinstance(data, dict) else {}
+
+    async def auth_current(self) -> dict[str, Any]:
+        data = await self._req("GET", "/api/auth/current")
+        return data if isinstance(data, dict) else {}
+
+    async def save_user_codebuddy_key(
+        self,
+        user_id: int | str,
+        api_key: str,
+        internet_env: str = "",
+        *,
+        cookie_header: str = "",
+    ) -> dict[str, Any]:
+        path = f"/api/users/{quote(str(user_id), safe='')}/credentials"
+        body: dict[str, Any] = {
+            "codeBuddyApiKey": api_key.strip(),
+            "codeBuddyInternetEnvironment": internet_env.strip(),
+        }
+        if cookie_header:
+            url = f"{self.base_url}{path}"
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Origin": self.base_url,
+                "Cookie": cookie_header,
+            }
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout, trust_env=use_environment_proxy(url)) as client:
+                    resp = await client.put(url, headers=headers, json=body)
+            except httpx.HTTPError as exc:
+                raise LoopForgeError(f"无法连接 LoopForge ({url}): {exc}") from exc
+            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            if resp.status_code >= 400:
+                raise LoopForgeError(str((data or {}).get("error") or f"HTTP {resp.status_code}"), status_code=resp.status_code)
+            return data if isinstance(data, dict) else {"ok": True}
+        data = await self._req("PUT", path, json_body=body)
+        return data if isinstance(data, dict) else {"ok": True}
+
     async def list_runners(self) -> list[dict[str, Any]]:
         data = await self._req("GET", "/api/runners")
         return data if isinstance(data, list) else []
 
+    async def list_runners_with_cookie(self, cookie: str) -> list[dict[str, Any]]:
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, trust_env=use_environment_proxy(self.base_url)) as client:
+                response = await client.get(f"{self.base_url}/api/runners", headers={"Cookie": cookie})
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise LoopForgeError("无法读取当前登录账号的执行机") from exc
+        rows = response.json()
+        return rows if isinstance(rows, list) else []
+
     async def set_default_runner(self, runner_id: str) -> dict[str, Any]:
         data = await self._req("PUT", "/api/runners/default", json_body={"runnerId": runner_id})
+        return data if isinstance(data, dict) else {}
+
+    async def create_runner_bind_code(self) -> dict[str, Any]:
+        data = await self._req("POST", "/api/runners/bind-codes", json_body={})
         return data if isinstance(data, dict) else {}
 
     async def auth_current_with_cookie(self, cookie_header: str) -> dict[str, Any]:
@@ -118,6 +182,24 @@ class LoopForgeClient:
         if resp.status_code >= 400:
             raise LoopForgeError(str((data or {}).get("error") or f"HTTP {resp.status_code}"), status_code=resp.status_code)
         return data if isinstance(data, dict) else {}
+
+    async def list_projects_with_cookie(self, cookie_header: str) -> list[dict[str, Any]]:
+        url = f"{self.base_url}/api/projects"
+        headers = {"Accept": "application/json"}
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, trust_env=use_environment_proxy(url)) as client:
+                resp = await client.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            raise LoopForgeError(f"无法连接 LoopForge ({url}): {exc}") from exc
+        if resp.status_code >= 400:
+            raise LoopForgeError(f"HTTP {resp.status_code}", status_code=resp.status_code)
+        try:
+            data = resp.json()
+        except ValueError:
+            return []
+        return data if isinstance(data, list) else []
 
     async def create_token_with_cookie(
         self,
@@ -211,10 +293,14 @@ class LoopForgeClient:
     async def get_run(self, run_id: str) -> dict[str, Any]:
         return await self._req("GET", f"/api/runs/{run_id}")
 
-    async def named_artifact(self, run: dict[str, Any], filename: str) -> str:
+    async def named_artifact(self, run: dict[str, Any], filename: str, *, node_id: str = "") -> str:
         """Read one declared SOP output from the run's artifact index."""
-        records = list(run.get("artifacts") or [])
-        for node in (run.get("nodes") or {}).values():
+        records = [a for a in run.get("artifacts") or []
+                   if not node_id or isinstance(a, dict) and a.get("nodeId") == node_id]
+        nodes = run.get("nodes") or {}
+        for current_id, node in nodes.items():
+            if node_id and current_id != node_id:
+                continue
             if isinstance(node, dict):
                 records.extend(node.get("artifacts") or [])
         for item in reversed(records):
@@ -222,18 +308,33 @@ class LoopForgeClient:
                 continue
             if not any(str(item.get(k, "")).split("/")[-1] == filename for k in ("name", "path", "filename", "id")):
                 continue
+            if node_id:
+                node = nodes.get(node_id) or {}
+                if item.get("nodeId", node_id) != node_id:
+                    continue
+                if node.get("attempt") is not None and item.get("attempt") != node["attempt"]:
+                    continue
+                if node.get("reworkCount") or (node.get("startedAt") and item.get("createdAt")):
+                    try:
+                        if datetime.fromisoformat(item["createdAt"]) < datetime.fromisoformat(node["startedAt"]):
+                            continue
+                    except (KeyError, TypeError, ValueError):
+                        continue
             if isinstance(item.get("content"), str) and item["content"]:
                 return item["content"]
             aid = item.get("id") or item.get("artifactId")
             if aid:
                 result = await self._req("GET", f"/api/runs/{quote(run['id'], safe='')}/artifacts/{quote(aid, safe='')}")
                 if isinstance(result, dict):
-                    if "files" in result:
-                        import json
-                        return json.dumps(result)
-                    for field in ("content", "text"):
-                        if isinstance(result.get(field), str):
-                            return result[field]
+                    if set(result.keys()) <= {"content", "text", "id", "name", "mediaType"}:
+                        for field in ("content", "text"):
+                            if isinstance(result.get(field), str):
+                                return result[field]
+                    import json
+
+                    return json.dumps(result, ensure_ascii=False)
+                if isinstance(result, str) and result:
+                    return result
         raise LoopForgeError(f"Run {run.get('id', '')} 未提供声明的交付文件 {filename}")
 
     async def get_run_diff(self, run_id: str) -> Any:
@@ -263,6 +364,8 @@ class LoopForgeClient:
             "description": description,
             "priority": priority,
         }
+        if self.issue_user_id is not None:
+            body["responsibleUserId"] = self.issue_user_id
         if workflow_id:
             body["workflowId"] = workflow_id
         if repository_id:
@@ -281,6 +384,7 @@ class LoopForgeClient:
         workflow_id: str = "",
         repository_id: str = "",
         base_branch: str = "",
+        status: str = "",
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "id": issue_id,
@@ -288,16 +392,35 @@ class LoopForgeClient:
             "title": title,
             "description": description,
         }
+        if self.issue_user_id is not None:
+            body["responsibleUserId"] = self.issue_user_id
         if workflow_id:
             body["workflowId"] = workflow_id
         if repository_id:
             body["repositoryId"] = repository_id
         if base_branch:
             body["baseBranch"] = base_branch
+        if status:
+            body["status"] = status
         return await self._req("PUT", "/api/issues", json_body=body)
 
+    async def issue_detail(self, issue_id: str) -> dict[str, Any]:
+        data = await self._req("GET", f"/api/issues/{quote(issue_id, safe='')}")
+        if not isinstance(data, dict):
+            raise LoopForgeError("LoopForge 返回无效的工单详情")
+        return data
+
     async def dispatch_issue(self, issue_id: str, rerun: bool = False) -> dict[str, Any]:
+        if self.issue_user_id is not None:
+            # LoopForge selects provider credentials by issue responsibility, with project-owner fallback.
+            recorded = await self.issue_detail(issue_id)
+            issue = recorded.get("issue", recorded) if isinstance(recorded, dict) else {}
+            if str(issue.get("responsibleUserId", "")) != str(self.issue_user_id):
+                raise LoopForgeError("LoopForge 未确认工单的公用账号责任人，已停止派单")
         return await self._req("POST", f"/api/issues/{issue_id}/dispatch", json_body={"rerun": rerun})
+
+    async def reopen_issue(self, issue_id: str) -> dict[str, Any]:
+        return await self._req("POST", f"/api/issues/{issue_id}/reopen", json_body={})
 
     async def approve_run(self, run_id: str, comment: str = "", node_id: str = "") -> dict[str, Any]:
         body: dict[str, Any] = {"comment": comment}
@@ -324,16 +447,18 @@ class LoopForgeClient:
         return await self._req("POST", f"/api/runs/{run_id}/resume", json_body={})
 
     async def list_pending_approvals(self) -> list[dict[str, Any]]:
-        """筛选 LoopForge 中正停在人工审批门禁（waiting）的运行项，聚合进统一收件箱。"""
+        """筛选 LoopForge 中正停在人工审批门禁（waiting / waiting_approval）的运行项，聚合进统一收件箱。"""
         runs = await self.list_runs()
         pending: list[dict[str, Any]] = []
         for r in runs:
-            if r.get("status") != "waiting":
+            if r.get("status") not in ("waiting", "waiting_approval"):
                 continue
             nodes = r.get("nodes") or {}
             wf_nodes = {n.get("id"): n for n in ((r.get("workflowSnapshot") or {}).get("nodes") or [])}
             waiting_nodes = [
-                (nid, nr) for nid, nr in nodes.items() if isinstance(nr, dict) and nr.get("status") == "waiting"
+                (nid, nr)
+                for nid, nr in nodes.items()
+                if isinstance(nr, dict) and nr.get("status") in ("waiting", "waiting_approval")
             ]
             for nid, nr in waiting_nodes or [("", {})]:
                 wn = wf_nodes.get(nid, {})

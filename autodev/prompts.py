@@ -11,6 +11,13 @@ from autodev.db import DocSlice, Task
 PLANNER_FULLTEXT_BUDGET = 60_000
 CONTRACT_BUDGET = 30_000
 SLICE_BUDGET = 18_000
+FILE_DELIVERY_STAGES = (
+    "文件交付模式下，编码和独立审查在本次任务工作区核对清单、代码及测试。"
+    "任务审查通过后，平台集成并验证交付文件。对于原地接管的本机项目，平台在里程碑合并时检查原目录冲突并写回。"
+    "将用户要求的原目录验收列在此次写回之后。"
+    "任务卡的通过条件应能在当前工位独立完成。记录实际使用的执行器和测试命令，"
+    "仅在用户明确指定时把某个命名沙箱列为必需环境。"
+)
 
 
 def _bullets(items: list[str]) -> str:
@@ -82,10 +89,11 @@ def build_planner_prompt(
 5. **allowed_paths**：任务允许新增或修改的相对路径前缀（目录以 `/` 结尾，或具体文件路径），必须包含该任务的测试文件。
    非 contract 任务绝对不能包含 {protected}。同一里程碑中可并行的任务，allowed_paths 不要重叠（例如每个任务用自己的测试文件）。
    需要被多个任务修改的公共文件（如包的 `__init__.py`），应由最早的任务创建，后续任务尽量不改。
-6. **verify_cmds**：在仓库根目录执行的 shell 命令，退出码 0 表示通过。必须真正运行该任务新增的测试，
-   只使用本机工具链与仓库内代码。Python 示例：`python3 -m unittest discover -s tests/backend -t . -v`
-   （测试目录需要 `__init__.py`；未发现任何测试时 unittest 会返回非 0，这是期望行为）。
+6. **verify_cmds**：在仓库根目录执行的 shell 命令，退出码 0 表示通过。**必须与本卡 `allowed_paths` 严格自洽**：
+   - 若 `verify_cmds` 运行 `unittest discover` / `pytest` / `node --test`，则本卡 `allowed_paths` 必须同时包含对应的测试文件（严禁在白名单不含测试文件的纯实现卡上跑 `unittest discover`，Python 3.12 找不到用例会返回退出码 5 导致死锁！）；
+   - 若本卡确实不含测试文件，仅使用针对白名单文件的语法/导入自检命令（如 `python3 -c "import sorting"` 或 `node --check ...`）。
 7. **integration_cmd**：该里程碑全部任务合并后，在仓库根目录运行的跨模块回归命令（通常是运行全部测试）；没有可留空字符串。
+   {FILE_DELIVERY_STAGES}
 8. **acceptance_criteria**：可被审查员逐条核对的具体验收条件。
 9. **doc_slice_ids**：每个任务关联 1~3 个最相关的切片 ID（必须来自上表）。
 10. **priority**：数字越小越优先，用于同批次排序。
@@ -154,7 +162,20 @@ def _task_header(task: Task) -> str:
 """
 
 
-def build_coder_prompt(task: Task, slices: list[DocSlice], contracts: str, settings: Settings) -> str:
+def _decisions_block(decisions: list[dict] | None) -> str:
+    active = [d for d in (decisions or []) if str(d.get("status") or "ACTIVE") == "ACTIVE"]
+    if not active:
+        return ""
+    lines = ["## 项目生效硬规矩（评审拍板红线 · 违背任意一条审查直接打回）", ""]
+    for d in active:
+        scope = f"（适用：{', '.join(d.get('affected_paths') or [])}）" if d.get("affected_paths") else ""
+        lines.append(f"- **[{d.get('decision_id', 'D')}] {d.get('title', '')}**{scope}：{d.get('rule_text', '')}")
+    return "\n".join(lines) + "\n\n"
+
+
+def build_coder_prompt(
+    task: Task, slices: list[DocSlice], contracts: str, settings: Settings, decisions: list[dict] | None = None
+) -> str:
     protected = ", ".join(settings.protected_paths)
     role_guidance = {
         "bootstrap": (
@@ -179,7 +200,7 @@ def build_coder_prompt(task: Task, slices: list[DocSlice], contracts: str, setti
     )
     return f"""你是多智能体研发团队中的专职工程工位，在独立工作目录完成原子任务。交付方式为 {settings.collaboration_mode}，当前目录包含本任务的输入版本。
 
-{_task_header(task)}
+{_decisions_block(decisions)}{_task_header(task)}
 ## 岗位职责说明
 
 {role_guidance}
@@ -240,11 +261,13 @@ def build_fallback_context(diffstat: str, feedback: str, steer_note: str | None)
 
 # ---------------- 审查 ----------------
 
-def build_review_prompt(task: Task, slices: list[DocSlice], verify_summary: str, diff: str) -> str:
+def build_review_prompt(
+    task: Task, slices: list[DocSlice], verify_summary: str, diff: str, decisions: list[dict] | None = None
+) -> str:
     criteria = "\n".join(f"{i}. {c}" for i, c in enumerate(task.acceptance_criteria, 1))
     return f"""你是独立代码审查员，处于只读模式。请判断任务分支上的改动是否**真正**满足验收标准。当前目录是该任务的工作树，可阅读任何文件。
 
-## 任务 {task.task_id}：{task.title}（模块 {task.module}，角色 {task.role}）
+{_decisions_block(decisions)}## 任务 {task.task_id}：{task.title}（模块 {task.module}，角色 {task.role}）
 
 {task.description}
 
@@ -391,6 +414,8 @@ def build_blueprint_prompt(
 {extra_block}
 ## 立项蓝图设计规则（极其重要）
 
+{FILE_DELIVERY_STAGES}
+
 0. **按项目真实体量自适应分档（杀鸡绝不用牛刀！）**：
    - **精简敏捷档**（适用于网页小游戏、单体小工具、MVP 原型，总代码文件约 3～12 个）：
      - 研发组控制在 **2～3 个**（例如 `squad-contract` 契约组 + `squad-core` 核心逻辑组 + `squad-web` 界面与集成组，**不要**单独设交付协调组 `squad-release`，也无需把测试拆成专门一堆碎卡）；
@@ -410,6 +435,7 @@ def build_blueprint_prompt(
    - 每个里程碑写清简洁人话 `title`、`goal`、`target_squads`、`key_deliverables` 与命令行可自动执行的 `integration_cmd`。
    - **只在 `initial_tasks` 中拆出第 1 个里程碑的具体任务**（精简档拆 **2～3 张卡**即可）！后续第 2..N 个里程碑留待前序合入后结合真实代码树滚动细化。
    - 任务编号形如 `T-001`、`T-002`，非 `contract`/`bootstrap` 任务的 `allowed_paths` 严禁包含 `{protected}`。
+   - **单卡 `verify_cmds` 与 `allowed_paths` 必须自洽**：若 `verify_cmds` 运行测试发现命令（如 `unittest discover` / `pytest`），本卡 `allowed_paths` 必须包含对应测试文件（推荐实现与单测同卡交付）；若本卡不含测试文件，只配针对该卡文件的导入/语法自检命令，严禁产生“白名单不让写测试却跑 `unittest discover` 报 0 用例退出码 5”的死锁。
 5. **`agents_md`**：生成写入仓库根目录 `AGENTS.md` 的简明中文协作规范。
 
 只输出符合给定 JSON Schema 的 JSON。
@@ -447,6 +473,7 @@ def build_wave_prompt(
 - 参战研发组：{', '.join(milestone_dict.get('target_squads') or []) or '按需指派'}
 - 关键交付物：{'; '.join(milestone_dict.get('key_deliverables') or []) or '见阶段目标'}
 - 阶段集成命令：`{milestone_dict.get('integration_cmd') or '（无）'}`
+- {FILE_DELIVERY_STAGES}
 
 ## 全局里程碑路线参考
 
@@ -478,7 +505,7 @@ def build_wave_prompt(
 2. **严格控制单阶段卡片数量，杜绝碎片化与叠床架屋**：
    - 小型应用/小游戏单阶段控制在 **2～3 张高内聚功能卡**（最多不超过 4 张）；开发任务（`coder`）在实现模块功能时**直接一并编写并通过该模块的单元测试**，严禁把测试拆成三四张细碎的回归卡！需要跨模块联调时最多在末尾加 **1 张** 端到端自动化验证卡。
    - **严禁生成“文书核账/核对 SHA-256 哈希/核对导出副本/写阶段验收证明报告”的纯流程废单**（平台底层已自动完成哈希、白名单及 `integration_cmd` 校验，每单 SOP 已含独立审查）。
-   - **严禁生成需要 Windows/macOS 真人浏览器手点或 Android/iOS 物理手机实测的任务卡**！所有 `verify_cmds` 必须在本机无界面命令行下直接执行通过。
+   - **严禁生成需要 Windows/macOS 真人浏览器手点或 Android/iOS 物理手机实测的任务卡**！所有 `verify_cmds` 必须在本机无界面命令行下直接执行通过，且**必须与本卡 `allowed_paths` 自洽**（不得在白名单不含测试文件的卡片上运行 `unittest discover` / `pytest`，避免 0 测试退出码 5 死锁）。
 3. **标题与描述必须说人话**：
    - `title`（10～18 字）必须用清晰直观的产品功能大白话（如 `实现飞船操控、碰撞计分与最高分存档`），禁止使用生涩的单元测试夹具行话；
    - `description` 先用 1～2 句自然语言说明用户可见功能或核心产出，再附具体契约接口与技术要求。
@@ -610,6 +637,7 @@ def build_council_opinion_prompt(
 ## 你的评审职责
 
 {focus}
+{FILE_DELIVERY_STAGES}
 
 ## 输入资料索引
 
@@ -655,6 +683,7 @@ def build_council_consensus_prompt(
         human_block = "\n## 人类负责人最新插话 / 裁决要求（最高优先级，必须采纳）\n\n" + _bullets(all_human) + "\n"
     return f"""你是【研发总监（Tech Director）】兼本场【多智能体架构评审圆桌 · 第 2 轮收敛拍板人】（只读模式）。
 第 1 轮中，产品经理、契约架构师和 QA 总监已各自提交独立评审意见。请你逐一回应关键争议、消除分歧，形成权威的《架构决策纪要（ADR）》与统一产品技术规格书。
+{FILE_DELIVERY_STAGES}
 
 ## 第 1 轮各角色意见汇总
 

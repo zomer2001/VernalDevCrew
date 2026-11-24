@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from contextlib import contextmanager
 import sqlite3
 import threading
 from collections.abc import Callable, Iterable
@@ -143,6 +145,60 @@ CREATE TABLE IF NOT EXISTS events (
     payload_json TEXT,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS project_decisions (
+    decision_id TEXT PRIMARY KEY,
+    version INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    title TEXT NOT NULL,
+    rule_text TEXT NOT NULL,
+    rationale TEXT NOT NULL DEFAULT '',
+    affected_paths_json TEXT NOT NULL DEFAULT '[]',
+    checkpoint_id INTEGER,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS evolution_checkpoints (
+    checkpoint_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    round_no INTEGER NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'REVIEW',
+    trigger_topic TEXT NOT NULL,
+    human_note TEXT NOT NULL DEFAULT '',
+    loopforge_issue_id TEXT,
+    loopforge_run_id TEXT,
+    status TEXT NOT NULL DEFAULT 'RUNNING',
+    opinions_json TEXT NOT NULL DEFAULT '{}',
+    draft_plan_json TEXT NOT NULL DEFAULT '{}',
+    applied_summary_json TEXT NOT NULL DEFAULT '{}',
+    rule_version INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS link_codes (
+    code_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, expires REAL NOT NULL, runner_code TEXT
+);
+CREATE TABLE IF NOT EXISTS host_links (
+    id TEXT PRIMARY KEY, owner TEXT NOT NULL, token_hash TEXT NOT NULL, kind TEXT NOT NULL,
+    platform TEXT NOT NULL, clis TEXT NOT NULL, seen REAL NOT NULL, baseline_hash TEXT, runner_code TEXT
+);
+CREATE TABLE IF NOT EXISTS link_jobs (
+    id TEXT PRIMARY KEY, link_id TEXT NOT NULL REFERENCES host_links(id), state TEXT NOT NULL,
+    payload TEXT NOT NULL, expires REAL NOT NULL, result TEXT, claim TEXT
+);
+
+CREATE TABLE IF NOT EXISTS milestone_deliveries (
+    delivery_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    milestone_id TEXT NOT NULL,
+    version_no INTEGER NOT NULL,
+    collab_mode TEXT NOT NULL,
+    commit_sha TEXT,
+    prev_commit_sha TEXT,
+    artifact_digest TEXT,
+    rolling_branch TEXT,
+    archive_branch TEXT,
+    compare_url TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(milestone_id, version_no)
+);
 CREATE INDEX IF NOT EXISTS idx_runs_task ON task_runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
 """
@@ -260,12 +316,32 @@ class Database:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.executescript(SCHEMA)
-        self._migrate()
+        with self.transaction():
+            self._init_schema()
         self.listeners: list[EventListener] = []
 
-    def _migrate(self) -> None:
+    def _init_schema(self) -> None:
         def _cols(table: str) -> set[str]:
             return {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+        additions = {
+            "host_links": {"codex_login": "INTEGER NOT NULL DEFAULT 0"},
+            "evolution_checkpoints": {
+                "plan_revision": "INTEGER NOT NULL DEFAULT 0",
+                "min_director_rework": "INTEGER NOT NULL DEFAULT 0",
+                "draft_artifact_id": "TEXT",
+                "rejected_plans_json": "TEXT NOT NULL DEFAULT '[]'",
+                "last_error": "TEXT",
+            },
+            "tasks": {"source_checkpoint_id": "INTEGER", "source_item_idx": "INTEGER"},
+        }
+        for table, columns in additions.items():
+            existing = _cols(table)
+            for column, declaration in columns.items():
+                if column not in existing:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_checkpoint_item "
+                           "ON tasks(source_checkpoint_id, source_item_idx) WHERE source_checkpoint_id IS NOT NULL")
 
         r_cols = _cols("task_runs")
         if "reasoning_tokens" not in r_cols:
@@ -303,6 +379,21 @@ class Database:
         if "sandbox_profile" not in s_cols:
             self._conn.execute("ALTER TABLE squads ADD COLUMN sandbox_profile TEXT NOT NULL DEFAULT 'generic-docker'")
 
+    @contextmanager
+    def transaction(self):
+        """Only synchronous work may run inside this write transaction."""
+        with self._lock:
+            if self._conn.in_transaction:
+                yield
+                return
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
     def close(self) -> None:
         self._conn.close()
 
@@ -325,6 +416,24 @@ class Database:
             "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )
+
+    def next_task_number(self) -> int:
+        last = self.meta_get("task_seq")
+        sources = "SELECT task_id FROM tasks"
+        if last is None:
+            sources += " UNION SELECT task_id FROM task_runs UNION SELECT task_id FROM events"
+        maximum = int(last or 0)
+        for row in self._query(sources):
+            match = re.fullmatch(r"T-([0-9]+)", row[0] or "")
+            if match:
+                maximum = max(maximum, int(match[1]))
+        return maximum + 1
+
+    def next_task_id(self) -> str:
+        with self.transaction():
+            number = self.next_task_number()
+            self.meta_set("task_seq", str(number))
+            return f"T-{number:03d}"
 
     # ---------- 切片 ----------
     def replace_slices(self, slices: Iterable[DocSlice]) -> None:
@@ -613,6 +722,20 @@ class Database:
         return [dict(r) for r in rows]
 
     # ---------- 里程碑 ----------
+    def list_milestone_deliveries(self, milestone_id=None):
+        sql = "SELECT * FROM milestone_deliveries"
+        rows = (self._query(sql + " WHERE milestone_id=? ORDER BY version_no", (milestone_id,))
+                if milestone_id else self._query(sql + " ORDER BY delivery_id"))
+        return [dict(row) for row in rows]
+
+    def record_milestone_delivery(self, milestone_id, version_no, collab_mode, *, commit_sha=None,
+                                  prev_commit_sha=None, artifact_digest=None, rolling_branch=None,
+                                  archive_branch=None, compare_url=None):
+        self._exec("INSERT INTO milestone_deliveries(milestone_id,version_no,collab_mode,commit_sha,prev_commit_sha,"
+                   "artifact_digest,rolling_branch,archive_branch,compare_url,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                   (milestone_id, version_no, collab_mode, commit_sha, prev_commit_sha, artifact_digest,
+                    rolling_branch, archive_branch, compare_url, now_iso()))
+
     def list_milestones(self) -> list[Milestone]:
         return [Milestone.from_row(r) for r in self._query("SELECT * FROM milestones ORDER BY seq_order")]
 
@@ -656,7 +779,7 @@ class Database:
                 key, value = f"{key}_json", json.dumps(value, ensure_ascii=False)
             cols.append(f"{key}=?")
             params.append(value.value if hasattr(value, "value") else value)
-        self._exec(f"UPDATE tasks SET {', '.join(cols)} WHERE task_id=?", [*params, task_id])
+        self._exec(f"UPDATE tasks SET {', '.join(cols)} WHERE task_id=? AND status != 'CANCELLED'", [*params, task_id])
 
     # ---------- 调用记录 ----------
     def start_run(
@@ -767,3 +890,116 @@ class Database:
     def last_event_id(self) -> int:
         rows = self._query("SELECT MAX(event_id) m FROM events")
         return int(rows[0]["m"] or 0)
+
+    # ---------- 项目生效规矩（同步 LoopForge 全局 Rule）与演进节点（Checkpoints） ----------
+    def list_decisions(self, *, active_only: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM project_decisions"
+        if active_only:
+            sql += " WHERE status='ACTIVE'"
+        sql += " ORDER BY decision_id"
+        out: list[dict[str, Any]] = []
+        for r in self._query(sql):
+            d = dict(r)
+            d["affected_paths"] = json.loads(d.pop("affected_paths_json", None) or "[]")
+            out.append(d)
+        return out
+
+    def upsert_decision(
+        self,
+        *,
+        decision_id: str,
+        title: str,
+        rule_text: str,
+        rationale: str = "",
+        affected_paths: list[str] | None = None,
+        status: str = "ACTIVE",
+        checkpoint_id: int | None = None,
+    ) -> dict[str, Any]:
+        ts = now_iso()
+        existing = self._query("SELECT version FROM project_decisions WHERE decision_id=?", (decision_id,))
+        ver = (int(existing[0]["version"]) + 1) if existing else 1
+        paths_json = json.dumps(affected_paths or [], ensure_ascii=False)
+        self._exec(
+            "INSERT INTO project_decisions(decision_id, version, status, title, rule_text, rationale, affected_paths_json, checkpoint_id, updated_at)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(decision_id) DO UPDATE SET"
+            " version=excluded.version, status=excluded.status, title=excluded.title,"
+            " rule_text=excluded.rule_text, rationale=excluded.rationale,"
+            " affected_paths_json=excluded.affected_paths_json, checkpoint_id=excluded.checkpoint_id, updated_at=excluded.updated_at",
+            (decision_id, ver, status, title, rule_text, rationale, paths_json, checkpoint_id, ts),
+        )
+        return {
+            "decision_id": decision_id,
+            "version": ver,
+            "status": status,
+            "title": title,
+            "rule_text": rule_text,
+            "rationale": rationale,
+            "affected_paths": affected_paths or [],
+            "checkpoint_id": checkpoint_id,
+            "updated_at": ts,
+        }
+
+    def revoke_decision(self, decision_id: str, *, reason: str = "", checkpoint_id: int | None = None) -> bool:
+        rows = self._query("SELECT * FROM project_decisions WHERE decision_id=?", (decision_id,))
+        if not rows:
+            return False
+        cur = dict(rows[0])
+        rationale = f"{cur.get('rationale') or ''}\n[已废止] {reason}".strip() if reason else (cur.get("rationale") or "")
+        self._exec(
+            "UPDATE project_decisions SET status='REVOKED', version=?, rationale=?, checkpoint_id=?, updated_at=? WHERE decision_id=?",
+            (int(cur["version"]) + 1, rationale, checkpoint_id, now_iso(), decision_id),
+        )
+        return True
+
+    def create_checkpoint(
+        self,
+        *,
+        kind: str,
+        trigger_topic: str,
+        human_note: str = "",
+        loopforge_issue_id: str | None = None,
+        loopforge_run_id: str | None = None,
+        status: str = "RUNNING",
+    ) -> dict[str, Any]:
+        with self.transaction():
+            rows = self._query("SELECT COALESCE(MAX(round_no), 0) AS m FROM evolution_checkpoints")
+            round_no = int(rows[0]["m"] or 0) + 1
+            ts = now_iso()
+            cur = self._exec(
+                "INSERT INTO evolution_checkpoints(round_no, kind, trigger_topic, human_note, loopforge_issue_id, loopforge_run_id, status, created_at, updated_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (round_no, kind, trigger_topic, human_note, loopforge_issue_id, loopforge_run_id, status, ts, ts),
+            )
+            return self.get_checkpoint(int(cur.lastrowid)) or {}
+
+    def update_checkpoint(self, checkpoint_id: int, **fields_to_update: Any) -> None:
+        if not fields_to_update:
+            return
+        cols: list[str] = []
+        vals: list[Any] = []
+        for k, v in fields_to_update.items():
+            if k in ("opinions", "draft_plan", "applied_summary", "rejected_plans"):
+                cols.append(f"{k}_json=?")
+                vals.append(json.dumps(v, ensure_ascii=False))
+            else:
+                cols.append(f"{k}=?")
+                vals.append(v)
+        cols.append("updated_at=?")
+        vals.append(now_iso())
+        vals.append(checkpoint_id)
+        self._exec(f"UPDATE evolution_checkpoints SET {', '.join(cols)} WHERE checkpoint_id=?", tuple(vals))
+
+    def _hydrate_checkpoint(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        d = dict(row)
+        for k in ("opinions", "draft_plan", "applied_summary", "rejected_plans"):
+            d[k] = json.loads(d.pop(f"{k}_json", None) or "{}")
+        return d
+
+    def get_checkpoint(self, checkpoint_id: int) -> dict[str, Any] | None:
+        rows = self._query("SELECT * FROM evolution_checkpoints WHERE checkpoint_id=?", (checkpoint_id,))
+        return self._hydrate_checkpoint(rows[0]) if rows else None
+
+    def list_checkpoints(self) -> list[dict[str, Any]]:
+        rows = self._query("SELECT * FROM evolution_checkpoints ORDER BY checkpoint_id ASC")
+        return [self._hydrate_checkpoint(r) for r in rows]

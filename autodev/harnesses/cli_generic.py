@@ -30,12 +30,12 @@ def _parse_stream_json_line(ev: dict[str, Any], usage: Usage) -> tuple[str | Non
 
     u = ev.get("usage")
     if isinstance(u, dict):
-        usage.input_tokens = max(usage.input_tokens, int(u.get("input_tokens") or u.get("inputTokens") or 0))
+        usage.input_tokens = max(usage.input_tokens, int(u.get("input_tokens") or u.get("inputTokens") or u.get("prompt_tokens") or 0))
         usage.cached_tokens = max(
             usage.cached_tokens,
             int(u.get("cache_read_input_tokens") or u.get("cacheReadTokens") or u.get("cached_tokens") or 0),
         )
-        usage.output_tokens = max(usage.output_tokens, int(u.get("output_tokens") or u.get("outputTokens") or 0))
+        usage.output_tokens = max(usage.output_tokens, int(u.get("output_tokens") or u.get("outputTokens") or u.get("completion_tokens") or 0))
         usage.reasoning_tokens = max(
             usage.reasoning_tokens,
             int(u.get("reasoning_tokens") or u.get("reasoningTokens") or 0),
@@ -45,12 +45,18 @@ def _parse_stream_json_line(ev: dict[str, Any], usage: Usage) -> tuple[str | Non
     activity: tuple[str, str] | None = None
     etype = str(ev.get("type") or ev.get("event") or "")
 
-    if etype == "result":
+    if etype == "final":
+        text = ev.get("text") or ev.get("content")
+        if isinstance(text, str):
+            texts.append(text)
+    elif etype == "result":
         res = ev.get("result")
         if isinstance(res, str) and res.strip():
             texts.append(res)
     elif etype in ("assistant", "message"):
         msg = ev.get("message") if isinstance(ev.get("message"), dict) else ev
+        if isinstance(msg.get("reasoning_content"), str):
+            activity = ("reasoning", msg["reasoning_content"][:160])
         content = msg.get("content")
         if isinstance(content, str) and content:
             texts.append(content)
@@ -229,6 +235,8 @@ class _StreamCLIHarness(Harness):
                         if sid:
                             session_id = sid
                         if segs:
+                            if ev.get("type") == "final":
+                                texts.clear()
                             texts.extend(segs)
                             self._activity("message", segs[-1][:180], None)
                         if act:
@@ -358,6 +366,9 @@ class DeepSeekHarness(_StreamCLIHarness):
             "--approval-policy",
             "never",
         ]
+        model = self.settings.model_for(role)
+        if model:
+            cmd += ["--model", model]
         if session_id:
             cmd += ["--session-id", session_id]
         cmd.append(prompt)

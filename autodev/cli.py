@@ -19,7 +19,6 @@ from autodev.config import (
     probe_agent_runtimes,
 )
 from autodev.engine import Engine, OpsError, PlanningError, init_workspace
-from autodev.scheduler import Scheduler
 
 app = typer.Typer(help="Vernal — 多智能体自主协同研发平台", no_args_is_help=True)
 console = Console()
@@ -32,6 +31,21 @@ def _load_engine(directory: Path | None) -> Engine:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
     return Engine(ws)
+
+
+@app.command()
+def link(
+    server: str = typer.Argument(..., help="团队 Vernal 网关地址"),
+    code: str = typer.Option("", "--code", help="首次接入使用网页签发的一次性配对码"),
+    directory: Path = typer.Option(Path("."), "--dir", help="要接入的本机项目目录"),
+    with_worker: bool = typer.Option(True, "--with-worker/--no-worker", help="复用本机个人 CLI"),
+):
+    """将本机目录连接到团队工作台，持续接收版本交付。"""
+    from autodev.host_link import run_link
+    try:
+        asyncio.run(run_link(server, code, directory, with_worker))
+    except KeyboardInterrupt:
+        pass
 
 
 @app.command()
@@ -176,6 +190,7 @@ def run(
             + f" {ev['message']}"
         )
     )
+    from autodev.scheduler import Scheduler
     sched = Scheduler(eng)
     try:
         final = asyncio.run(sched.run(watch=watch))

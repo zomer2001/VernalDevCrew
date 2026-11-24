@@ -173,7 +173,7 @@ def test_goal_multi_squad_rolling_wave_and_director_contract_patch(tmp_path: Pat
             )
             return {"status": "DONE", "summary": "M1 contracts done", "files_changed": ["contracts/schema.py"], "tests_added": ["tests/test_contracts.py"], "notes": ""}
 
-        if tid == "T-003-P1":
+        if tid == "T-005":
             # 总监派发的契约补丁任务：补齐 currency 字段
             (cwd / "contracts" / "schema.py").write_text(
                 "from dataclasses import dataclass\n\n"
@@ -283,7 +283,7 @@ def test_goal_multi_squad_rolling_wave_and_director_contract_patch(tmp_path: Pat
         assert final == ProjectStatus.COMPLETED
         assert eng.db.get_milestone("M2-domains").planned is True
         # 验证总监自动创建的契约补丁任务已跑通并合入
-        patch = eng.db.get_task("T-003-P1")
+        patch = eng.db.get_task("T-005")
         assert patch is not None and patch.status == TaskStatus.MERGED
         assert (ws.root / "gateway" / "app.py").exists()
 

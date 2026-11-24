@@ -4,10 +4,30 @@
 
 ---
 
+## 登录、项目来源和执行方式
+
+1. **怎么登录。** 个人部署使用 `./vernal.sh --mount ~/Projects`，打开 `http://127.0.0.1:8787` 注册或登录。团队部署由管理员在服务器运行 `./vernal.sh --host 0.0.0.0`，成员在浏览器打开该服务器的 8787 端口，用各自的账号登录。团队服务器挂载的是服务器目录，浏览器也提供小目录上传。
+2. **做什么项目。** 在启动台选择全新项目、本机项目或远端 Git 仓库。空目录可以先进入总控再填写需求。仅含文本源码且不超过 4 MiB 的普通目录可使用文件交接。含有二进制素材或超过上限的目录自动建立 Git 基线。已有 Git 仓库从选定分支最近一次提交开始。在默认 Docker 部署中，平台在私有 Gitea 保存项目镜像，为每个任务提供独立仓库和限时地址，供执行机克隆基线、推送修改。未启用 Gitea 的部署通过签名快照传递基线。里程碑验收后，新接入的本机 Git 项目将结果写入原仓库的独立分支，例如 `vernal/milestone-M1`。
+3. **怎么执行。** 在编队设置中选择「自动选择」「本机 CLI」或「公用 Docker 额度池」。本机模式复用在线 Runner，CodeBuddy、OpenCode 和 dsh 的个人凭据状态以 LoopForge 为准。团队成员可复制网页中的接入命令，在自己的 macOS 或 Linux 终端运行。选择公用模式后，由服务端执行任务。
+
+全新项目采用文件交付时，可从已验收的里程碑下载 ZIP、查看 HTML 静态预览，或把文件快照推送到内置 Gitea 或外部 HTTPS 仓库的独立分支。静态预览显示页面内容和样式，完整交互可下载后运行。
+
+接入私有 HTTPS 仓库时，在启动台的凭据栏填写仓库用户名和可读写的访问令牌。平台负责拉取所选分支，执行机领取任务快照。通过验收后平台创建里程碑交付分支，供维护者审查合并。令牌保存在部署端，只用于访问对应仓库。
+
+### 管理员配置公用额度
+
+首次启动会构建并检查含 dsh 和 OpenCode 的公用镜像。在编队设置展开「公用额度池配置」，填写提供商 Key、服务地址和真实可用的模型 ID。只使用 OpenAI 兼容端点时请填写默认模型并选择 OpenCode。按部署设置，也可在 `deploy/loopforge/.env` 配置 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`VERNAL_PUBLIC_DEFAULT_MODEL` 和 `VERNAL_PUBLIC_REASONING_MODEL`。容器启动后网页配置优先。服务端按管理员设置向提供商转发请求，模型 Key 保存在部署端，沙箱使用限时票据。
+
+启用公用额度后，平台尝试注册专用普通执行账号。部署已关闭注册时可在服务端设置 `VERNAL_POOL_TOKEN`，值为无个人 Runner 的专用普通账号令牌。该账号需要目标项目的执行权，现有项目可在 LoopForge 项目成员页授权。部署管理员可用 `VERNAL_POOL_ADMINS` 指定有权管理公用额度的登录名，以逗号分隔。实际扣费应以提供商账单为准。
+
+### 检查本机和公用池
+
+`./vernal.sh --doctor` 检查四个服务、镜像内的两个 CLI、公用池配置、个人 Runner 心跳与宿主机 CLI 版本。安装新 CLI 后执行 `./vernal.sh --restart-runner`，让个人执行机重新上报能力。公用容器使用 `http://vernal:8787` 拉取任务上下文；团队启动脚本根据监听地址或默认网卡生成成员网关地址。使用域名、反向代理或多网卡时，可通过 `VERNAL_PUBLIC_URL` 指定成员实际访问的地址。
+
 ## 一、每次如何启动与停止平台
 
-### 1. 日常一键启动（单机使用）
-打开系统自带「终端（Terminal）」，进入项目目录执行一行命令即可：
+### 1. 日常一键启动（免装 Python，纯容器 + 本机 Runner）
+打开系统自带「终端（Terminal）」，进入项目目录执行一行命令即可（**部署机需要 Docker，个人执行模式还需要所选 CLI**）：
 
 ```bash
 cd /Users/zomeryang/Documents/春天/个人科研/lattice-mesh
@@ -16,23 +36,28 @@ cd /Users/zomeryang/Documents/春天/个人科研/lattice-mesh
 
 这条脚本会自动帮你做完三件事：
 1. 检查并启动底层 Docker 容器栈（`LoopForge` + `MySQL` + `Gitea`）；
-2. 自动拉起本机 Mac 的 Codex 执行器守护进程（`agentflow-runner`）；
-3. 启动统一 Web 网关服务。
+2. 通过 Docker 启动容器版 `Vernal` 统一平台（首次会自动构建镜像，之后秒启；若修改了源码想重编可加 `./vernal.sh --build`，本地 Python 调试可加 `./vernal.sh --dev`）；
+3. 自动拉起本机多引擎执行器（`agentflow-runner`，并发 3），同时承接圆桌规划与代码开发任务。
+
+首次在本机启动后，打开网页登录即可，后台会自动绑定 Runner。使用 `./vernal.sh --mount ~/Projects` 指定并记住项目目录。Git 项目以已提交的分支为起点，新接入项目的交付分支以 `vernal/milestone-` 开头。已有项目沿用原交付分支名，具体名称见里程碑记录。未提交的改动保留在原工作区。
 
 看到终端提示 `Vernal 平台已启动：http://127.0.0.1:8787` 后，直接用浏览器打开：
 - **唯一工作台入口**：http://127.0.0.1:8787
 
 > **注意**：平时请只访问 `8787` 端口（不要直接访问 `8090`），这样原版页面与 Vernal 架构总控、登录态 Cookie 都在同一个入口下无缝互通。
 
+### 离线安装与重复启动
+
+平时运行 `./vernal.sh` 即可复用已构建的镜像。只改网关业务代码时，启动脚本会核对本机镜像与上次构建记录，使用已有 Python 环境离线更新代码。首次构建、依赖清单或 Dockerfile 有变化、手动指定 `--build` 时会执行完整构建。需要给另一台同架构设备安装时，在构建机的项目目录运行 `./vernal.sh --pack`。它会将网关、执行沙箱、LoopForge、MySQL、Gitea 与启动脚本写入 `dist/vernal-offline-arm64.tar.gz` 或 `dist/vernal-offline-amd64.tar.gz`。
+
+将压缩包复制到已安装 Docker 和 Compose 的同架构设备，解压到固定目录，运行其中的 `./vernal.sh`。首次启动从包内导入缺少的镜像，之后核对镜像版本并直接启动。个人项目、数据库、登录态和 Key 均留在原机器。新安装使用自己的账号与凭据。调用云端模型仍需能访问模型服务。
+
 ### 2. 日常如何暂停任务与关闭服务
 - **只暂停当前任务（不断电，明天接着跑）**：在网页「架构总控」右上角点击 **「停止调度」**。已完成的所有里程碑和任务都保存在本地数据库里，下次点 **「启动 Goal」** 会自动从断点继续，绝不会重头再跑。
-- **彻底关闭后台程序**：
-  1. 在运行 `./vernal.sh` 的终端窗口按 `Ctrl + C` 停止网关；
-  2. 若连底层 Docker 容器也想一起关掉释放内存，执行：
-     ```bash
-     docker compose -f deploy/loopforge/compose.yaml stop
-     ```
-     （注意用 `stop` 而不是 `down -v`，所有账号、项目和代码数据都会完好保留。）
+- **一键停止全部后台服务与容器（保留全部数据）**：
+  ```bash
+  ./vernal.sh --stop
+  ```
 
 ---
 
@@ -124,3 +149,13 @@ cd /Users/zomeryang/Documents/春天/个人科研/lattice-mesh
 - Skill 放在 `autodev/assets/skills/<名字>/SKILL.md`（已内置 `frontend-design`、`webapp-testing`、`test-driven-development`、`systematic-debugging`、`security-review`）。**自己新增只需放进新文件夹**，下次绑定/切换项目时自动注入 LoopForge。
 - MCP 目录已预注册 Playwright 与 Context7（仅注册，默认不挂到角色上，离线环境不会报错；需要时在 LoopForge「角色」里手动勾选）。
 - 任务卡自动分流到四条泳道（后端 / 前端 / 契约 / 修复），由任务角色、允许修改的文件类型与标题关键词判定；对应开发角色会挂载不同 Skill。若你手动指定了别的 SOP，则尊重你的选择。
+
+### 从团队网页接入本机目录
+
+在本机安装 Git、Python 3.11 或更高版本，并在 Vernal 源码目录运行 `python -m pip install .`。登录团队网页，选择尚未导入代码的项目，在“本机项目”的“跨机或 Windows 本机桥接”中生成配对码。切换到自己的项目目录，执行网页给出的命令。配对码十分钟内有效，只能使用一次。跨机连接使用 HTTPS。
+
+Git 项目上传当前 HEAD，每次交付写入新的归档分支。以 M1 为例，滚动分支为 `vernal/<项目>/M1`，归档分支为 `vernal/<项目>/M1-versions/v1`、`v2` 等。可用 `git diff` 比较归档版本，当前工作区和暂存区保留原状。
+
+普通目录的初始快照支持二进制文件，总量上限为 200 MiB。此后每次交付按上版快照写回，同一文件有人为修改时保留本机内容，交付方版本存入 `.vernal/conflicts/`，网页事件栏也会显示冲突。中断后在同一目录运行 `vernal link https://你的网关地址` 可继续同步。
+
+选择个人执行池时，Windows 可直接使用本机已登录的 Codex 或 Claude CLI。macOS 和 Linux 可在签发配对码时勾选绑定官方 Runner。只需收取交付时，在命令后加 `--no-worker`。

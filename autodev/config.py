@@ -6,11 +6,13 @@ import os
 import shutil
 import subprocess
 import tomllib
+from contextvars import ContextVar
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 STATE_DIR = ".autodev"
+EXECUTION_IDENTITY: ContextVar[tuple[str, str] | None] = ContextVar("execution_identity", default=None)
 
 CODEX_FALLBACK_PATHS = (
     "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
@@ -76,6 +78,7 @@ def normalize_harness_name(name: str) -> str:
         "deepseek": "dsh",
         "deepseek-harness": "dsh",
         "deepseek_harness": "dsh",
+        "opencode-cli": "opencode",
         "claude": "claude-code",
         "claude_code": "claude-code",
     }
@@ -125,6 +128,7 @@ require_plan_approval = true   # 仅在立项蓝图出来后人工审批一次�
 require_merge_approval = false
 
 [runtime]
+execution_pool = "auto"
 collaboration_mode = "git"     # files（文件产物）或 git（版本库协作）
 runtime_backend = "loopforge"  # loopforge（基于 LoopForge SOP/沙箱运行，默认）| local（离线 worktree 调试）
 loopforge_url = "http://127.0.0.1:8090"
@@ -160,6 +164,7 @@ class WorkspaceNotFound(FileNotFoundError):
 class Settings:
     # agent
     harness: str = "codex"
+    runner_harness: str = field(default="", init=False, repr=False)
     pm_harness: str = ""
     director_harness: str = ""
     coder_harness: str = ""
@@ -194,6 +199,8 @@ class Settings:
     require_merge_approval: bool = False
     # runtime (LoopForge + Gitea)
     collaboration_mode: str = "git"
+    selected_pool: str = field(default="", init=False, repr=False)
+    execution_pool: str = "auto"
     runtime_backend: str = "local"
     loopforge_url: str = "http://127.0.0.1:8090"
     loopforge_token: str = ""
@@ -201,6 +208,7 @@ class Settings:
     loopforge_workflow_id: str = ""
     loopforge_repository_id: str = ""
     gitea_url: str = "http://127.0.0.1:3000"
+    vernal_public_url: str = "http://127.0.0.1:8787"
     # git
     base_branch: str = "main"
     protected_paths: list[str] = field(default_factory=lambda: ["contracts/"])
@@ -227,7 +235,7 @@ class Settings:
                 flat.update(value)
             else:
                 flat[key] = value
-        known = {f.name for f in fields(cls)}
+        known = {f.name for f in fields(cls) if f.init}
         unknown = sorted(set(flat) - known)
         if unknown:
             raise ConfigError(f"未知配置项: {', '.join(unknown)}")
@@ -235,10 +243,18 @@ class Settings:
             setattr(settings, key, value)
         if os.environ.get("VERNAL_LOOPFORGE_URL", "").strip():
             settings.loopforge_url = os.environ["VERNAL_LOOPFORGE_URL"].strip()
+        elif not Path("/.dockerenv").exists() and settings.loopforge_url.rstrip("/") == "http://loopforge:8080":
+            settings.loopforge_url = "http://127.0.0.1:8090"
         if os.environ.get("VERNAL_GITEA_URL", "").strip():
             settings.gitea_url = os.environ["VERNAL_GITEA_URL"].strip()
+        elif not Path("/.dockerenv").exists() and settings.gitea_url.rstrip("/") == "http://gitea:3000":
+            settings.gitea_url = "http://127.0.0.1:3000"
+        if os.environ.get("VERNAL_PUBLIC_URL", "").strip():
+            settings.vernal_public_url = os.environ["VERNAL_PUBLIC_URL"].strip()
         if settings.collaboration_mode not in ("files", "git") or settings.runtime_backend not in ("local", "loopforge"):
             raise ConfigError("无效的协作方式或执行底座")
+        if settings.execution_pool not in ("auto", "public_docker", "local_runner"):
+            raise ConfigError("无效的执行池")
         if settings.max_concurrency < 1 or settings.max_retries < 1:
             raise ConfigError("max_concurrency 与 max_retries 必须 >= 1")
         return settings
@@ -263,8 +279,10 @@ class Settings:
             return specific
         base = normalize_harness_name(self.harness or "auto")
         if base == "auto":
+            if self.runtime_backend == "loopforge" and self.runner_harness:
+                return self.runner_harness
             return detect_preferred_harness(self)
-        if base == "codex" and not resolve_codex_bin(self):
+        if base == "codex" and self.runtime_backend != "loopforge" and not resolve_codex_bin(self):
             detected = detect_preferred_harness(self)
             if detected != "codex":
                 return detected
@@ -285,11 +303,29 @@ class Settings:
             "reviewer": self.reviewer_model or self.qa_model,
         }.get(role, "")
         h = self.harness_for(role)
+        if not specific and h in ("dsh", "opencode") and (not self.model or self.model.startswith(("gpt-6", "gpt-5"))):
+            from autodev import public_pool
+            if self.execution_pool == "public_docker" or getattr(self, "selected_pool", "") == "public_docker":
+                pool = public_pool.status()
+                reasoning = role in ("pm", "director", "architect", "planner", "qa_lead")
+                name = (pool["reasoning_model"] if reasoning else "") or pool["default_model"]
+                if h == "opencode" and name and "/" not in name:
+                    return ("deepseek/" if pool["deepseek_key_configured"] else "openai/") + name
+                return name
+            if h == "dsh":
+                return "deepseek-reasoner" if role in ("pm", "director", "architect", "planner") else "deepseek-chat"
+            return "deepseek/deepseek-chat" if os.getenv("DEEPSEEK_API_KEY") else ""
         if h != "codex" and not specific and self.model.startswith(("gpt-6", "gpt-5")):
             return ""
         return specific or self.model
 
     def effective_loopforge_token(self) -> str:
+        session = EXECUTION_IDENTITY.get()
+        if session and session[0] == self.loopforge_url.rstrip("/"):
+            return session[1]
+        return self.project_signing_key()
+
+    def project_signing_key(self) -> str:
         return self.loopforge_token.strip() or os.environ.get("AGENTFLOW_TOKEN", "").strip()
 
 

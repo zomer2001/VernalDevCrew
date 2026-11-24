@@ -74,12 +74,12 @@ def commit_paths(
     root: Path, paths: list[str], message: str, author_name: str | None = None, author_email: str | None = None
 ) -> str | None:
     git(["add", "--", *paths], root)
-    if not git(["diff", "--cached", "--name-only"], root).stdout.strip():
+    if not git(["diff", "--cached", "--name-only", "--", *paths], root).stdout.strip():
         return None
     author_args = []
     if author_name and author_email:
         author_args = ["-c", f"user.name={author_name}", "-c", f"user.email={author_email}"]
-    git([*author_args, "commit", "-m", message], root)
+    git([*author_args, "commit", "--only", "-m", message, "--", *paths], root)
     return head_sha(root)
 
 
@@ -235,6 +235,21 @@ def fast_forward(root: Path, ref: str, message: str) -> None:
     ok, out = merge(root, ref, message)
     if not ok:
         raise GitError(out)
+
+
+def has_remote(cwd: Path, remote: str = "origin") -> bool:
+    return git(["remote", "get-url", remote], cwd, check=False).returncode == 0
+
+
+def push_branch(cwd: Path, branch: str, remote: str = "origin") -> tuple[bool, str]:
+    proc = git(["push", remote, branch], cwd, check=False)
+    if proc.returncode == 0:
+        return True, proc.stdout.strip()
+    return False, (proc.stderr or proc.stdout).strip()
+
+
+def reset_hard(cwd: Path, ref: str) -> None:
+    git(["reset", "--hard", ref], cwd)
 
 
 def is_ancestor(cwd: Path, sha: str, ref: str = "HEAD") -> bool:

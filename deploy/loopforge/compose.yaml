@@ -37,7 +37,7 @@ services:
       AGENTFLOW_PLATFORM_MCP_URL: http://loopforge:8080
       AGENTFLOW_DOCKER_NETWORK: autodev-runtime_default
       AGENTFLOW_LOCAL_SANDBOX: docker
-      AGENTFLOW_ISOLATED_IMAGE: ${LOOPFORGE_IMAGE:-ghcr.io/tencent/loopforge:0.4.0}
+      AGENTFLOW_ISOLATED_IMAGE: ${VERNAL_SANDBOX_IMAGE:-autodev-runtime-sandbox:latest}
       HOME: ${LOOPFORGE_DATA_DIR}/home
       AGENTFLOW_RUNNER_BINARY: /app/bin/agentflow-runner-{os}-{arch}
       AGENTFLOW_GATE_MCP_BINARY: /app/bin/agentflow-gate-mcp-{os}-{arch}
@@ -67,7 +67,7 @@ services:
       GITEA__server__ROOT_URL: http://${GITEA_PUBLIC_HOST:-127.0.0.1}:${GITEA_HTTP_PORT:-3000}/
       GITEA__server__SSH_PORT: ${GITEA_SSH_PORT:-2222}
       GITEA__service__DISABLE_REGISTRATION: "false"
-      GITEA__security__INSTALL_LOCK: "false"
+      GITEA__security__INSTALL_LOCK: "true"
     ports:
       - "${GITEA_BIND:-127.0.0.1}:${GITEA_HTTP_PORT:-3000}:3000"
       - "${GITEA_BIND:-127.0.0.1}:${GITEA_SSH_PORT:-2222}:22"
@@ -80,13 +80,33 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
+      args:
+        VERNAL_PYTHON_IMAGE: ${VERNAL_PYTHON_IMAGE:-python:3.12-slim}
     environment:
+      VERNAL_RUNNER_BOOTSTRAP_SECRET: ${VERNAL_RUNNER_BOOTSTRAP_SECRET:-}
       VERNAL_LOOPFORGE_URL: http://loopforge:8080
+      VERNAL_POOL_DIR: /run/vernal-pool
+      VERNAL_POOL_ADMINS: ${VERNAL_POOL_ADMINS:-}
+      VERNAL_SANDBOX_IMAGE: ${VERNAL_SANDBOX_IMAGE:-autodev-runtime-sandbox:latest}
+      VERNAL_SANDBOX_URL: http://vernal:8787
+      VERNAL_POOL_TOKEN: ${VERNAL_POOL_TOKEN:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      VERNAL_PUBLIC_DEFAULT_MODEL: ${VERNAL_PUBLIC_DEFAULT_MODEL:-}
+      VERNAL_PUBLIC_REASONING_MODEL: ${VERNAL_PUBLIC_REASONING_MODEL:-}
+      VERNAL_GITEA_HOST_URL: http://${GITEA_PUBLIC_HOST:-127.0.0.1}:${GITEA_HTTP_PORT:-3000}
       VERNAL_GITEA_URL: http://gitea:3000
+      VERNAL_PUBLIC_URL: ${VERNAL_PUBLIC_URL:-http://127.0.0.1:8787}
+      VERNAL_HOST_PROJECTS_DIR: /host-projects
+      VERNAL_HOST_PROJECTS_DISPLAY: ${VERNAL_HOST_PROJECTS_DIR:-../../workspaces}
     ports:
       - "${VERNAL_BIND:-0.0.0.0}:${VERNAL_PORT:-8787}:8787"
     volumes:
+      - ./.runner/pool:/run/vernal-pool
       - ../../workspaces:/app/workspaces
+      - ${VERNAL_HOST_PROJECTS_DIR:-../../workspaces}:/host-projects
     depends_on:
       loopforge:
         condition: service_healthy

@@ -61,7 +61,20 @@ async function loadDetail() {
   drawer.detail = await api(`/vernal-api/tasks/${encodeURIComponent(drawer.taskId)}`);
   const t = drawer.detail.task;
   $("drawer-title").textContent = `${t.task_id} · ${t.title}`;
-  $("drawer-subtitle").textContent = `状态 ${t.status} · 组 ${t.squad || t.module} · 角色 ${t.role}${t.branch_name ? ` · 分支 ${t.branch_name}` : ""}`;
+  const sub = $("drawer-subtitle");
+  sub.innerHTML = `${esc(`状态 ${t.status} · 组 ${t.squad || t.module} · 角色 ${t.role}${t.branch_name ? ` · 分支 ${t.branch_name}` : ""}`)}${
+    t.loopforge_run_id
+      ? ` · <button type="button" class="btn btn-sm" id="btn-jump-native-run" style="padding:1px 7px;font-size:11px">原生运行 ${esc(t.loopforge_run_id.slice(0, 12))} ↗</button>`
+      : t.loopforge_issue_id
+        ? ` · <button type="button" class="btn btn-sm" id="btn-jump-native-issue" style="padding:1px 7px;font-size:11px">原生工单 ↗</button>`
+        : ""
+  }`;
+  sub.querySelector("#btn-jump-native-run")?.addEventListener("click", () => {
+    document.dispatchEvent(new CustomEvent("vernal-jump-native", { detail: { view: "runs", runId: t.loopforge_run_id } }));
+  });
+  sub.querySelector("#btn-jump-native-issue")?.addEventListener("click", () => {
+    document.dispatchEvent(new CustomEvent("vernal-jump-native", { detail: { view: "issues", issueId: t.loopforge_issue_id } }));
+  });
   const isLive = ["IN_PROGRESS", "VERIFYING", "REVIEWING", "RUNNING"].includes(t.status);
   $("drawer-live-badge").classList.toggle("hidden", !isLive);
 }

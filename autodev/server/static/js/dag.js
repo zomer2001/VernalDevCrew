@@ -3,6 +3,8 @@ import { $, esc, fmtElapsed } from "./api.js";
 function nodeColors(status) {
   if (status === "APPROVED" || status === "MERGED")
     return { fill: "#ecfdf5", stroke: "#10b981", tag: "#059669", title: "#0f172a" };
+  if (status === "CANCELLED")
+    return { fill: "#f1f5f9", stroke: "#cbd5e1", tag: "#64748b", title: "#64748b" };
   if (status === "FUSED")
     return { fill: "#fff1f2", stroke: "#e11d48", tag: "#be123c", title: "#0f172a" };
   if (["IN_PROGRESS", "VERIFYING", "REVIEWING"].includes(status))
@@ -122,7 +124,7 @@ export function renderDAG(state, onSelectTask) {
       const titleShort = t.title.length > 14 ? t.title.slice(0, 14) + "…" : t.title;
       const sqLabel = (t.squad_name || t.squad || t.module || "").slice(0, 12);
       nodeEls.push(
-        `<g class="dag-node" data-task="${esc(t.task_id)}" transform="translate(${p.x},${p.y})">
+        `<g class="dag-node ${t.status === "CANCELLED" ? "cancelled" : ""}" data-task="${esc(t.task_id)}" transform="translate(${p.x},${p.y})">
           <rect class="node-box" width="${nodeW}" height="${nodeH}" rx="8" fill="${c.fill}" stroke="${c.stroke}" stroke-width="1.5"/>
           ${active ? `<circle class="pulse-dot" cx="${nodeW - 14}" cy="16" r="4" fill="#2563eb"/>` : ""}
           <text x="11" y="20" fill="${c.tag}" font-size="11" font-family="ui-monospace, monospace" font-weight="700">${esc(t.task_id)} · ${esc(t.status)}${esc(elap)}</text>
