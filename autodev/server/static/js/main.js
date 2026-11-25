@@ -1,4 +1,4 @@
-import { $, actorName, api, esc, fmtElapsed, projectQuerySuffix, root, setLoggedInUser, toast } from "./api.js";
+import { $, actorName, api, esc, fmtElapsed, getActiveProjectId, projectQuerySuffix, root, setLoggedInUser, toast } from "./api.js";
 import { bindCouncilActions, refreshCouncil } from "./council.js";
 import { renderDAG } from "./dag.js";
 import { handleLiveDrawerEvent, initDrawer, openReportModal, openTaskDrawer } from "./drawer.js";
@@ -714,19 +714,24 @@ let activeEventSource = null;
 
 function connectSSE() {
   if (activeEventSource) activeEventSource.close();
+  const projectId = getActiveProjectId();
   const es = new EventSource(`/vernal-api/events?after=${lastEventId}${projectQuerySuffix("&")}`);
   activeEventSource = es;
+  const isCurrent = () => es === activeEventSource && projectId === getActiveProjectId();
   es.onopen = () => {
+    if (!isCurrent()) return;
     timeline.setConnected(true);
     $("sse-indicator")?.classList.add("live");
     if ($("sse-text")) $("sse-text").textContent = "已连接";
   };
   es.onerror = () => {
+    if (!isCurrent()) return;
     timeline.setConnected(false);
     $("sse-indicator")?.classList.remove("live");
     if ($("sse-text")) $("sse-text").textContent = "重连中";
   };
   es.onmessage = (e) => {
+    if (!isCurrent()) return;
     try {
       const ev = JSON.parse(e.data);
       if (ev.event_id > lastEventId) {

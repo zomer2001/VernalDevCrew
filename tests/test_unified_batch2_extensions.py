@@ -691,7 +691,8 @@ def test_service_identity_is_idempotent_and_private(tmp_path,monkeypatch):
     assert Settings().service_token() == "fixture-service"
 
 
-def test_internal_preflight_checks_actual_native_workflow_image(tmp_path,monkeypatch):
+@pytest.mark.parametrize("entrypoint", ["", "ENTRYPOINT []\n"])
+def test_internal_preflight_checks_actual_native_workflow_image(tmp_path,monkeypatch,entrypoint):
     from autodev.loopforge.bridge import sign_context_sig
     eng = project(tmp_path)
     s = eng.settings
@@ -699,7 +700,7 @@ def test_internal_preflight_checks_actual_native_workflow_image(tmp_path,monkeyp
     monkeypatch.setenv("VERNAL_TRUSTED_RUNNERS","docker:company/image:1")
     expiry = str(int(time.time())+120)
     proof = sign_context_sig(s.project_signing_key(),"demo","model-sandbox:"+expiry)
-    source = {"id":"image","projectId":"demo","content":"FROM company/image:1\n" +
+    source = {"id":"image","projectId":"demo","content":"FROM company/image:1\n" + entrypoint +
               f"ENV VERNAL_NATIVE_PROJECT=demo VERNAL_NATIVE_EXPIRY={expiry} VERNAL_NATIVE_PROOF={proof}\n"}
     async def get(method,path,**opts):
         return {"id":"wf","projectId":"demo","sandboxProfileId":"box"} if "workflows" in path else [source]

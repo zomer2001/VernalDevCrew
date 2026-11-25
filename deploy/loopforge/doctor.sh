@@ -26,7 +26,7 @@ if docker info >/dev/null 2>&1; then
     echo "gitea-runner ${ci_st:-未运行}"
     [[ "$ci_st" == running ]] || bad=1
   fi
-  docker run --rm --network none --entrypoint sh "${VERNAL_SANDBOX_IMAGE:-autodev-runtime-sandbox:latest}" -ec 'dsh --version && opencode --version && vernal-quality --help >/dev/null' || bad=1
+  docker run --rm --network none "${VERNAL_SANDBOX_IMAGE:-autodev-runtime-sandbox:latest}" sh -ec 'dsh --version && opencode --version && vernal-quality --help >/dev/null' || bad=1
 else echo "Docker 守护进程无法访问"; bad=1; fi
 url="http://127.0.0.1:$port/vernal-api"
 curl -fsS -m 4 "$url/runtime/public-pool?format=doctor" || bad=1

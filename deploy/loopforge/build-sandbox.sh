@@ -56,6 +56,6 @@ if [[ "${VERNAL_OFFLINE:-0}" != "1" ]]; then
 fi
 
 tmp="$(mktemp .runner/pool/image.XXXXXX)"
-docker run --pull=never --rm --network none --entrypoint sh "$image" -ec 'dsh --version && opencode --version && vernal-quality --help >/dev/null' > "$tmp"
+docker run --pull=never --rm --network none "$image" sh -ec 'dsh --version && opencode --version && vernal-quality --help >/dev/null' > "$tmp"
 mv "$tmp" .runner/pool/image-ready
 tmp=""

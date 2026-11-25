@@ -241,6 +241,13 @@ async def poll_loopforge_run(
                 continue
 
         summary = f"LoopForge [{st}] " + (", ".join(active_nodes) or "处理中") + gate_note
+        if st == "running":
+            for nid, node in nodes.items():
+                if not isinstance(node, dict) or node.get("status") == "succeeded":
+                    continue
+                error = str(node.get("error") or "").lower()
+                if "docker workspace not ready" in error or ("container " in error and "is not running" in error):
+                    summary += f"。{nid} 最近一次沙盒启动失败，等待 LoopForge 更新状态"
         if summary != last_summary:
             last_summary = summary
             if on_progress:

@@ -448,14 +448,15 @@ class LoopForgeHarness(Harness):
                 timeout_sec=float(self.settings.agent_timeout_sec),
                 on_progress=_on_progress,
             )
-        except BaseException:
-            _mark_plan_dispatch("FAILED")
+        except (asyncio.CancelledError, Exception):
+            _mark_plan_dispatch("NEEDS_CONFIRMATION")
             raise
         duration = time.monotonic() - started
         usage = extract_run_usage(run) if run else Usage()
 
         if not ok:
-            _mark_plan_dispatch("FAILED")
+            terminal = run and run.get("status") in ("failed", "cancelled", "succeeded")
+            _mark_plan_dispatch("FAILED" if terminal else "NEEDS_CONFIRMATION")
             return AgentResult(
                 False,
                 1,

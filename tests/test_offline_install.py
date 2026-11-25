@@ -60,6 +60,7 @@ elif a[0] == "run":
         sys.exit(17)
     assert "--pull=never" in a
     assert "--network" in a and a[a.index("--network") + 1] == "none"
+    assert "--entrypoint" not in a and a[-3:-1] == ["sh", "-ec"]
     assert "dsh --version" in a[-1] and "opencode --version" in a[-1] and "vernal-quality --help" in a[-1]
     print("dsh 0.2.2\nopencode 0.1.0")
 elif a[0] == "create":

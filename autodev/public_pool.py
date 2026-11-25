@@ -466,7 +466,7 @@ async def check_workflow_sandbox(settings, client, workflow_id, pool):
         raise LoopForgeError("原生 SOP 未使用该项目受控的公司沙箱", 403)
     sources = await client._req("GET", "/api/dockerfiles", params={"projectId":project})
     image = next((d for d in sources if d["id"] == sandbox.get("dockerfileId")), {})
-    match = re.fullmatch(r"FROM ([\w./:@-]+)\nENV VERNAL_NATIVE_PROJECT=([^\s]+) VERNAL_NATIVE_EXPIRY=(\d+) "
+    match = re.fullmatch(r"FROM ([\w./:@-]+)\n(?:ENTRYPOINT \[\]\n)?ENV VERNAL_NATIVE_PROJECT=([^\s]+) VERNAL_NATIVE_EXPIRY=(\d+) "
                          r"VERNAL_NATIVE_PROOF=([0-9a-f]+)\s*", image.get("content", ""))
     if (not match or image.get("projectId") != project or image.get("files") or match[2] != project
             or int(match[3]) <= time.time() or not verify_context_sig(

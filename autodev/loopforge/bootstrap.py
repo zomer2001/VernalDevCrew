@@ -1238,7 +1238,7 @@ async def ensure_vernal_loopforge_assets(
             raise LoopForgeError("非法原生项目 ID")
         expiry = (int(time.time()) // 86400 + 7) * 86400
         proof = sign_context_sig(settings.project_signing_key(), project_id, f"model-sandbox:{expiry}")
-        profile_source = (f"FROM {image}\nENV VERNAL_NATIVE_PROJECT={project_id} VERNAL_NATIVE_EXPIRY={expiry} "
+        profile_source = (f"FROM {image}\nENTRYPOINT []\nENV VERNAL_NATIVE_PROJECT={project_id} VERNAL_NATIVE_EXPIRY={expiry} "
                           f"VERNAL_NATIVE_PROOF={proof}\n")
         image_tag = hashlib.sha256(profile_source.encode()).hexdigest()[:10]
         dockerfile_id = f"{project_id}-vernal-image-{image_tag}"
