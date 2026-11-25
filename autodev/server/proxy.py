@@ -10,9 +10,9 @@ import httpx
 from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
-from autodev.loopforge.client import use_environment_proxy
+from autodev.loopforge.client import create_async_http_client, use_environment_proxy
 
-OVERLAY_VERSION = "20261124v8"
+OVERLAY_VERSION = "20261125v20"
 
 HOP_BY_HOP_REQUEST_HEADERS = frozenset(
     {
@@ -78,7 +78,7 @@ def transform_loopforge_html(path: str, html: str) -> str:
         return html
 
     if path in ("", "/", "/index.html"):
-        html = html.replace('aria-label="LoopForge 工作台"', 'aria-label="Vernal 工作台"')
+        html = html.replace('aria-label="LoopForge 工作台"', 'aria-label="Vernal 研发助手"')
         html = html.replace("正在进入工作台…", "正在进入 Vernal 多智能体研发工作台…")
         if "</head>" in html and "vernal-overlay.css" not in html:
             html = html.replace("</head>", css_tag + "</head>", 1)
@@ -86,9 +86,15 @@ def transform_loopforge_html(path: str, html: str) -> str:
             html = html.replace("</body>", js_tag + "</body>", 1)
         return html
 
-    # iframe 内的 AI 工作台页面（/native-chat/* 或 /chatbot/*）只注入主题样式，不重复挂载顶层导航
+    # iframe 内的 AI 研发助手页面（/native-chat/* 或 /chatbot/*）注入主题样式与轻量品牌文案同步
+    brand_tag = f'  <script src="/vernal-static/vernal-brand.js?v={OVERLAY_VERSION}" defer></script>\n'
     if "</head>" in html and "vernal-overlay.css" not in html:
         html = html.replace("</head>", css_tag + "</head>", 1)
+    if "vernal-brand.js" not in html:
+        if "</body>" in html:
+            html = html.replace("</body>", brand_tag + "</body>", 1)
+        elif "</head>" in html:
+            html = html.replace("</head>", brand_tag + "</head>", 1)
     return html
 
 
@@ -147,7 +153,7 @@ def _offline_fallback_html(upstream_url: str, err: str) -> str:
     <h1>Vernal 正在等待 LoopForge 执行底座就绪</h1>
     <p>当前无法连接到 LoopForge 执行底座 <code>{upstream_url}</code>（{err}）。</p>
     <p>请在终端启动容器栈后再刷新本页：</p>
-    <pre>./deploy/loopforge/up.sh</pre>
+    <pre>./vernal.sh</pre>
     <div class="actions">
       <a href="/">重新连接</a>
     </div>
@@ -161,16 +167,25 @@ class LoopForgeProxy:
         self.upstream_url = upstream_url.rstrip("/")
         parts = urlsplit(self.upstream_url)
         self.upstream_origin = f"{parts.scheme}://{parts.netloc}"
-        self._client = httpx.AsyncClient(
-            base_url=self.upstream_url,
-            follow_redirects=False,
-            trust_env=use_environment_proxy(self.upstream_url),
-            timeout=httpx.Timeout(connect=10.0, read=None, write=60.0, pool=10.0),
-            transport=transport,
-        )
+        self._transport = transport
+        self._client: httpx.AsyncClient | None = None
+        if transport is not None or not use_environment_proxy(self.upstream_url):
+            self._client = self._ensure_client()
+
+    def _ensure_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = create_async_http_client(
+                self.upstream_url,
+                transport=self._transport,
+                base_url=self.upstream_url,
+                follow_redirects=False,
+                timeout=httpx.Timeout(connect=10.0, read=None, write=60.0, pool=10.0),
+            )
+        return self._client
 
     async def close(self) -> None:
-        await self._client.aclose()
+        if self._client is not None:
+            await self._client.aclose()
 
     async def forward(self, request: Request) -> Response:
         path = request.url.path or "/"
@@ -196,7 +211,8 @@ class LoopForgeProxy:
         body = await request.body() if request.method not in ("GET", "HEAD") else b""
 
         try:
-            upstream_req = self._client.build_request(
+            client = self._ensure_client()
+            upstream_req = client.build_request(
                 request.method,
                 target,
                 headers=req_headers,
@@ -204,8 +220,8 @@ class LoopForgeProxy:
             )
             if "cookie" not in request.headers:
                 upstream_req.headers.pop("cookie", None)
-            upstream_resp = await self._client.send(upstream_req, stream=True)
-        except httpx.HTTPError as exc:
+            upstream_resp = await client.send(upstream_req, stream=True)
+        except (httpx.HTTPError, RuntimeError) as exc:
             if path.startswith("/api/") or request.headers.get("accept", "").startswith("application/json"):
                 return JSONResponse(
                     status_code=502,

@@ -5,9 +5,10 @@ ARG DSH_PACKAGE=@deepseek-ai/dsh@0.2.2-rc.1
 ARG OPENCODE_PACKAGE=opencode-ai
 ARG CLI_FALLBACK_REGISTRY=https://registry.npmjs.org
 RUN set -eu; missing=0; for cmd in python3 node npm git curl; do command -v "$cmd" >/dev/null || missing=1; done; \
+    python3 -m pytest --version >/dev/null 2>&1 || missing=1; \
     if [ "$missing" = 1 ]; then \
-      if command -v apt-get >/dev/null; then apt-get update && apt-get install -y --no-install-recommends python3 nodejs npm git curl ca-certificates && rm -rf /var/lib/apt/lists/*; \
-      elif command -v apk >/dev/null; then apk add --no-cache python3 nodejs npm git curl ca-certificates; \
+      if command -v apt-get >/dev/null; then apt-get update && apt-get install -y --no-install-recommends python3 python3-pytest nodejs npm git curl ca-certificates && rm -rf /var/lib/apt/lists/*; \
+      elif command -v apk >/dev/null; then apk add --no-cache python3 py3-pytest nodejs npm git curl ca-certificates; \
       else echo "Cannot install sandbox dependencies on $(uname -m)" >&2; exit 1; fi; \
     fi
 RUN set -eu; install_cli() { binary="$1"; package="$2"; \
@@ -21,3 +22,84 @@ RUN set -eu; for cli in dsh opencode; do \
       if [ ! -x "/usr/local/bin/$cli" ]; then ln -s "$resolved" "/usr/local/bin/$cli"; fi; \
       "/usr/local/bin/$cli" --version || { echo "$cli failed on $(uname -m)" >&2; exit 1; }; \
     done
+COPY <<'VERNAL_CLI' /opt/vernal-pool-cli.py
+#!/usr/bin/env python3
+"""Resolve a native Run's company model lease before starting the real CLI."""
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import urllib.parse
+import urllib.request
+
+
+def main():
+    name = Path(sys.argv[0]).name
+    if name == "opencode":
+        content = json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT") or "{}")
+        provider = content.get("provider", {}).get("agentflow", {}).get("options", {})
+    else:
+        patch = Path(os.environ.get("DSH_HOME", "/nonexistent")) / "agentflow-model.json"
+        content = json.loads(patch.read_text()) if patch.is_file() else []
+        provider = next((item["config"]["providers"]["agentflow"] for item in content
+                         if item.get("id") == "llm-pi-ai"), {})
+    url = urllib.parse.urlsplit(provider.get("baseURL", ""))
+    if url.path.startswith("/vernal-api/pool-broker/"):
+        run = os.environ.get("AGENTFLOW_RUN_ID")
+        binding = {"run_id": run} if run else {"project_id": os.environ.get("VERNAL_NATIVE_PROJECT", ""),
+            "expires": os.environ.get("VERNAL_NATIVE_EXPIRY",""), "proof":os.environ.get("VERNAL_NATIVE_PROOF","")}
+        # Only send company credentials to the deployment trusted when the image was built.
+        origin = os.getenv("VERNAL_TRUSTED_BROKER_ORIGIN", "http://vernal:8787")
+        if (url.scheme, url.netloc) != (urllib.parse.urlsplit(origin).scheme, urllib.parse.urlsplit(origin).netloc):
+            raise SystemExit("模型签发来源不匹配")
+        request = urllib.request.Request(origin + url.path + "/exchange", data=json.dumps(binding).encode(),
+            headers={"Content-Type":"application/json","Authorization":"Bearer " + os.environ["AGENTFLOW_CLI_API_KEY"]})
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args):
+                return None
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        with opener.open(request, timeout=10) as response:
+            lease = json.load(response)
+        pid = urllib.parse.quote(lease["project_id"], safe="")
+        provider["baseURL"] = f"{origin}/vernal-api/pool-model/{pid}/{url.path.split('/')[-1]}/v1"
+        os.environ["AGENTFLOW_CLI_API_KEY"] = lease["ticket"]
+        if name == "opencode":
+            os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps(content)
+        else:
+            with tempfile.NamedTemporaryFile(dir=patch.parent, mode="w", delete=False) as handle:
+                json.dump(content, handle)
+            # A retry must exchange the current Run again. Leave the native patch untouched.
+            sys.argv = [handle.name if arg == str(patch) else arg for arg in sys.argv]
+    os.execv("/opt/vernal-cli/" + name, [name, *sys.argv[1:]])
+
+
+if __name__ == "__main__":
+    main()
+VERNAL_CLI
+COPY . /tmp/vernal-ctx
+RUN set -eu; \
+    mkdir -p /opt/vernal-cli; \
+    for cli in dsh opencode; do \
+      target="$(readlink -f "$(command -v "$cli")")"; \
+      if [ "$target" = "/usr/local/bin/$cli" ]; then mv "$target" "/opt/vernal-cli/$cli"; \
+      else ln -s "$target" "/opt/vernal-cli/$cli"; rm -f "/usr/local/bin/$cli"; fi; \
+      install -m 755 /opt/vernal-pool-cli.py "/usr/local/bin/$cli"; \
+    done; \
+    mkdir -p /opt/vernal-quality/autodev; \
+    if [ -d /tmp/vernal-ctx/autodev/quality ]; then \
+      cp /tmp/vernal-ctx/autodev/__init__.py /opt/vernal-quality/autodev/; \
+      cp -R /tmp/vernal-ctx/autodev/quality /opt/vernal-quality/autodev/quality; \
+      if [ -d /tmp/vernal-ctx/autodev/assets/semgrep ]; then \
+        mkdir -p /opt/vernal-quality/autodev/assets; \
+        cp -R /tmp/vernal-ctx/autodev/assets/semgrep /opt/vernal-quality/autodev/assets/semgrep; \
+      fi; \
+    fi; \
+    rm -rf /tmp/vernal-ctx; \
+    site_dir="$(python3 -c 'import site; paths = getattr(site, "getsitepackages", lambda: [])(); print(paths[0] if paths else "")' 2>/dev/null || true)"; \
+    if [ -n "$site_dir" ] && [ -d "$site_dir" ]; then \
+      printf '%s\n' '/opt/vernal-quality' > "$site_dir/vernal-quality.pth"; \
+    fi; \
+    printf '#!/bin/sh\nPYTHONPATH="/opt/vernal-quality${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m autodev.quality.cli "$@"\n' > /usr/local/bin/vernal-quality; \
+    chmod 0755 /usr/local/bin/vernal-quality; \
+    if [ -d /opt/vernal-quality/autodev/quality ]; then /usr/local/bin/vernal-quality --help >/dev/null; fi

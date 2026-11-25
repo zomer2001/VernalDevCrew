@@ -7,15 +7,15 @@ let showDecisionsList = false;
 const KIND_LABELS = {
   INITIAL: "立项共识",
   REVIEW: "阶段复盘",
-  PIVOT: "方向转向",
+  PIVOT: "方向变更",
   DIAGNOSE: "异常会诊",
 };
 
 const STATUS_LABELS = {
-  RUNNING: "并发评审中",
+  RUNNING: "专家并发会审中",
   DISPATCHING: "派单中",
   DISPATCH_FAILED: "派单失败",
-  SYNC_PENDING: "远端已通过，正在同步最新变更单产物…",
+  SYNC_PENDING: "远端已通过，正在同步变更单…",
   APPLYING: "正在应用变更单",
   AWAITING_APPROVAL: "待拍板",
   APPLIED: "已生效",
@@ -34,6 +34,7 @@ export function openSteeringModal(preset = {}) {
   const modal = $("steering-modal");
   if (!modal) return;
   modal.hidden = false;
+  modal.classList.add("is-modal");
   if (preset.kind && $("steering-kind")) $("steering-kind").value = preset.kind;
   if (preset.topic !== undefined && $("steering-topic")) $("steering-topic").value = preset.topic;
   if (preset.note !== undefined && $("steering-note")) $("steering-note").value = preset.note;
@@ -42,7 +43,10 @@ export function openSteeringModal(preset = {}) {
 
 export function closeSteeringModal() {
   const modal = $("steering-modal");
-  if (modal) modal.hidden = true;
+  if (modal) {
+    modal.hidden = true;
+    modal.classList.remove("is-modal");
+  }
 }
 
 export function initSteering({ onRefresh, getState, onSelectTask }) {
@@ -51,7 +55,8 @@ export function initSteering({ onRefresh, getState, onSelectTask }) {
     renderSteering(getState(), { onRefresh, onSelectTask });
   });
   $("btn-rail-diagnose")?.addEventListener("click", () =>
-    openSteeringModal({ kind: "DIAGNOSE", topic: "会诊当前阻塞或集成失败问题并制定最小返工方案" }));
+    openSteeringModal({ kind: "DIAGNOSE", topic: "会诊当前阻塞或集成失败问题并制定最小返工方案" })
+  );
   $("btn-rail-start-review")?.addEventListener("click", () => openSteeringModal({ kind: "PIVOT" }));
   $("btn-steering-open")?.addEventListener("click", () => openSteeringModal());
   $("btn-steering-close")?.addEventListener("click", closeSteeringModal);
@@ -77,16 +82,17 @@ export function initSteering({ onRefresh, getState, onSelectTask }) {
           .querySelectorAll("[data-steering-preset]")
           .forEach((b) => b.classList.toggle("active", b === btn));
         if (kind === "DIAGNOSE" && !$("steering-topic").value.trim()) {
-          const hint = failedMs[0]?.id
-            ? `排查里程碑 ${failedMs[0].id} 集成报错并给出最小返工方案`
+          const msId = failedMs[0]?.milestone_id;
+          const hint = msId
+            ? `排查里程碑 ${msId} 集成报错并给出最小返工方案`
             : fused[0]?.task_id
               ? `会诊熔断任务 ${fused[0].task_id} 根因与契约调整`
               : "排查当前阻塞问题并评估返工范围";
           $("steering-topic").value = hint;
         } else if (kind === "PIVOT" && !$("steering-topic").value.trim()) {
-          $("steering-topic").value = "保留已完成底座，调整后续需求与全局技术规矩";
+          $("steering-topic").value = "保留已完成模块，调整后续需求边界与全局技术规范";
         } else if (kind === "REVIEW" && !$("steering-topic").value.trim()) {
-          $("steering-topic").value = "阶段性复盘当前已交付成果与下一波次优先级";
+          $("steering-topic").value = "复盘当前里程碑交付质量与下一波次排期";
         }
       });
     });
@@ -97,7 +103,7 @@ export function initSteering({ onRefresh, getState, onSelectTask }) {
     const human_note = $("steering-note")?.value.trim() || "";
     const kind = $("steering-kind")?.value || "REVIEW";
     if (!topic && !human_note) {
-      toast("请填写讨论议题或具体诉求");
+      toast("请填写变更议题或具体要求");
       return;
     }
     const submitBtn = $("btn-steering-submit");
@@ -113,8 +119,8 @@ export function initSteering({ onRefresh, getState, onSelectTask }) {
       closeSteeringModal();
       toast(
         res.checkpoint?.loopforge_run_id
-          ? `已发起 LoopForge 原生三专家并发评审（Run ${res.checkpoint.loopforge_run_id.slice(0, 8)}）`
-          : "已生成评审变更单草案，请确认拍板"
+          ? `已发起多专家并发评审（Run ${res.checkpoint.loopforge_run_id.slice(0, 8)}）`
+          : "已生成变更单草案，请审阅确认"
       );
       if (onRefresh) await onRefresh();
     } catch (err) {
@@ -127,15 +133,15 @@ export function initSteering({ onRefresh, getState, onSelectTask }) {
 
 function renderOpinionsGrid(opinions = {}) {
   const specs = [
-    ["pm", "PM 产品视角"],
-    ["arch", "契约架构视角"],
-    ["qa", "QA 质量红线"],
+    ["pm", "产品规格"],
+    ["arch", "契约架构"],
+    ["qa", "质量门禁"],
   ];
   const items = specs
     .map(([key, label]) => {
       const op = opinions[key];
       if (!op || typeof op !== "object") return "";
-      const changes = Array.isArray(op.change) && op.change.length ? ` · 建议变更：${op.change.slice(0, 2).join("；")}` : "";
+      const changes = Array.isArray(op.change) && op.change.length ? ` · 建议：${op.change.slice(0, 2).join("；")}` : "";
       return `<div class="st-opinion-item">
         <span class="tag">${esc(label)}</span>
         <span>${esc(op.headline || "已提交意见")}${esc(changes)}</span>
@@ -154,23 +160,22 @@ export function renderSteering(state, { onRefresh, onSelectTask } = {}) {
   const checkpoints = state.checkpoints || [];
   const ruleVer = state.decisions_rule_version || 0;
 
-  // 1. 更新弹窗顶部实时项目摘要
   const ctxBanner = $("steering-context-banner");
   if (ctxBanner) {
     const doneCnt = tasks.filter((t) => ["APPROVED", "MERGED"].includes(t.status)).length;
     const fusedCnt = tasks.filter((t) => t.status === "FUSED").length;
     ctxBanner.innerHTML =
-      `<span>当前交付进度：<strong>${doneCnt} / ${tasks.length}</strong> 单已通过（不会因局部转向被推倒重来）</span>` +
-      `<span>生效全局规矩：<strong>${activeDecisions.length} 条（Rule v${ruleVer}）</strong></span>` +
-      (fusedCnt ? `<span class="tag warn">熔断待处理 ${fusedCnt} 单</span>` : "");
+      `<span>已完成任务：<strong>${doneCnt} / ${tasks.length}</strong>（未受影响成果自动保留）</span>` +
+      `<span>生效规范：<strong>${activeDecisions.length} 条（v${ruleVer}）</strong></span>` +
+      (fusedCnt ? `<span class="tag warn">阻塞待处理 ${fusedCnt} 单</span>` : "");
   }
 
-  // 2. 待拍板转向变更单预览卡
   const approvalCard = $("steering-approval-card");
   const pendingCp = [...checkpoints].reverse().find((c) => c.status === "AWAITING_APPROVAL");
   const draftKey = pendingCp && JSON.stringify([state.project_key, pendingCp.checkpoint_id]);
-  const renderKey = pendingCp && JSON.stringify([draftKey, pendingCp.plan_revision, pendingCp.status,
-    Object.keys(pendingCp.opinions || {}).sort()]);
+  const renderKey =
+    pendingCp &&
+    JSON.stringify([draftKey, pendingCp.plan_revision, pendingCp.status, Object.keys(pendingCp.opinions || {}).sort()]);
   if (approvalCard) {
     if (!pendingCp) {
       approvalCard.hidden = true;
@@ -191,33 +196,33 @@ export function renderSteering(state, { onRefresh, onSelectTask } = {}) {
       approvalCard.innerHTML = `
         <div class="card-head">
           <div>
-            <h3>⏸ 待拍板转向变更单 · 评审 #${pendingCp.round_no}「${esc(pendingCp.trigger_topic)}」</h3>
-            <p class="card-desc">PM / 架构 / QA 三专家并发会审已收敛，批准后自动同步 LoopForge 全局 Rule 并精准调度受影响任务（你在原生「待我确认」里点通过同样自动生效）</p>
+            <h3>待确认变更单 · 评审 #${pendingCp.round_no}「${esc(pendingCp.trigger_topic)}」</h3>
+            <p class="card-desc">PM / 架构 / QA 并发会审已收敛，批准后自动更新全局规范并按拓扑依赖重排受影响任务</p>
           </div>
           <div class="btn-group">
-            ${pendingCp.loopforge_run_id ? `<button type="button" class="btn btn-sm" data-st-jump-run="${esc(pendingCp.loopforge_run_id)}">查看原生并发评审 Run</button>` : ""}
+            ${pendingCp.loopforge_run_id ? `<button type="button" class="btn btn-sm" data-st-jump-run="${esc(pendingCp.loopforge_run_id)}">查看底层运行</button>` : ""}
           </div>
         </div>
         ${renderOpinionsGrid(pendingCp.opinions)}
-        <div class="st-plan-summary">${esc(plan.summary || "总监已生成转向变更单草案，请确认以下变更范围：")}</div>
+        <div class="st-plan-summary">${esc(plan.summary || "研发总监已生成变更单草案，请确认以下变更范围：")}</div>
         <div class="st-diff-grid">
           <div class="st-diff-col">
-            <div class="st-diff-title">全局规矩变更（LoopForge Global Rule）</div>
-            ${upserts.map((d) => `<div class="st-diff-row add"><code>+[${esc(d.decision_id)}]</code> <strong>${esc(d.title)}</strong>：${esc(d.rule_text)}</div>`).join("") || `<div class="muted" style="font-size:12px">无新增或修订规矩</div>`}
+            <div class="st-diff-title">架构与工程规范变更</div>
+            ${upserts.map((d) => `<div class="st-diff-row add"><code>+[${esc(d.decision_id)}]</code> <strong>${esc(d.title)}</strong>：${esc(d.rule_text)}</div>`).join("") || `<div class="muted">无新增或修订规范</div>`}
             ${revokes.map((d) => `<div class="st-diff-row del"><code>-[${esc(d.decision_id)}]</code> 废止：${esc(d.reason)}</div>`).join("")}
           </div>
           <div class="st-diff-col">
-            <div class="st-diff-title">任务与 Issue 局部调度 <span class="tag ok">保留 ${preservedCnt} 单已通过成果</span></div>
-            ${reopens.map((r) => `<div class="st-diff-row warn"><code>↺ ${esc(r.task_id)}</code> 局部退回重做：${esc(r.reason)}</div>`).join("")}
-            ${newTasks.map((t) => `<div class="st-diff-row add"><code>＋ [${esc(t.milestone_id)}]</code> ${esc(t.title)}（${esc(t.squad)}）</div>`).join("")}
-            ${cancels.map((tid) => `<div class="st-diff-row del"><code>✕ ${esc(tid)}</code> 取消并关闭对应 Issue</div>`).join("")}
-            ${!reopens.length && !newTasks.length && !cancels.length ? `<div class="muted" style="font-size:12px">仅更新全局规矩，无需退回或增删现有任务</div>` : ""}
+            <div class="st-diff-title">局部任务调度 <span class="tag ok">保留 ${preservedCnt} 单成果</span></div>
+            ${reopens.map((r) => `<div class="st-diff-row warn"><code>${esc(r.task_id)}</code> 退回返工：${esc(r.reason)}</div>`).join("")}
+            ${newTasks.map((t) => `<div class="st-diff-row add"><code>+[${esc(t.milestone_id)}]</code> ${esc(t.title)}（${esc(t.squad)}）</div>`).join("")}
+            ${cancels.map((tid) => `<div class="st-diff-row del"><code>-${esc(tid)}</code> 取消任务</div>`).join("")}
+            ${!reopens.length && !newTasks.length && !cancels.length ? `<div class="muted">仅更新全局规范，无需改动现有任务</div>` : ""}
           </div>
         </div>
         <div class="st-approval-actions">
-          <button type="button" id="btn-st-approve-now" class="btn btn-primary">✓ 批准并同步到 LoopForge</button>
-          <input id="st-reject-reason-input" type="text" placeholder="若不满意，填写修改意见打回给研发总监重新收敛方案…" />
-          <button type="button" id="btn-st-reject-now" class="btn">↺ 带意见打回重议</button>
+          <button type="button" id="btn-st-approve-now" class="btn btn-primary">批准并执行变更</button>
+          <input id="st-reject-reason-input" type="text" placeholder="填写修改意见，打回研发总监重新收敛方案…" />
+          <button type="button" id="btn-st-reject-now" class="btn">带意见打回</button>
         </div>
       `;
 
@@ -233,11 +238,11 @@ export function renderSteering(state, { onRefresh, onSelectTask } = {}) {
         try {
           const result = await api(`/vernal-api/steering/${pendingCp.checkpoint_id}/approve`, {
             method: "POST",
-            body: JSON.stringify({ actor: actorName(), expected_revision: pendingCp.plan_revision, comment: "Vernal 工作台确认拍板" }),
+            body: JSON.stringify({ actor: actorName(), expected_revision: pendingCp.plan_revision, comment: "工作台确认批准" }),
           });
           if (result.checkpoint.status === "APPLIED") {
             rejectDrafts.delete(draftKey);
-            toast(result.checkpoint.last_error || "转向变更单已生效");
+            toast(result.checkpoint.last_error || "变更单已生效");
           } else {
             toast(STATUS_LABELS[result.checkpoint.status] || "正在确认审批状态");
           }
@@ -251,7 +256,7 @@ export function renderSteering(state, { onRefresh, onSelectTask } = {}) {
         const btn = e.currentTarget;
         const reason = approvalCard.querySelector("#st-reject-reason-input")?.value.trim() || "";
         if (!reason) {
-          toast("请先填写希望总监调整的具体意见");
+          toast("请先填写调整意见");
           approvalCard.querySelector("#st-reject-reason-input")?.focus();
           return;
         }
@@ -262,7 +267,7 @@ export function renderSteering(state, { onRefresh, onSelectTask } = {}) {
             body: JSON.stringify({ actor: actorName(), reason }),
           });
           rejectDrafts.delete(draftKey);
-          toast("已带意见打回 LoopForge 总监节点重新生成方案");
+          toast("已打回研发总监重新生成方案");
           if (onRefresh) await onRefresh();
         } catch (err) {
           toast(`打回失败：${err.message}`);
@@ -272,7 +277,6 @@ export function renderSteering(state, { onRefresh, onSelectTask } = {}) {
     }
   }
 
-  // 3. 项目演进主线（Checkpoint Rail）与全局规矩抽屉
   const railCard = $("evolution-rail-card");
   if (!railCard) return;
   const hasAny = checkpoints.length > 0 || milestones.length > 0 || decisions.length > 0;
@@ -281,53 +285,46 @@ export function renderSteering(state, { onRefresh, onSelectTask } = {}) {
 
   const hasTrouble = tasks.some((t) => t.status === "FUSED") || milestones.some((m) => m.status === "FAILED");
   const ruleBtn = $("btn-toggle-decisions");
-  if (ruleBtn) ruleBtn.textContent = `生效规矩 ${activeDecisions.length} 条 · v${ruleVer}`;
+  if (ruleBtn) ruleBtn.textContent = `生效规范 ${activeDecisions.length} · v${ruleVer}`;
   const diagBtn = $("btn-rail-diagnose");
   if (diagBtn) diagBtn.hidden = !hasTrouble;
 
   const railEl = $("evolution-rail");
   if (railEl) {
-    const nodesHtml = [];
-    checkpoints.forEach((cp, idx) => {
-      const activeCls = selectedCheckpointId === cp.checkpoint_id ? "selected" : "";
-      const stCls = cp.status === "APPLIED" ? "done" : cp.status === "AWAITING_APPROVAL" ? "awaiting" : ["RUNNING", "DISPATCHING", "SYNC_PENDING", "APPLYING"].includes(cp.status) ? "running" : "failed";
-      const verBadge = cp.rule_version ? ` · v${cp.rule_version}` : "";
-      nodesHtml.push(`
-        <button type="button" class="evo-node checkpoint ${stCls} ${activeCls}" data-cp-id="${cp.checkpoint_id}">
-          <span class="evo-kicker">${esc(KIND_LABELS[cp.kind] || "阶段评审")} #${cp.round_no}${esc(verBadge)}</span>
-          <strong class="evo-title">${esc(cp.trigger_topic || "项目评审")}</strong>
-          <span class="evo-sub">${esc(STATUS_LABELS[cp.status] || cp.status)}</span>
-        </button>
-      `);
-      const waveMs = milestones[idx];
-      if (waveMs) {
-        const mTasks = tasks.filter((t) => t.milestone_id === waveMs.id);
-        const mDone = mTasks.filter((t) => ["APPROVED", "MERGED"].includes(t.status)).length;
-        const mCls = waveMs.status === "MERGED" ? "done" : waveMs.status === "FAILED" ? "failed" : mDone > 0 ? "running" : "";
-        nodesHtml.push(`<span class="evo-arrow">→</span>
-          <div class="evo-node wave ${mCls}">
-            <span class="evo-kicker">执行波次 · ${esc(waveMs.id)}</span>
-            <strong class="evo-title">${esc(waveMs.title)}</strong>
-            <span class="evo-sub">${mDone}/${mTasks.length} 单通过 · ${esc(waveMs.status)}</span>
-          </div>`);
-      }
-      if (idx < checkpoints.length - 1) nodesHtml.push(`<span class="evo-arrow">→</span>`);
-    });
-    for (let i = checkpoints.length; i < milestones.length; i++) {
-      const waveMs = milestones[i];
-      const mTasks = tasks.filter((t) => t.milestone_id === waveMs.id);
+    const items = [];
+    for (const m of milestones) {
+      const mid = m.milestone_id;
+      const mTasks = tasks.filter((t) => t.milestone_id === mid && t.status !== "CANCELLED");
       const mDone = mTasks.filter((t) => ["APPROVED", "MERGED"].includes(t.status)).length;
-      const mCls = waveMs.status === "MERGED" ? "done" : waveMs.status === "FAILED" ? "failed" : mDone > 0 ? "running" : "";
-      if (nodesHtml.length) nodesHtml.push(`<span class="evo-arrow">→</span>`);
-      nodesHtml.push(`
-        <div class="evo-node wave ${mCls}">
-          <span class="evo-kicker">执行波次 · ${esc(waveMs.id)}</span>
-          <strong class="evo-title">${esc(waveMs.title)}</strong>
-          <span class="evo-sub">${mDone}/${mTasks.length} 单通过 · ${esc(waveMs.status)}</span>
-        </div>
-      `);
+      const mCls = m.status === "MERGED" ? "done" : m.status === "FAILED" ? "failed" : mDone > 0 || m.status === "INTEGRATING" ? "running" : "";
+      items.push(
+        `<div class="evo-node wave ${mCls}">
+          <span class="evo-kicker">里程碑 · ${esc(mid)}</span>
+          <strong class="evo-title" title="${esc(m.title)}">${esc(m.title)}</strong>
+          <span class="evo-sub">${mTasks.length ? `${mDone}/${mTasks.length} 单完成` : "待拆解"} · ${esc(m.status)}</span>
+        </div>`
+      );
     }
-    railEl.innerHTML = nodesHtml.join("");
+    for (const cp of checkpoints) {
+      const activeCls = selectedCheckpointId === cp.checkpoint_id ? "selected" : "";
+      const stCls =
+        cp.status === "APPLIED"
+          ? "done"
+          : cp.status === "AWAITING_APPROVAL"
+            ? "awaiting"
+            : ["RUNNING", "DISPATCHING", "SYNC_PENDING", "APPLYING"].includes(cp.status)
+              ? "running"
+              : "failed";
+      const verBadge = cp.rule_version ? ` · v${cp.rule_version}` : "";
+      items.push(
+        `<button type="button" class="evo-node checkpoint ${stCls} ${activeCls}" data-cp-id="${cp.checkpoint_id}">
+          <span class="evo-kicker">${esc(KIND_LABELS[cp.kind] || "评审")} #${cp.round_no}${esc(verBadge)}</span>
+          <strong class="evo-title" title="${esc(cp.trigger_topic || "项目评审")}">${esc(cp.trigger_topic || "项目评审")}</strong>
+          <span class="evo-sub">${esc(STATUS_LABELS[cp.status] || cp.status)}</span>
+        </button>`
+      );
+    }
+    railEl.innerHTML = items.join(`<span class="evo-arrow">→</span>`);
     railEl.querySelectorAll("[data-cp-id]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const id = Number(btn.dataset.cpId);
@@ -352,7 +349,7 @@ export function renderSteering(state, { onRefresh, onSelectTask } = {}) {
             )
             .join("") +
           `</div>`
-        : `<div class="muted" style="font-size:12px">当前暂无已登记的全局规矩（立项圆桌收敛或阶段评审拍板后自动写入并同步至 LoopForge 全局 Rule）</div>`;
+        : `<div class="muted">暂无生效规范（圆桌收敛或变更评审批准后自动写入）</div>`;
     }
   }
 
@@ -366,19 +363,19 @@ export function renderSteering(state, { onRefresh, onSelectTask } = {}) {
         <div class="evo-detail-head">
           <div>
             <strong>评审 #${sel.round_no} · ${esc(sel.trigger_topic)}</strong>
-            <span class="tag" style="margin-left:8px">${esc(STATUS_LABELS[sel.status] || sel.status)}</span>
+            <span class="tag">${esc(STATUS_LABELS[sel.status] || sel.status)}</span>
           </div>
-          ${sel.loopforge_run_id ? `<button type="button" class="btn btn-sm" data-detail-run="${esc(sel.loopforge_run_id)}">打开 LoopForge 原生并发评审 Run</button>` : ""}
+          ${sel.loopforge_run_id ? `<button type="button" class="btn btn-sm" data-detail-run="${esc(sel.loopforge_run_id)}">查看底层运行</button>` : ""}
         </div>
-        ${sel.human_note ? `<div class="muted" style="font-size:12px;margin-top:4px">负责人诉求：${esc(sel.human_note)}</div>` : ""}
-        ${sel.last_error ? `<p>${esc(sel.last_error)}</p>` : ""}
-        ${sel.status === "DISPATCH_FAILED" ? '<button type="button" class="btn" data-retry-review>重试发起并发评审</button>' : ""}
+        ${sel.human_note ? `<div class="muted">提交说明：${esc(sel.human_note)}</div>` : ""}
+        ${sel.last_error ? `<p class="text-danger">${esc(sel.last_error)}</p>` : ""}
+        ${sel.status === "DISPATCH_FAILED" ? '<button type="button" class="btn btn-sm" data-retry-review>重试派发评审</button>' : ""}
         ${renderOpinionsGrid(sel.opinions)}
         ${
           appSum.summary
-            ? `<div class="evo-detail-summary">生效结果：${esc(appSum.summary)}（规矩 v${appSum.rule_version || sel.rule_version}，退回 ${(appSum.reopened_tasks || []).join(", ") || "0 单"}，新增 ${(appSum.added_tasks || []).join(", ") || "0 单"}）</div>`
+            ? `<div class="evo-detail-summary">执行摘要：${esc(appSum.summary)}（规范 v${appSum.rule_version || sel.rule_version}，退回 ${(appSum.reopened_tasks || []).join(", ") || "0 单"}，新增 ${(appSum.added_tasks || []).join(", ") || "0 单"}）</div>`
             : sel.status === "RUNNING"
-              ? `<div class="muted" style="font-size:12px;margin-top:6px">正在 LoopForge 中并发运行 PM / 架构 / QA 三专家节点并汇总变更单…</div>`
+              ? `<div class="muted">正在并发运行 PM / 架构 / QA 评审节点…</div>`
               : ""
         }
       `;
@@ -386,9 +383,15 @@ export function renderSteering(state, { onRefresh, onSelectTask } = {}) {
         const button = event.currentTarget;
         button.disabled = true;
         try {
-          await api(`/vernal-api/steering/${sel.checkpoint_id}/retry`, { method: "POST", body: JSON.stringify({actor: actorName()}) });
+          await api(`/vernal-api/steering/${sel.checkpoint_id}/retry`, {
+            method: "POST",
+            body: JSON.stringify({ actor: actorName() }),
+          });
           await onRefresh?.();
-        } catch (err) { toast(err.message); button.disabled = false; }
+        } catch (err) {
+          toast(err.message);
+          button.disabled = false;
+        }
       });
       detailEl.querySelector("[data-detail-run]")?.addEventListener("click", (e) => {
         jumpToNativeRun(e.currentTarget.dataset.detailRun, sel.loopforge_issue_id);

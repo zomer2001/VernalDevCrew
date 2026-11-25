@@ -1,0 +1,46 @@
+{
+  "id": "feature",
+  "name": "增量特性开发流水线 (Feature)",
+  "description": "面向架构稳定的存量系统增量需求：保留详细设计、风险审查、质量门禁与 CI，精简顶层架构门。",
+  "review_policy": "risk",
+  "review_checklist": [
+    "符合增量详细设计与既有模块边界",
+    "向下兼容既有对外接口",
+    "新增特性具备正向与异常单元测试"
+  ],
+  "quality": {
+    "changed_line_coverage": 65.0
+  },
+  "stages": [
+    {"id": "requirements", "name": "需求分析", "enabled": true, "required_artifacts": ["SRS"], "gates": []},
+    {
+      "id": "architecture",
+      "name": "增量蓝图",
+      "enabled": true,
+      "required_artifacts": [],
+      "gates": [
+        {"id": "architecture_approval", "name": "增量任务蓝图确认", "kind": "human_approval", "scope": "project", "blocking": true}
+      ]
+    },
+    {
+      "id": "detailed_design",
+      "name": "详细设计",
+      "enabled": true,
+      "required_artifacts": ["DETAILED_DESIGN"],
+      "gates": [
+        {"id": "detailed_design_approval", "name": "增量详细设计确认", "kind": "human_approval", "scope": "milestone", "blocking": true}
+      ]
+    },
+    {"id": "implementation", "name": "AI 辅助编码", "enabled": true, "required_artifacts": [], "gates": []},
+    {"id": "code_review", "name": "代码审查", "enabled": true, "required_artifacts": [], "gates": [
+      {"id": "human_code_review", "name": "风险人工 Code Review", "kind": "human_approval", "scope": "task", "blocking": true}
+    ]},
+    {"id": "testing", "name": "自动化测试", "enabled": true, "required_artifacts": [], "gates": [
+      {"id": "quality_gate", "name": "代码质量与假测试门禁", "kind": "quality", "scope": "task", "blocking": true}
+    ]},
+    {"id": "integration_delivery", "name": "集成与交付", "enabled": true, "required_artifacts": [], "gates": [
+      {"id": "milestone_ci", "name": "持续集成校验", "kind": "ci", "scope": "milestone", "blocking": true},
+      {"id": "milestone_merge_approval", "name": "合入审批", "kind": "human_approval", "scope": "milestone", "blocking": true}
+    ]}
+  ]
+}

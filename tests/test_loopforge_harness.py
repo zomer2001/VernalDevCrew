@@ -79,7 +79,7 @@ def test_loopforge_harness_dispatches_auto_passes_reuses_issue_and_parses_result
                 creds = {k: {"apiKeyConfigured": True, "baseUrl": v["baseUrl"]} for k, v in shared_credentials.items()}
                 return httpx.Response(200, json={"user": {"id": 32 if public_identity else 12, "agentCliCredentials": creds}})
             if p == "/api/issues/iss-plan-1" and req.method == "GET":
-                assert created_issues[0]["responsibleUserId"] == 32
+                assert created_issues[0]["assigneeUserId"] == 32
                 return httpx.Response(200, json={"issue": created_issues[0]})
             if p.startswith(("/api/issues", "/api/runs")):
                 assert public_identity

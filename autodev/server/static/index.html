@@ -10,40 +10,36 @@
   <div class="shell">
     <aside class="sidebar">
       <div class="sidebar-brand">
-        <div class="brand-mark">A</div>
+        <div class="brand-mark">V</div>
         <div>
           <div class="brand-title">Vernal</div>
-          <div class="brand-sub">多智能体架构研发平台</div>
+          <div class="brand-sub">规范驱动软件研发流水线</div>
         </div>
       </div>
 
       <nav class="nav-list">
         <button class="nav-item active" data-view="overview">
-          <span class="nav-icon">◈</span>
-          <span>总控与流程图</span>
+          <span class="nav-icon" aria-hidden="true">01</span>
+          <span>流水线总控</span>
         </button>
         <button class="nav-item" data-view="council">
-          <span class="nav-icon">◎</span>
-          <span>架构评审圆桌</span>
+          <span class="nav-icon" aria-hidden="true">02</span>
+          <span>架构与设计</span>
           <span id="nav-council-cnt" class="nav-pill hidden">0</span>
         </button>
         <button class="nav-item" data-view="squads">
-          <span class="nav-icon">▦</span>
-          <span>研发组与任务</span>
+          <span class="nav-icon" aria-hidden="true">03</span>
+          <span>研发看板</span>
           <span id="nav-task-cnt" class="nav-pill hidden">0</span>
         </button>
         <button class="nav-item" data-view="inbox">
-          <span class="nav-icon">⚑</span>
-          <span>审批与接管箱</span>
+          <span class="nav-icon" aria-hidden="true">04</span>
+          <span>审查与交付</span>
           <span id="nav-inbox-cnt" class="nav-pill alert hidden">0</span>
         </button>
         <button class="nav-item" data-view="runtime">
-          <span class="nav-icon">⛁</span>
-          <span>底座与 SOP</span>
-        </button>
-        <button class="nav-item" data-view="docs">
-          <span class="nav-icon">▤</span>
-          <span>资料与蓝图</span>
+          <span class="nav-icon" aria-hidden="true">05</span>
+          <span>系统设置</span>
         </button>
       </nav>
 
@@ -57,8 +53,11 @@
           <span class="sse-wrap"><i id="sse-indicator" class="sse-dot"></i><span id="sse-text">连接中</span></span>
         </div>
         <div class="meta-row">
+          <span class="muted">执行池</span>
+          <span id="pool-pill" class="tag">-</span>
+        </div>
+        <div class="meta-row">
           <span class="muted">Codex</span>
-          <span id="pool-pill" class="tag"></span>
           <span id="codex-pill" class="tag">检测中</span>
         </div>
         <div class="meta-row">
@@ -85,136 +84,180 @@
           <span id="usage-pill" class="metric-pill">Tokens: 0</span>
         </div>
         <div class="topbar-right">
-          <button id="btn-launcher-toggle" class="btn btn-primary">＋ 新建 / 接管项目</button>
-          <button id="btn-steering-open" class="btn">💬 拿进展与问题讨论</button>
-          <button id="btn-agent-toggle" class="btn">编队与模型</button>
-          <button id="btn-wish-toggle" class="btn">补充需求</button>
-          <button id="btn-plan" class="btn">开始圆桌与立项</button>
-          <button id="btn-approve" class="btn btn-primary hidden">批准蓝图</button>
-          <button id="btn-start" class="btn btn-primary">启动 Goal</button>
-          <button id="btn-stop" class="btn btn-danger hidden">停止调度</button>
+          <button id="btn-launcher-toggle" type="button" class="btn">新建 / 接入项目</button>
+          <button id="btn-steering-open" type="button" class="btn">变更与评审</button>
+          <button id="btn-plan" type="button" class="btn">开始立项评审</button>
+          <button id="btn-approve-and-start" type="button" class="btn btn-primary hidden">批准并启动研发</button>
+          <button id="btn-approve" type="button" class="btn hidden">仅批准蓝图</button>
+          <button id="btn-start" type="button" class="btn btn-primary hidden">启动自动研发</button>
+          <button id="btn-stop" type="button" class="btn btn-danger hidden">暂停调度</button>
           <details class="more-actions-menu">
-            <summary class="btn btn-sm">更多</summary>
+            <summary class="btn btn-sm">更多操作</summary>
             <div class="more-actions-pop">
-              <label class="actor-field">
-                <span>成员</span>
-                <input id="actor-input" type="text" placeholder="姓名" />
+              <div class="more-row">
+                <span class="muted">当前操作人</span>
+                <span id="actor-badge" class="tag">未登录</span>
+              </div>
+              <label class="actor-field" id="actor-fallback-wrap">
+                <span>本地署名</span>
+                <input id="actor-input" type="text" placeholder="工程师署名" />
               </label>
-              <label class="more-row">协作方式 <select id="collaboration-mode"><option value="files">文件交接</option><option value="git">Git 分支</option></select></label>
-              <button id="btn-ingest" type="button" class="btn btn-sm">手动重新摄入资料</button>
+              <label class="more-row">
+                <span>协作方式</span>
+                <select id="collaboration-mode">
+                  <option value="files">文件交接</option>
+                  <option value="git">Git 分支</option>
+                </select>
+              </label>
+              <button id="btn-agent-toggle" type="button" class="btn btn-sm">模型与流程设置</button>
+              <button id="btn-ingest" type="button" class="btn btn-sm">重新扫描输入文档</button>
             </div>
           </details>
         </div>
       </header>
 
       <div id="project-launcher" class="launcher-backdrop" hidden>
-        <section class="launcher-dialog" role="dialog" aria-modal="true" aria-label="新建或接管项目">
+        <section class="launcher-dialog" role="dialog" aria-modal="true" aria-label="新建或接入项目">
           <header class="launcher-head">
             <div>
-              <h2>新建或接管项目</h2>
-              <p class="launcher-sub">选择启动方式并写清本轮需求，创建后自动同步到 LoopForge 与左侧「快速对话」</p>
+              <h2>新建或接入研发项目</h2>
+              <p class="launcher-sub">选择代码来源与研发目标，创建后自动纳入标准工程流水线</p>
             </div>
-            <button type="button" id="btn-launcher-close" class="launcher-close" title="收起（Esc）" aria-label="收起">✕</button>
+            <button type="button" id="btn-launcher-close" class="launcher-close" title="关闭（Esc）" aria-label="关闭">×</button>
           </header>
 
           <nav class="launcher-nav" role="tablist">
             <button type="button" class="launcher-tab active" data-launch-mode="scratch">
               <span class="lt-title">全新项目</span>
-              <span class="lt-desc">一句话许愿或贴文档</span>
+              <span class="lt-desc">从需求规格从零构建</span>
             </button>
             <button type="button" class="launcher-tab" data-launch-mode="local_folder">
-              <span class="lt-title">本机项目</span>
-              <span class="lt-desc">空目录或已有代码</span>
+              <span class="lt-title">本机目录</span>
+              <span class="lt-desc">接入现有代码目录演进</span>
             </button>
             <button type="button" class="launcher-tab" data-launch-mode="git_repo">
-              <span class="lt-title">远端 Git 仓库</span>
-              <span class="lt-desc">拉取分支并绑定远端</span>
+              <span class="lt-title">Git 仓库</span>
+              <span class="lt-desc">克隆分支并绑定持续交付</span>
             </button>
           </nav>
 
           <div class="launcher-body">
-            <!-- 方式 1：从零新建 -->
+            <!-- 建项前先明确执行路线与额度来源，避免静默继承旧项目或误扣额度 -->
+            <div class="lf-route-box" id="launch-route-box">
+              <div class="lf-route-head">
+                <span class="lf-label">执行路线与额度来源（创建后即生效，不会继承其他项目设置）</span>
+                <span id="launch-route-live-meta" class="muted" style="font-size:12px"></span>
+              </div>
+              <div class="lf-route-grid" id="launch-route-picker" role="radiogroup" aria-label="选择执行路线">
+                <button type="button" class="lf-route-card active" data-route-pool="public_docker" data-route-harness="dsh">
+                  <strong>沙盒 DeepSeek (dsh)</strong>
+                  <span>公用 Docker 隔离 · 公用池额度</span>
+                </button>
+                <button type="button" class="lf-route-card" data-route-pool="public_docker" data-route-harness="opencode">
+                  <strong>沙盒 OpenCode</strong>
+                  <span>公用 Docker 隔离 · 公用池额度</span>
+                </button>
+                <button type="button" class="lf-route-card" data-route-pool="local_runner" data-route-harness="codex">
+                  <strong>我的本机 Codex</strong>
+                  <span>本机 Runner · 本机登录态</span>
+                </button>
+                <button type="button" class="lf-route-card" data-route-pool="auto" data-route-harness="auto">
+                  <strong>智能自动</strong>
+                  <span>优先在线本机，离线回退沙箱</span>
+                </button>
+              </div>
+            </div>
+
             <form id="form-launch-scratch" class="launcher-pane" data-launch-pane="scratch">
               <div class="lf-row-2">
                 <label class="lf-field">
                   <span class="lf-label">项目名称 <em>*</em></span>
-                  <input id="launch-scratch-name" required placeholder="例如：碎星航线 / 订单风控中心" />
+                  <input id="launch-scratch-name" required placeholder="例如：订单结算服务 / 实验数据采集网关" />
                 </label>
-                <label class="lf-field">
+                <div class="lf-field">
                   <span class="lf-label">交付协作方式</span>
-                  <select id="launch-scratch-collab">
-                    <option value="files">文件交接（零配置，推荐新手 / 纯代码项目）</option>
-                    <option value="git">Git 分支（多模块仓库与合入评审）</option>
-                  </select>
-                </label>
+                  <div class="lf-collab-seg" id="launch-scratch-collab-seg" role="radiogroup" aria-label="交付协作方式">
+                    <button type="button" class="lf-collab-btn active" data-collab-val="files">
+                      <strong>文件交接</strong>
+                      <small>轻量原型 / 免仓库直出</small>
+                    </button>
+                    <button type="button" class="lf-collab-btn" data-collab-val="git">
+                      <strong>Git 分支</strong>
+                      <small>内置 Gitea / 评审合入</small>
+                    </button>
+                  </div>
+                  <input id="launch-scratch-collab" type="hidden" value="files" />
+                </div>
               </div>
 
               <div class="lf-composer">
                 <div class="lf-composer-head">
-                  <span class="lf-label">项目需求与目标规格</span>
+                  <span class="lf-label">需求说明与目标规格</span>
                   <label class="lf-attach-btn">
-                    <span>＋ 附带 .md / .txt 文档</span>
+                    <span>附带规格文档 (.md / .txt / .json / .yaml)</span>
                     <input id="launch-scratch-docs" type="file" multiple accept=".md,.txt,.json,.yaml,.yml" hidden />
                   </label>
                 </div>
-                <textarea id="launch-scratch-wish" rows="7" placeholder="详细描述你要做的产品目标、核心功能、技术栈偏好或约束条件…&#10;&#10;支持直接粘贴完整 PRD / 架构文档，也可以点击右上角附带多个 Markdown 文件。"></textarea>
+                <textarea id="launch-scratch-wish" rows="7" placeholder="描述业务背景、核心功能边界、接口契约、非功能指标或技术栈约束…&#10;&#10;可直接粘贴 PRD / 架构草案，或点击右上角附带多份规格文档。"></textarea>
                 <div class="lf-composer-foot">
-                  <span id="launch-scratch-docs-hint" class="muted">支持附带多份 .md / .txt 需求或架构文档</span>
+                  <span id="launch-scratch-docs-hint" class="muted">支持附带多份 Markdown / 文本规格文件</span>
                 </div>
               </div>
 
               <footer class="launcher-foot">
-                <label class="check-inline"><input id="launch-scratch-autostart" type="checkbox" checked /> 创建后直接发起多智能体圆桌与拆蓝图</label>
-                <button id="btn-submit-scratch" type="submit" class="btn btn-primary btn-lg">创建项目并开始</button>
+                <label class="check-inline"><input id="launch-scratch-autostart" type="checkbox" /> 创建后立即进入架构评审与蓝图拆解（将开始调用所选模型）</label>
+                <button id="btn-submit-scratch" type="submit" class="btn btn-primary btn-lg">创建项目</button>
               </footer>
             </form>
 
-            <!-- 方式 2：接管本地文件夹 -->
             <div class="launcher-pane" data-launch-pane="local_folder" hidden>
               <div class="lf-segment" role="tablist">
-                <button type="button" class="lf-seg-btn active" data-local-sub="host">选择宿主机目录</button>
-                <button type="button" class="lf-seg-btn" data-local-sub="browser">浏览器上传文件夹导入（兜底）</button>
-                <button type="button" class="lf-seg-btn" data-local-sub="link">跨机或 Windows 本机桥接</button>
+                <button type="button" class="lf-seg-btn active" data-local-sub="host">选择服务端宿主机目录</button>
+                <button type="button" class="lf-seg-btn" data-local-sub="browser">浏览器上传目录快照</button>
+                <button type="button" class="lf-seg-btn" data-local-sub="link">远程开发机 CLI 配对</button>
               </div>
 
               <div id="launch-local-link-pane" hidden>
-                <p>在自己电脑的项目目录运行配对命令，接收每版交付。需要 Python 3.11 以上、Git 和已安装的 Vernal。</p>
-                <label><input id="link-native-runner" type="checkbox" /> 同时绑定 macOS 或 Linux 官方 Runner</label>
-                <button type="button" class="btn" id="link-create-code">生成十分钟配对码</button>
+                <p class="card-desc" style="margin-bottom:10px">在开发机项目根目录运行配对命令，自动同步每轮交付变更（需安装 Python 3.11+、Git 与 Vernal CLI）。</p>
+                <div class="inline-form" style="margin-bottom:10px">
+                  <label class="check-inline"><input id="link-native-runner" type="checkbox" /> 同时绑定本机 Runner</label>
+                  <button type="button" class="btn btn-sm" id="link-create-code">生成 10 分钟配对码</button>
+                </div>
                 <pre id="link-command"></pre>
               </div>
+
               <form id="form-launch-local-host">
                 <div id="launch-local-host-pane">
                   <div class="lf-dir-card">
                     <div class="lf-dir-bar">
-                      <input id="launch-local-path" type="text" placeholder="点选下方目录，或直接粘贴本机绝对路径后点「定位」" />
+                      <input id="launch-local-path" type="text" placeholder="选择下方目录，或输入绝对路径后点击「定位」" />
                       <button type="button" id="btn-host-dir-go" class="btn btn-sm">定位</button>
                       <button type="button" id="btn-host-dir-up" class="btn btn-sm">上级</button>
                       <button type="button" id="btn-host-dir-pick-current" class="btn btn-sm">选定当前</button>
                     </div>
-                    <div id="host-dir-status" class="lf-dir-meta">正在读取宿主机目录…</div>
+                    <div id="host-dir-status" class="lf-dir-meta">正在读取目录列表…</div>
                     <div id="host-dir-list" class="host-dir-list"></div>
                     <div id="launch-local-selected-hint" class="lf-dir-selected"></div>
                   </div>
 
-                  <div class="lf-row-1">
+                  <div class="lf-row-1" style="margin-top:12px">
                     <label class="lf-field">
                       <span class="lf-label">项目显示名称（可选，默认使用目录名）</span>
-                      <input id="launch-local-name" placeholder="留空自动使用所选文件夹名称" />
+                      <input id="launch-local-name" placeholder="留空自动使用目录名" />
                     </label>
                   </div>
 
-                  <div class="lf-composer">
+                  <div class="lf-composer" style="margin-top:12px">
                     <div class="lf-composer-head">
-                      <span class="lf-label">本轮改造目标与需求说明（可选）</span>
-                      <span class="muted" style="font-size:12px">Git 仓库从已提交版本开发，结果交付到原仓库的专用分支</span>
+                      <span class="lf-label">本轮迭代需求与验收要求（可选）</span>
+                      <span class="muted" style="font-size:12px">Git 仓库将在独立交付分支上演进，不直接污染工作区未提交文件</span>
                     </div>
-                    <textarea id="launch-local-wish" rows="6" placeholder="写清楚你希望多智能体团队在这个现有项目上做什么…&#10;&#10;例如：&#10;1. 梳理现有鉴权逻辑并修复并发刷新 Token 的竞态问题&#10;2. 给订单导出接口补齐单元测试和异常处理&#10;3. 保持现有对外 API 路径兼容"></textarea>
+                    <textarea id="launch-local-wish" rows="6" placeholder="说明本轮要新增的模块、缺陷修复范围、兼容性要求或禁止修改的路径…"></textarea>
                   </div>
 
                   <footer class="launcher-foot">
-                    <label class="check-inline"><input id="launch-local-autostart" type="checkbox" /> 接管后立即启动圆桌评审</label>
-                    <button id="btn-submit-local-host" type="submit" class="btn btn-primary btn-lg">接入该目录</button>
+                    <label class="check-inline"><input id="launch-local-autostart" type="checkbox" /> 接入后立即启动架构评审</label>
+                    <button id="btn-submit-local-host" type="submit" class="btn btn-primary btn-lg">接入目录</button>
                   </footer>
                 </div>
               </form>
@@ -223,47 +266,46 @@
                 <div id="launch-local-browser-pane" hidden>
                   <div class="lf-row-2">
                     <label class="lf-field">
-                      <span class="lf-label">选择本机文件夹 <em>*</em></span>
+                      <span class="lf-label">选择本地文件夹 <em>*</em></span>
                       <input id="launch-browser-folder" type="file" webkitdirectory directory multiple />
-                      <span id="launch-browser-folder-hint" class="muted" style="font-size:12px">自动跳过 .git / node_modules 与二进制文件</span>
+                      <span id="launch-browser-folder-hint" class="muted" style="font-size:12px">自动忽略 .git / node_modules 与大体积二进制产物</span>
                     </label>
                     <label class="lf-field">
                       <span class="lf-label">项目名称</span>
-                      <input id="launch-browser-name" placeholder="自动取文件夹名称" />
+                      <input id="launch-browser-name" placeholder="默认取文件夹名" />
                     </label>
                   </div>
 
-                  <div class="lf-composer">
+                  <div class="lf-composer" style="margin-top:12px">
                     <div class="lf-composer-head">
-                      <span class="lf-label">本轮改造目标与需求说明（可选）</span>
+                      <span class="lf-label">本轮迭代需求与验收要求（可选）</span>
                     </div>
-                    <textarea id="launch-browser-wish" rows="6" placeholder="描述你想在这个导入项目上新增的功能、重构目标或验收标准…"></textarea>
+                    <textarea id="launch-browser-wish" rows="6" placeholder="描述导入后需要完成的改造目标与测试要求…"></textarea>
                   </div>
 
                   <footer class="launcher-foot">
-                    <label class="check-inline"><input id="launch-browser-autostart" type="checkbox" /> 导入后立即启动圆桌评审</label>
-                    <button id="btn-submit-local-browser" type="submit" class="btn btn-primary btn-lg">导入文件夹并创建</button>
+                    <label class="check-inline"><input id="launch-browser-autostart" type="checkbox" /> 导入后立即启动架构评审</label>
+                    <button id="btn-submit-local-browser" type="submit" class="btn btn-primary btn-lg">导入并创建</button>
                   </footer>
                 </div>
               </form>
             </div>
 
-            <!-- 方式 3：接入 Git 仓库与分支 -->
             <form id="form-launch-git" class="launcher-pane" data-launch-pane="git_repo" hidden>
               <div class="lf-row-1">
                 <label class="lf-field">
-                  <span class="lf-label">从 LoopForge / Gitea 已有仓库快速填充（可选）</span>
-                  <select id="launch-git-existing"><option value="">-- 可直接选择已有仓库 --</option></select>
+                  <span class="lf-label">从平台已登记仓库选择（可选）</span>
+                  <select id="launch-git-existing"><option value="">-- 选择已有 Gitea / 平台仓库 --</option></select>
                 </label>
               </div>
               <div class="lf-row-git">
                 <label class="lf-field">
                   <span class="lf-label">Git 仓库地址 <em>*</em></span>
-                  <input id="launch-git-url" required placeholder="https://github.com/org/repo.git 或 http://gitea:3000/owner/repo.git" />
+                  <input id="launch-git-url" required placeholder="https://git.example.com/org/repo.git" />
                 </label>
                 <label class="lf-field">
-                  <span class="lf-label">目标分支</span>
-                  <input id="launch-git-branch" placeholder="main / feat/xxx（留空用默认）" />
+                  <span class="lf-label">基线分支</span>
+                  <input id="launch-git-branch" placeholder="main（留空使用默认分支）" />
                 </label>
                 <label class="lf-field">
                   <span class="lf-label">项目名称（可选）</span>
@@ -271,24 +313,24 @@
                 </label>
               </div>
               <details>
-                <summary>私有 HTTPS 仓库凭据</summary>
-                <div class="lf-row-git">
-                  <label class="lf-field"><span class="lf-label">Git 用户名</span><input id="launch-git-user" autocomplete="off" placeholder="按仓库提供商要求填写" /></label>
-                  <label class="lf-field"><span class="lf-label">访问令牌</span><input id="launch-git-token" type="password" autocomplete="new-password" placeholder="需要读取仓库及创建交付分支的权限" /></label>
+                <summary class="muted" style="cursor:pointer;font-size:12px">私有 HTTPS 仓库访问凭据（可选）</summary>
+                <div class="lf-row-2" style="margin-top:10px">
+                  <label class="lf-field"><span class="lf-label">Git 用户名</span><input id="launch-git-user" autocomplete="off" placeholder="用户名或 oauth2" /></label>
+                  <label class="lf-field"><span class="lf-label">Personal Access Token</span><input id="launch-git-token" type="password" autocomplete="new-password" placeholder="具备读写分支权限的访问令牌" /></label>
                 </div>
               </details>
 
               <div class="lf-composer">
                 <div class="lf-composer-head">
-                  <span class="lf-label">本轮开发 / 改造需求说明（可选）</span>
-                  <span class="muted" style="font-size:12px">克隆后绑定为默认仓库，合入后同步推回远端</span>
+                  <span class="lf-label">本轮研发需求与验收标准（可选）</span>
+                  <span class="muted" style="font-size:12px">里程碑通过人工审查与 CI 后合入并推送远端</span>
                 </div>
-                <textarea id="launch-git-wish" rows="6" placeholder="描述在这条分支上需要完成的需求、接口契约、测试要求或不要改动的文件范围…"></textarea>
+                <textarea id="launch-git-wish" rows="6" placeholder="描述本轮需求、接口契约、单元测试与边界约束…"></textarea>
               </div>
 
               <footer class="launcher-foot">
-                <label class="check-inline"><input id="launch-git-autostart" type="checkbox" /> 克隆接入后立即启动圆桌评审</label>
-                <button id="btn-submit-git" type="submit" class="btn btn-primary btn-lg">克隆并接入仓库</button>
+                <label class="check-inline"><input id="launch-git-autostart" type="checkbox" /> 克隆完成后立即启动架构评审</label>
+                <button id="btn-submit-git" type="submit" class="btn btn-primary btn-lg">克隆并接入</button>
               </footer>
             </form>
           </div>
@@ -296,319 +338,637 @@
       </div>
 
       <div id="steering-modal" class="launcher-backdrop" hidden>
-        <section class="launcher-dialog" role="dialog" aria-modal="true" aria-label="拿进展与问题发起多专家并发评审">
+        <section class="launcher-dialog" role="dialog" aria-modal="true" aria-label="发起需求变更或阶段评审">
           <header class="launcher-head">
             <div>
-              <h2>拿当前进展与问题讨论 / 阶段转向评审</h2>
-              <p class="launcher-sub">自动打包最新交付进展、报错与生效规矩，在 LoopForge 中并行拉起 PM / 架构 / QA 三专家会审并生成可拍板的局部变更单</p>
+              <h2>需求变更与阶段会审</h2>
+              <p class="launcher-sub">自动汇总当前代码进展、门禁结果与架构规矩，并行召集 PM / 架构 / QA 评估影响面并生成受控变更单</p>
             </div>
-            <button type="button" id="btn-steering-close" class="launcher-close" title="收起（Esc）" aria-label="收起">✕</button>
+            <button type="button" id="btn-steering-close" class="launcher-close" title="关闭（Esc）" aria-label="关闭">×</button>
           </header>
           <div class="launcher-body">
             <div id="steering-context-banner" class="st-ctx-banner"></div>
             <div class="lf-segment" role="tablist">
-              <button type="button" class="lf-seg-btn active" data-steering-preset="PIVOT">中途改需求 / 调整技术规矩</button>
+              <button type="button" class="lf-seg-btn active" data-steering-preset="PIVOT">变更需求 / 调整技术规矩</button>
               <button type="button" class="lf-seg-btn" data-steering-preset="REVIEW">阶段成果验收复盘</button>
-              <button type="button" class="lf-seg-btn" data-steering-preset="DIAGNOSE">排查集成或熔断报错</button>
+              <button type="button" class="lf-seg-btn" data-steering-preset="DIAGNOSE">排查集成或熔断故障</button>
             </div>
             <form id="form-steering-start">
               <input id="steering-kind" type="hidden" value="PIVOT" />
               <div class="lf-row-1" style="margin-top:12px">
                 <label class="lf-field">
-                  <span class="lf-label">讨论议题 <em>*</em></span>
-                  <input id="steering-topic" required placeholder="例如：把鉴权从 Session 切换为无状态 JWT，保留已写完的数据库底座" />
+                  <span class="lf-label">评审议题 <em>*</em></span>
+                  <input id="steering-topic" required placeholder="例如：统一错误码响应结构并补充边界异常测试" />
                 </label>
               </div>
               <div class="lf-composer" style="margin-top:12px">
                 <div class="lf-composer-head">
-                  <span class="lf-label">你的想法、不满意点或希望保留/调整的边界</span>
-                  <span class="muted" style="font-size:12px">拍板后自动写入全局 Rule，仅退回受影响任务</span>
+                  <span class="lf-label">变更说明与保留边界</span>
+                  <span class="muted" style="font-size:12px">经人工批准后写入生效架构规则，仅精确重开受影响任务</span>
                 </div>
-                <textarea id="steering-note" rows="6" placeholder="详细写下你的判断或疑问，例如：&#10;1. 目前 M1 跑出来的接口结构可以保留，但错误码格式需要统一为 {code, message, request_id}&#10;2. 请评估哪些已写完的任务需要局部返工，哪些可以直接保留，并补齐对应的契约测试"></textarea>
+                <textarea id="steering-note" rows="6" placeholder="说明需要调整的设计决策、需要保留的已完成模块以及新增验收条件…"></textarea>
               </div>
               <footer class="launcher-foot">
-                <span class="muted" style="font-size:12px">将在 LoopForge 原生人工审批门禁处停下等你拍板，绝不擅自覆写代码</span>
-                <button id="btn-steering-submit" type="submit" class="btn btn-primary btn-lg">发起并发评审并生成变更单</button>
+                <span class="muted" style="font-size:12px">生成变更草案后将暂停等待人工确认，不会直接覆盖代码</span>
+                <button id="btn-steering-submit" type="submit" class="btn btn-primary btn-lg">发起会审并生成变更单</button>
               </footer>
             </form>
           </div>
         </section>
       </div>
 
-      <form id="agent-config-form" class="card wish-composer" hidden>
-        <div class="card-head" style="margin-bottom:8px">
+      <form id="wish-form" class="card wish-composer" hidden>
+        <div class="card-head">
           <div>
-            <h3>执行池、凭据与智能体编队</h3>
-            <p class="card-desc">自动扫描本机已安装的 Harness，支持为圆桌总监、研发组与独立审查官混编不同执行器与模型，保存后自动同步到底层 LoopForge</p>
-          </div>
-          <div class="btn-group">
-            <button type="button" id="btn-agent-rescan" class="btn btn-sm">重新扫描本机 CLI</button>
-            <button type="button" id="btn-agent-close" class="btn btn-sm">收起</button>
+            <h3>补充初始研发需求</h3>
+            <p class="card-desc">当前本地目录尚无需求文档，请填写本轮研发目标后保存切片</p>
           </div>
         </div>
-        <label class="field">执行池
-          <select id="cfg-pool"><option value="auto">自动选择</option><option value="local_runner">本机 CLI</option><option value="public_docker">公用 Docker 额度池</option></select>
-        </label>
-        <p id="pool-status" class="muted"></p>
-        <button type="button" class="btn btn-sm" id="copy-runner-command">复制本机 CLI 接入命令</button>
-        <input id="runner-command" readonly hidden aria-label="本机接入命令" />
-        <details><summary>公用额度池配置</summary>
-          <div class="form-grid">
-            <label class="field">DeepSeek API Key<input id="pool-deepseek-key" type="password" autocomplete="new-password" placeholder="留空沿用已保存的 Key" /></label>
-            <label class="field">DeepSeek 服务地址<input id="pool-deepseek-url" type="url" /></label>
-            <label class="field">OpenAI 兼容 API Key<input id="pool-openai-key" type="password" autocomplete="new-password" /></label>
-            <label class="field">OpenAI 兼容服务地址<input id="pool-openai-url" type="url" /></label>
-            <label class="field">默认模型<input id="pool-model" /></label>
-            <label class="field">推理模型<input id="pool-reasoning" /></label>
+        <div class="stack">
+          <label class="field">需求标题 <input id="wish-title" type="text" required placeholder="例如：核心鉴权模块重构与契约测试补齐" /></label>
+          <label class="field">需求详情 <textarea id="wish-content" required rows="4" placeholder="描述模块边界、接口定义与验收命令…"></textarea></label>
+          <div class="inline-form">
+            <button id="btn-wish-submit" type="submit" class="btn btn-primary">保存需求并生成切片</button>
           </div>
-          <button type="button" class="btn btn-sm" id="save-public-pool">保存公用池配置</button>
-        </details>
-        <div id="agent-runtime-badges" class="inline-form" style="margin-bottom:10px;gap:8px;flex-wrap:wrap"></div>
-        <div id="cb-key-box" class="cb-key-box" hidden>
-          <div class="cb-key-head">
-            <strong>🔑 CodeBuddy API Key 凭据（LoopForge 底座要求）</strong>
-            <span class="muted" style="font-size:12px">LoopForge 0.4.0 中 Codex / Claude Code 可直接复用本机登录态免 Key，CodeBuddy 需在此填入个人 API Key</span>
-          </div>
-          <div class="inline-form" style="gap:8px;margin-top:6px;flex-wrap:wrap">
-            <select id="cb-key-env" style="min-width:140px">
-              <option value="">国际站 (codebuddy.ai)</option>
-              <option value="internal">国内站 (copilot.tencent.com)</option>
-              <option value="ioa">iOA 企业版</option>
-            </select>
-            <input id="cb-key-input" type="password" style="flex:1;min-width:220px" placeholder="粘贴 CodeBuddy API Key（直接保存到 LoopForge 个人凭据）" />
-            <button type="button" id="btn-cb-key-save" class="btn btn-primary btn-sm">保存 Key 到 LoopForge</button>
-            <button type="button" id="btn-cb-key-jump" class="btn btn-sm">打开 LoopForge 设置页</button>
-          </div>
-        </div>
-        <div class="form-grid">
-          <label class="field">全局默认 Harness
-            <select id="cfg-harness">
-              <option value="auto">auto（自动选用本机已就绪执行器）</option>
-              <option value="codex">Codex CLI</option>
-              <option value="codebuddy">CodeBuddy（腾讯）</option>
-              <option value="opencode">OpenCode</option>
-              <option value="dsh">DeepSeek Harness (dsh)</option>
-              <option value="claude-code">Claude Code</option>
-            </select>
-          </label>
-          <label class="field">全局默认模型
-            <input id="cfg-model" type="text" placeholder="如 gpt-6.2-sol / deepseek-chat（留空走工具默认）" />
-          </label>
-          <label class="field">并行工位数 (max_concurrency)
-            <input id="cfg-concurrency" type="number" min="1" max="16" value="2" />
-          </label>
-          <label class="field">圆桌与总监 Harness（留空跟随全局）
-            <select id="cfg-director-harness">
-              <option value="">跟随全局默认</option>
-              <option value="codex">Codex CLI</option>
-              <option value="codebuddy">CodeBuddy</option>
-              <option value="opencode">OpenCode</option>
-              <option value="dsh">DeepSeek Harness (dsh)</option>
-              <option value="claude-code">Claude Code</option>
-            </select>
-          </label>
-          <label class="field">开发组 Harness（同步 vernal-coder）
-            <select id="cfg-coder-harness">
-              <option value="">跟随全局默认</option>
-              <option value="codex">Codex CLI</option>
-              <option value="codebuddy">CodeBuddy</option>
-              <option value="opencode">OpenCode</option>
-              <option value="dsh">DeepSeek Harness (dsh)</option>
-              <option value="claude-code">Claude Code</option>
-            </select>
-          </label>
-          <label class="field">审查官 Harness（支持异构交叉审查）
-            <select id="cfg-qa-harness">
-              <option value="">跟随全局默认</option>
-              <option value="codex">Codex CLI</option>
-              <option value="codebuddy">CodeBuddy</option>
-              <option value="opencode">OpenCode</option>
-              <option value="dsh">DeepSeek Harness (dsh)</option>
-              <option value="claude-code">Claude Code</option>
-            </select>
-          </label>
-          <label class="field">圆桌与总监模型覆盖（可选）
-            <input id="cfg-director-model" type="text" placeholder="留空跟随全局模型" />
-          </label>
-          <label class="field">开发组模型覆盖（可选）
-            <input id="cfg-coder-model" type="text" placeholder="留空跟随全局模型" />
-          </label>
-          <label class="field">审查官模型覆盖（可选）
-            <input id="cfg-qa-model" type="text" placeholder="留空跟随全局模型" />
-          </label>
-        </div>
-        <div class="inline-form" style="margin-top:8px">
-          <button id="btn-agent-save" type="submit" class="btn btn-primary">保存并同步到底座</button>
-          <span id="cfg-effective-hint" class="muted" style="font-size:12px"></span>
         </div>
       </form>
 
-      <form id="wish-form" class="card wish-composer" hidden>
-        <label>需求标题 <input id="wish-title" required placeholder="碎星航线" /></label>
-        <label>需求内容 <textarea id="wish-content" required rows="4"></textarea></label>
-        <button id="btn-wish-submit" class="btn btn-primary">保存并切片</button>
-      </form>
       <div id="goal-bar" class="goal-bar"></div>
 
       <main class="content">
-        <!-- 1. 总控与流程图 -->
+        <!-- 1. 流水线总控（单栏宽敞分层钻取：S1~S7 阶段轨 → 展开阶段/任务 → 展开 SOP 节点 → 思考链与命令流） -->
         <section id="view-overview" class="view active">
-          <div class="overview-grid">
-            <div class="overview-main">
-              <div id="steering-approval-card" class="card st-approval-card" hidden></div>
+          <div class="vov-shell">
+            <div id="pipeline-stepper" class="pipeline-stepper" hidden></div>
+            <div id="steering-approval-card" class="card st-approval-card" hidden></div>
 
-              <div id="evolution-rail-card" class="card evo-rail-card" hidden>
-                <div class="card-head">
-                  <div>
-                    <h3>项目演进主线（评审立规 × 执行波次）</h3>
-                    <p class="card-desc">立项共识与每次阶段评审、规矩版本及里程碑波次串联成一条主线，点击任意评审节点查看会审结论</p>
-                  </div>
-                  <div class="btn-group">
-                    <button type="button" id="btn-toggle-decisions" class="btn btn-sm">生效规矩 0 条 · v0</button>
-                    <button type="button" id="btn-rail-diagnose" class="btn btn-sm btn-danger" hidden>⚠ 会诊异常</button>
-                    <button type="button" id="btn-rail-start-review" class="btn btn-sm btn-primary">＋ 阶段评审 / 转向</button>
-                  </div>
-                </div>
-                <div id="evolution-rail" class="evo-rail"></div>
-                <div id="evolution-decisions-drawer" class="evo-decisions-drawer" hidden></div>
-                <div id="evolution-detail" class="evo-detail" hidden></div>
+            <section id="stage-drilldown-card" class="vset-card vdd-stage-card" aria-label="阶段分层钻取工作区"></section>
+
+            <!-- 辅助工程视图：默认全部收起，按需单张展开，绝不挤压主工作区 -->
+            <div class="vov-aux-bar" id="vov-aux-bar" role="toolbar" aria-label="更多工程视图">
+              <span class="vov-aux-label">按需展开辅助视图</span>
+              <div class="vov-aux-pills">
+                <button type="button" class="vov-aux-btn" data-aux-panel="dag">任务依赖拓扑图 (DAG)</button>
+                <button type="button" class="vov-aux-btn" data-aux-panel="roster">并发工位实况</button>
+                <button type="button" class="vov-aux-btn" data-aux-panel="timeline">审计与执行时间线 <span id="event-count" class="vov-aux-count">0</span></button>
+                <button type="button" class="vov-aux-btn" data-aux-panel="evo">工程演进主线</button>
               </div>
+            </div>
 
-              <div class="card">
+            <div id="vov-aux-panels" class="vov-aux-panels">
+              <div id="vov-panel-dag" class="card vov-aux-card" hidden>
                 <div class="card-head">
                   <div>
-                    <h3>架构任务流程图（DAG）</h3>
-                    <p class="card-desc">按里程碑波次与依赖拓扑自动布局，点击任意节点打开实时监视器</p>
+                    <h3>任务依赖拓扑图（DAG）</h3>
+                    <p class="card-desc">按里程碑波次与模块依赖自动排布，点击任意任务查看执行日志、代码 Diff 与质量门禁</p>
                   </div>
                   <div class="legend">
                     <span><i class="ldot ready"></i>就绪</span>
                     <span><i class="ldot running"></i>执行中</span>
-                    <span><i class="ldot done"></i>已通过/合入</span>
+                    <span><i class="ldot review"></i>待人工评审</span>
+                    <span><i class="ldot done"></i>已通过</span>
                     <span><i class="ldot fused"></i>熔断</span>
                   </div>
                 </div>
                 <div id="dag-canvas" class="dag-canvas"></div>
               </div>
 
-              <div class="card">
+              <div id="vov-panel-roster" class="card vov-aux-card" hidden>
                 <div class="card-head">
                   <div>
-                    <h3>在岗团队工位实况席</h3>
-                    <p id="roster-summary" class="card-desc">实时展示指挥席与各并发工位当前在岗角色、引擎及手头动作</p>
+                    <h3>并发执行工位实况</h3>
+                    <p id="roster-summary" class="card-desc">展示总监指挥席与各研发工位当前绑定的执行器及实时动作</p>
                   </div>
                   <div class="btn-group">
-                    <button id="btn-council-trace" class="btn btn-sm">圆桌总监日志</button>
-                    <button id="btn-planner-trace" class="btn btn-sm">立项规划日志</button>
+                    <button id="btn-council-trace" type="button" class="btn btn-sm">架构评审日志</button>
+                    <button id="btn-planner-trace" type="button" class="btn btn-sm">蓝图规划日志</button>
                   </div>
                 </div>
                 <div id="roster-grid" class="roster-grid"></div>
               </div>
-            </div>
 
-            <aside class="card event-card">
-              <div class="card-head">
-                <div>
-                  <h3>项目时间线</h3>
-                  <p class="card-desc">按时间查看智能体、任务和执行记录</p>
-                </div>
-                <span id="event-count" class="tag">0</span>
-              </div>
-              <label class="timeline-source">记录来源 <select id="history-workspace" aria-label="记录来源"></select></label>
-              <p id="history-status" class="card-desc" role="status">正在读取项目记录…</p>
-              <div id="event-list" class="event-list"></div>
-              <button id="history-older" class="btn btn-sm" hidden>加载更早记录</button>
-            </aside>
-          </div>
-        </section>
-
-        <!-- 2. 架构评审圆桌 -->
-        <section id="view-council" class="view">
-          <div class="council-layout">
-            <div class="council-main">
-              <div class="card">
+              <div id="vov-panel-timeline" class="card vov-aux-card event-card" hidden>
                 <div class="card-head">
                   <div>
-                    <h3>多智能体架构评审圆桌（Architecture Council）</h3>
-                    <p class="card-desc">第 1 轮：PM / 契约与异构架构师 / QA 总监独立评审 → 第 2 轮：研发总监裁决分歧并输出 ADR</p>
+                    <h3>审计与执行时间线</h3>
+                    <p class="card-desc">实时记录规划、编码、门禁与人工审批事件</p>
                   </div>
-                  <button id="btn-run-council" class="btn btn-primary btn-sm">发起新一轮圆桌评审</button>
+                  <label class="timeline-source">记录范围 <select id="history-workspace" aria-label="记录范围"></select></label>
                 </div>
-                <div id="council-stream" class="council-stream"></div>
-                <div class="interject-box">
-                  <textarea id="council-note" rows="2" placeholder="负责人可直接插话补充要求（例如：先做核心后端与契约测试，SDK 放到 M3），提交后总监将立刻更新 ADR 裁决…"></textarea>
-                  <div class="interject-actions">
-                    <span class="muted">插话将以「最高优先级人类裁决」追加至当前圆桌并重新收敛</span>
-                    <button id="btn-council-interject" class="btn btn-primary btn-sm">插话并重新裁决</button>
+                <p id="history-status" class="card-desc" role="status">正在读取项目记录…</p>
+                <div id="event-list" class="event-list"></div>
+                <button id="history-older" type="button" class="btn btn-sm" hidden>加载更早记录</button>
+              </div>
+
+              <div id="vov-panel-evo" class="vov-aux-card" hidden>
+                <div id="evolution-rail-card" class="card evo-rail-card" hidden>
+                  <div class="card-head">
+                    <div>
+                      <h3>工程演进主线</h3>
+                      <p class="card-desc">串联立项基线、阶段转向评审、生效架构规矩与里程碑交付波次</p>
+                    </div>
+                    <div class="btn-group">
+                      <button type="button" id="btn-toggle-decisions" class="btn btn-sm">生效规矩 0 条 · v0</button>
+                      <button type="button" id="btn-rail-diagnose" class="btn btn-sm btn-danger" hidden>异常会诊</button>
+                      <button type="button" id="btn-rail-start-review" class="btn btn-sm btn-primary">发起阶段评审</button>
+                    </div>
                   </div>
+                  <div id="evolution-rail" class="evo-rail"></div>
+                  <div id="evolution-decisions-drawer" class="evo-decisions-drawer" hidden></div>
+                  <div id="evolution-detail" class="evo-detail" hidden></div>
                 </div>
               </div>
             </div>
-            <aside class="council-side">
-              <div class="card">
-                <div class="card-head">
-                  <h3>ADR 架构决策纪要</h3>
-                </div>
-                <div id="council-adrs" class="stack"></div>
-              </div>
-            </aside>
           </div>
         </section>
 
-        <!-- 3. 研发组与任务 -->
+        <!-- 2. 架构与设计（融合架构圆桌、规范文档中心、立项蓝图与资料切片） -->
+        <section id="view-council" class="view">
+          <div class="stack">
+            <div class="council-layout">
+              <div class="council-main">
+                <div class="card">
+                  <div class="card-head">
+                    <div>
+                      <h3>多智能体架构评审圆桌（Architecture Council）</h3>
+                      <p class="card-desc">第 1 轮：PM / 系统架构师 / QA 总监独立评审 → 第 2 轮：研发总监收敛分歧并签发 ADR</p>
+                    </div>
+                    <button id="btn-run-council" type="button" class="btn btn-primary btn-sm">重新发起架构评审</button>
+                  </div>
+                  <div id="council-stream" class="council-stream"></div>
+                  <div class="interject-box">
+                    <textarea id="council-note" rows="2" placeholder="输入技术负责人裁决意见（例如：鉴权统一采用无状态 JWT，M1 优先冻结 OpenAPI 契约），提交后自动更新 ADR 与研发蓝图…"></textarea>
+                    <div class="interject-actions">
+                      <span class="muted">负责人意见将作为最高优先级架构约束写入 ADR，并在已生成蓝图时自动同步刷新</span>
+                      <button id="btn-council-interject" type="button" class="btn btn-primary btn-sm">提交裁决并更新蓝图</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <aside class="council-side">
+                <div class="card">
+                  <div class="card-head">
+                    <h3>ADR 架构决策记录</h3>
+                  </div>
+                  <div id="council-adrs" class="stack"></div>
+                </div>
+              </aside>
+            </div>
+
+            <div id="docs-center-mount" class="stack"></div>
+
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3>研发蓝图与立项拆解</h3>
+                  <p id="plan-summary" class="card-desc">尚未生成规划</p>
+                </div>
+              </div>
+              <div class="inline-form">
+                <select id="plan-mode">
+                  <option value="goal">架构圆桌 + 里程碑滚动规划（Goal 模式）</option>
+                  <option value="classic">单次全量任务拆解（Classic 模式）</option>
+                </select>
+                <input id="plan-extra" type="text" placeholder="补充规划约束（可选）" />
+                <button id="btn-plan-extra" type="button" class="btn btn-primary btn-sm">生成 / 刷新蓝图</button>
+              </div>
+            </div>
+
+            <div id="plan-breakdown" class="stack"></div>
+
+            <div class="card">
+              <div class="card-head"><h3>原始输入规格切片（inputs/）</h3></div>
+              <div id="slice-list" class="stack"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. 研发看板 -->
         <section id="view-squads" class="view">
           <div id="squad-columns" class="squad-columns"></div>
         </section>
 
-        <!-- 4. 审批与接管收件箱 -->
+        <!-- 4. 审查与交付（融合人工 Code Review、收件箱、CI/CD 与里程碑合并） -->
         <section id="view-inbox" class="view">
           <div class="stack">
+            <div id="review-workbench-mount" class="stack"></div>
+
             <div class="card">
               <div class="card-head">
                 <div>
-                  <h3>统一审批与接管收件箱（Needs Review）</h3>
-                  <p class="card-desc">汇总 LoopForge 人工审批门禁、AutoDev 熔断接管任务及里程碑合并签字</p>
+                  <h3>待办审批与熔断接管</h3>
+                  <p class="card-desc">集中处理流程门禁签字、AI 熔断升级任务及底层工作流人工确认节点</p>
                 </div>
-                <button id="btn-refresh-inbox" class="btn btn-sm">刷新收件箱</button>
+                <button id="btn-refresh-inbox" type="button" class="btn btn-sm">刷新列表</button>
               </div>
               <div id="inbox-list" class="stack"></div>
             </div>
+
+            <div id="ci-runs-mount" class="stack"></div>
+
             <div class="card">
               <div class="card-head">
-                <h3>里程碑集成与交付报告</h3>
+                <div>
+                  <h3>里程碑集成验收与基线合入</h3>
+                  <p class="card-desc">里程碑内全部任务通过自动化门禁、代码评审与持续集成后，可合入主干并归档版本</p>
+                </div>
               </div>
               <div id="milestone-list" class="stack"></div>
             </div>
           </div>
         </section>
 
-        <!-- 5. 底座与 SOP（LoopForge 融合面板） -->
+        <!-- 5. 系统设置（Harness UI 分区风格：研发流程 / 执行池与编队 / 治理与效能 / 底座与诊断） -->
         <section id="view-runtime" class="view">
-          <div id="runtime-panel" class="stack"></div>
-        </section>
+          <div class="vset-shell">
+            <header class="vset-header">
+              <div>
+                <h2 class="vset-title">系统设置</h2>
+                <p class="vset-sub">清晰区分项目级研发策略、双执行池资源与部署级运维诊断</p>
+              </div>
+              <nav class="vset-tabs" id="vset-tabs" role="tablist" aria-label="系统设置分类">
+                <span class="vset-tab-indicator" id="vset-tab-indicator" aria-hidden="true"></span>
+                <button type="button" class="vset-tab active" role="tab" aria-selected="true" data-vset-tab="pools">执行池与模型</button>
+                <button type="button" class="vset-tab" role="tab" aria-selected="false" data-vset-tab="pipeline">研发流程与门禁</button>
+                <button type="button" class="vset-tab" role="tab" aria-selected="false" data-vset-tab="governance">治理与效能</button>
+                <button type="button" class="vset-tab" role="tab" aria-selected="false" data-vset-tab="diagnostics">底座与诊断</button>
+              </nav>
+            </header>
 
-        <!-- 6. 资料与蓝图 -->
-        <section id="view-docs" class="view">
-          <div class="stack">
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3>立项规划控制台</h3>
-                  <p id="plan-summary" class="card-desc">尚未生成规划</p>
-                </div>
+            <datalist id="common-models">
+              <option value="deepseek-flash"></option>
+              <option value="deepseek-v4-pro"></option>
+              <option value="deepseek-chat"></option>
+              <option value="deepseek-reasoner"></option>
+              <option value="qwen-coder-plus"></option>
+              <option value="claude-sonnet-4-5"></option>
+              <option value="gpt-5"></option>
+            </datalist>
+
+            <form id="agent-config-form" class="vset-form">
+              <!-- 分页 1：执行池与模型编队 -->
+              <div class="vset-pane active" data-vset-pane="pools">
+                <section class="vset-card">
+                  <div class="vset-card-head">
+                    <div>
+                      <h3>执行池选择与实时状态</h3>
+                      <p>同时展示本机个人 Runner 与公用 Docker 沙箱能力，所见即所得</p>
+                    </div>
+                    <span class="vset-scope-badge">项目级选择 · 双池状态实时可见</span>
+                  </div>
+
+                  <div class="vset-pool-mode-bar">
+                    <div class="vset-seg" id="vset-pool-seg" role="radiogroup" aria-label="执行池调度策略">
+                      <button type="button" class="vset-seg-btn active" data-pool-mode="auto">智能自动（优先本机）</button>
+                      <button type="button" class="vset-seg-btn" data-pool-mode="local_runner">锁定本机 Runner</button>
+                      <button type="button" class="vset-seg-btn" data-pool-mode="public_docker">锁定公用 Docker 沙箱</button>
+                    </div>
+                    <select id="cfg-pool" class="vset-sr-select" aria-label="执行池选择">
+                      <option value="auto">自动选择（优先在线本机 Runner）</option>
+                      <option value="local_runner">本机 CLI Runner</option>
+                      <option value="public_docker">公用 Docker 沙箱池</option>
+                    </select>
+                  </div>
+
+                  <p id="pool-status" class="vset-caption"></p>
+
+                  <div class="vset-pool-grid">
+                    <!-- 左卡：本机个人 Runner -->
+                    <article class="vset-pool-card" id="vset-card-local" data-pool-card="local_runner">
+                      <div class="vset-pool-card-head">
+                        <div class="vset-pool-title-wrap">
+                          <span class="vset-pool-dot" id="vset-local-dot"></span>
+                          <div>
+                            <h4>本机个人 Runner</h4>
+                            <small id="vset-local-hosts">正在检测本机执行机…</small>
+                          </div>
+                        </div>
+                        <span class="vset-state-pill" id="vset-local-status">检测中</span>
+                      </div>
+                      <div class="vset-runtime-list" id="vset-local-runtimes"></div>
+                      <div class="vset-pool-card-foot">
+                        <button type="button" id="btn-agent-rescan" class="btn btn-sm">重新扫描本机 CLI</button>
+                        <button type="button" id="copy-runner-command" class="btn btn-sm">复制本机接入命令</button>
+                      </div>
+                      <input id="runner-command" class="vset-cmd-input" type="text" readonly hidden aria-label="本机接入命令" />
+                    </article>
+
+                    <!-- 右卡：公用 Docker 沙箱 -->
+                    <article class="vset-pool-card" id="vset-card-public" data-pool-card="public_docker">
+                      <div class="vset-pool-card-head">
+                        <div class="vset-pool-title-wrap">
+                          <span class="vset-pool-dot" id="vset-public-dot"></span>
+                          <div>
+                            <h4>公用 Docker 沙箱</h4>
+                            <small id="vset-public-image">内置 DeepSeek Harness (dsh) 与 OpenCode</small>
+                          </div>
+                        </div>
+                        <span class="vset-state-pill" id="vset-public-status">检测中</span>
+                      </div>
+                      <div class="vset-runtime-list" id="vset-public-runtimes"></div>
+                      <div class="vset-check-list" id="vset-public-checks"></div>
+                      <div class="vset-auth-strip" id="vset-public-auth-row">
+                        <span id="vset-public-auth-text" class="vset-auth-text">正在检查当前项目授权状态…</span>
+                        <div class="vset-inline-actions">
+                          <button type="button" class="btn btn-sm btn-primary hidden" id="btn-authorize-pool-project">一键授权当前项目</button>
+                          <button type="button" class="btn btn-sm" id="btn-smoke-public-dsh">用当前项目试跑 dsh</button>
+                          <button type="button" class="btn btn-sm" id="btn-smoke-public-opencode">试跑 OpenCode</button>
+                          <button type="button" class="btn btn-sm" id="copy-pool-account">复制公用账号</button>
+                          <a id="pool-project-members" class="btn btn-sm" href="#/projects">管理原生项目成员 ↗</a>
+                        </div>
+                      </div>
+                      <div id="vset-public-smoke-result" class="vset-smoke-result" hidden></div>
+                    </article>
+                  </div>
+
+                  <div class="vset-arch-note" id="vset-arch-note">
+                    <div><strong>链路说明 · 项目任务执行：</strong>受上方「执行池选择」控制——<strong>本机 Runner</strong> 使用本机已安装 CLI 与本机登录态；<strong>公用 Docker 沙箱</strong> 使用沙箱内置的 <code>dsh</code> / <code>opencode</code> 与下方公用模型额度。</div>
+                    <div><strong>链路说明 · 左侧聊天助手：</strong>使用当前登录账号的<strong>个人凭据</strong>与默认执行机；点击下方同步按钮将同时写入 <code>OpenCode</code> 与 <code>DeepSeek Harness (dsh)</code>，若本机仅安装 OpenCode，请在聊天助手内选择 <strong>OpenCode → deepseek-chat</strong>。</div>
+                  </div>
+
+                  <div id="agent-runtime-badges" class="vset-legacy-badges" hidden></div>
+
+                  <!-- 公用 Docker 沙箱 API Key 与研发助手凭据独立配置面板 -->
+                  <details id="vset-pool-keys-panel" class="vset-disclosure">
+                    <summary class="vset-disclosure-summary">
+                      <div>
+                        <strong>公用 Docker 沙箱 API Key 与模型配置</strong>
+                        <small>部署级共享额度配置（独立保存，与下方项目编队互不干扰）</small>
+                      </div>
+                      <span class="vset-scope-badge">部署全局</span>
+                    </summary>
+                    <div class="vset-disclosure-body">
+                      <div class="vset-grid-2">
+                        <label class="vset-field">
+                          <span>DeepSeek API Key</span>
+                          <input id="pool-deepseek-key" type="password" autocomplete="new-password" placeholder="留空沿用已保存凭据" />
+                        </label>
+                        <label class="vset-field">
+                          <span>DeepSeek 服务地址</span>
+                          <input id="pool-deepseek-url" type="url" placeholder="https://api.deepseek.com" />
+                        </label>
+                        <label class="vset-field">
+                          <span>OpenAI 兼容 API Key</span>
+                          <input id="pool-openai-key" type="password" autocomplete="new-password" placeholder="留空沿用已保存凭据" />
+                        </label>
+                        <label class="vset-field">
+                          <span>OpenAI 兼容服务地址</span>
+                          <input id="pool-openai-url" type="url" placeholder="https://api.openai.com/v1" />
+                        </label>
+                        <label class="vset-field">
+                          <span>公用池默认模型</span>
+                          <input id="pool-model" type="text" list="common-models" placeholder="deepseek-chat" />
+                        </label>
+                        <label class="vset-field">
+                          <span>公用池推理模型</span>
+                          <input id="pool-reasoning" type="text" list="common-models" placeholder="deepseek-reasoner" />
+                        </label>
+                      </div>
+                      <div class="vset-subfoot">
+                        <div class="vset-inline-actions">
+                          <button type="button" class="btn btn-primary btn-sm" id="save-public-pool">保存公用池凭据</button>
+                          <button type="button" class="btn btn-sm" id="btn-sync-personal-dsh">同步到我的聊天助手（启用 OpenCode + dsh）</button>
+                        </div>
+                        <span id="vset-personal-dsh-status" class="vset-caption"></span>
+                      </div>
+                    </div>
+                  </details>
+
+                  <div id="cb-key-box" class="vset-subbox" hidden>
+                    <div class="vset-subbox-head">
+                      <strong>CodeBuddy 个人 API Key</strong>
+                      <span class="vset-caption">Codex / Claude Code 复用本机登录态；CodeBuddy 需配置个人 Key</span>
+                    </div>
+                    <div class="vset-inline-actions" style="margin-top:8px">
+                      <select id="cb-key-env" style="min-width:150px">
+                        <option value="">国际站 (codebuddy.ai)</option>
+                        <option value="internal">国内站 (copilot.tencent.com)</option>
+                        <option value="ioa">iOA 企业版</option>
+                      </select>
+                      <input id="cb-key-input" type="password" style="flex:1;min-width:220px" placeholder="粘贴 CodeBuddy API Key（安全写入个人凭据库）" />
+                      <button type="button" id="btn-cb-key-save" class="btn btn-primary btn-sm">保存凭据</button>
+                      <button type="button" id="btn-cb-key-jump" class="btn btn-sm">打开底层凭据页</button>
+                    </div>
+                  </div>
+                </section>
+
+                <!-- 智能体编队与并发 -->
+                <section class="vset-card">
+                  <div class="vset-card-head">
+                    <div>
+                      <h3>智能体编队与并发</h3>
+                      <p>控制默认编码/评审执行器、模型与最大并行工位数</p>
+                    </div>
+                    <span class="vset-scope-badge">当前项目</span>
+                  </div>
+
+                  <div class="vset-rows">
+                    <div class="vset-row">
+                      <div class="vset-row-meta">
+                        <strong>全局默认 Harness</strong>
+                        <small id="cfg-harness-compat-hint">自动选择时会优先使用当前选中执行池内已就绪的执行器</small>
+                      </div>
+                      <div class="vset-row-ctrl">
+                        <select id="cfg-harness">
+                          <option value="auto">auto（自动选用已就绪执行器）</option>
+                          <option value="codex">Codex CLI</option>
+                          <option value="codebuddy">CodeBuddy</option>
+                          <option value="opencode">OpenCode</option>
+                          <option value="dsh">DeepSeek Harness (dsh)</option>
+                          <option value="claude-code">Claude Code</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div class="vset-row">
+                      <div class="vset-row-meta">
+                        <strong>全局默认模型</strong>
+                        <small>留空使用所选执行器默认模型；使用公用沙箱时须在白名单内</small>
+                      </div>
+                      <div class="vset-row-ctrl">
+                        <input id="cfg-model" type="text" list="common-models" placeholder="留空跟随执行器默认" />
+                      </div>
+                    </div>
+                    <div class="vset-row">
+                      <div class="vset-row-meta">
+                        <strong>最大并发工位数</strong>
+                        <small>流水线同时并行执行的任务槽位上限（1 ~ 16）</small>
+                      </div>
+                      <div class="vset-row-ctrl vset-ctrl-sm">
+                        <input id="cfg-concurrency" type="number" min="1" max="16" value="2" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <details class="vset-disclosure">
+                    <summary class="vset-disclosure-summary">
+                      <div>
+                        <strong>高级：按角色异构混编与原生签字职责</strong>
+                        <small>按总监 / 开发 / 审查拆分模型，或指定不同的原生开发执行人与交付审批人</small>
+                      </div>
+                    </summary>
+                    <div class="vset-disclosure-body">
+                      <div class="vset-grid-3">
+                        <label class="vset-field">
+                          <span>架构圆桌与总监 Harness</span>
+                          <select id="cfg-director-harness">
+                            <option value="">跟随全局默认</option>
+                            <option value="codex">Codex CLI</option>
+                            <option value="codebuddy">CodeBuddy</option>
+                            <option value="opencode">OpenCode</option>
+                            <option value="dsh">DeepSeek Harness (dsh)</option>
+                            <option value="claude-code">Claude Code</option>
+                          </select>
+                        </label>
+                        <label class="vset-field">
+                          <span>编码实现组 Harness</span>
+                          <select id="cfg-coder-harness">
+                            <option value="">跟随全局默认</option>
+                            <option value="codex">Codex CLI</option>
+                            <option value="codebuddy">CodeBuddy</option>
+                            <option value="opencode">OpenCode</option>
+                            <option value="dsh">DeepSeek Harness (dsh)</option>
+                            <option value="claude-code">Claude Code</option>
+                          </select>
+                        </label>
+                        <label class="vset-field">
+                          <span>独立审查官 Harness</span>
+                          <select id="cfg-qa-harness">
+                            <option value="">跟随全局默认</option>
+                            <option value="codex">Codex CLI</option>
+                            <option value="codebuddy">CodeBuddy</option>
+                            <option value="opencode">OpenCode</option>
+                            <option value="dsh">DeepSeek Harness (dsh)</option>
+                            <option value="claude-code">Claude Code</option>
+                          </select>
+                        </label>
+                        <label class="vset-field">
+                          <span>圆桌与总监模型覆盖</span>
+                          <input id="cfg-director-model" type="text" list="common-models" placeholder="留空跟随全局默认" />
+                        </label>
+                        <label class="vset-field">
+                          <span>编码实现组模型覆盖</span>
+                          <input id="cfg-coder-model" type="text" list="common-models" placeholder="留空跟随全局默认" />
+                        </label>
+                        <label class="vset-field">
+                          <span>独立审查官模型覆盖</span>
+                          <input id="cfg-qa-model" type="text" list="common-models" placeholder="留空跟随全局默认" />
+                        </label>
+                      </div>
+                      <div class="vset-grid-2" style="margin-top:14px">
+                        <label class="vset-field">
+                          <span>原生开发 SOP 执行人</span>
+                          <select id="cfg-native-executor"><option value="">项目默认</option></select>
+                        </label>
+                        <label class="vset-field">
+                          <span>原生交付 SOP 审批人</span>
+                          <select id="cfg-native-approver"><option value="">项目默认</option></select>
+                        </label>
+                      </div>
+                      <div class="vset-subfoot">
+                        <button type="button" class="btn btn-sm" id="enroll-company-model">为我的原生执行账号启用公司模型</button>
+                        <span class="vset-caption">仅当上面指定了个人账号作为开发 SOP 执行人时需要</span>
+                      </div>
+                    </div>
+                  </details>
+
+                  <div id="vset-sync-alert" class="launcher-error" hidden role="alert"></div>
+                  <footer class="vset-card-foot">
+                    <span id="cfg-effective-hint" class="vset-caption"></span>
+                    <button id="btn-agent-save" type="submit" class="btn btn-primary">保存配置并同步工作流</button>
+                  </footer>
+                </section>
               </div>
-              <div class="inline-form">
-                <select id="plan-mode">
-                  <option value="goal">多智能体圆桌 + 总监分组滚动 Goal 模式</option>
-                  <option value="classic">经典单次全量拆单模式</option>
-                </select>
-                <input id="plan-extra" type="text" placeholder="给圆桌 / 研发总监的补充要求（可选）" />
-                <button id="btn-plan-extra" class="btn btn-primary">按所选模式启动立项</button>
+
+              <!-- 分页 2：研发流程与门禁 -->
+              <div class="vset-pane" data-vset-pane="pipeline" hidden>
+                <section class="vset-card">
+                  <div class="vset-card-head">
+                    <div>
+                      <h3>研发流程与质量门禁</h3>
+                      <p>定义当前项目的阶段流转模板、人工 Diff 审查触发条件、文档规范与 CI 集成</p>
+                    </div>
+                    <span class="vset-scope-badge">当前项目</span>
+                  </div>
+
+                  <div class="vset-rows">
+                    <div class="vset-row">
+                      <div class="vset-row-meta">
+                        <strong>工程流程模板 (Process Template)</strong>
+                        <small>控制需求澄清、架构圆桌、详设、编码、测试与验收的阶段编排</small>
+                      </div>
+                      <div class="vset-row-ctrl">
+                        <select id="cfg-process-template">
+                          <option value="legacy">legacy（轻量敏捷默认流程）</option>
+                          <option value="standard">standard（标准七阶段研发流水线）</option>
+                          <option value="feature">feature（增量特性开发流水线）</option>
+                          <option value="bugfix">bugfix（缺陷热修快速流水线）</option>
+                          <option value="doc_reverse">doc_reverse（遗留代码逆向规格化）</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div class="vset-row">
+                      <div class="vset-row-meta">
+                        <strong>人工 Code Review 策略</strong>
+                        <small>决定任务产出候选代码后何时暂停等待人工逐行 Diff 审查签字</small>
+                      </div>
+                      <div class="vset-row-ctrl">
+                        <select id="cfg-review-policy">
+                          <option value="off">off（仅独立 AI 审查通过即放行）</option>
+                          <option value="risk">risk（高风险路径或大改动触发人工复核）</option>
+                          <option value="milestone">milestone（里程碑合入前统一复核）</option>
+                          <option value="all">all（每个任务完成后强制人工 Code Review）</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div class="vset-row">
+                      <div class="vset-row-meta">
+                        <strong>文档规范模板体系</strong>
+                        <small>决定 SRS / 架构文档 / 详细设计使用的工程标准格式</small>
+                      </div>
+                      <div class="vset-row-ctrl">
+                        <select id="cfg-doc-profile">
+                          <option value="default">default（arc42 + MADR + EARS 工程规范）</option>
+                          <option value="gbt8567">gbt8567（GB/T 8567 国标软件工程文档）</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div class="vset-row">
+                      <div class="vset-row-meta">
+                        <strong>持续集成 (CI) 提供商</strong>
+                        <small>里程碑集成后触发外部或内置 Gitea Actions 流水线构建测试</small>
+                      </div>
+                      <div class="vset-row-ctrl">
+                        <select id="cfg-ci-provider">
+                          <option value="none">none（仅本地/沙箱集成命令校验）</option>
+                          <option value="gitea">gitea（内置 Gitea Actions 流水线）</option>
+                          <option value="gitlab">gitlab（GitLab CI Pipeline）</option>
+                          <option value="jenkins">jenkins（Jenkins Pipeline）</option>
+                          <option value="webhook">webhook（通用 Webhook 外部流水线）</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <footer class="vset-card-foot">
+                    <span class="vset-caption">保存后将同步更新当前项目的流水线策略</span>
+                    <button type="submit" class="btn btn-primary" data-vset-save="1">保存项目流程策略</button>
+                  </footer>
+                </section>
               </div>
+              <button type="button" id="btn-agent-close" class="btn btn-sm hidden">收起</button>
+            </form>
+
+            <!-- 分页 3：治理与研发效能 -->
+            <div class="vset-pane" data-vset-pane="governance" hidden>
+              <div id="governance-panel-mount" class="vset-stack"></div>
             </div>
-            <div id="plan-breakdown" class="stack"></div>
-            <div class="card">
-              <div class="card-head"><h3>原始输入资料切片（inputs/）</h3></div>
-              <div id="slice-list" class="stack"></div>
+
+            <!-- 分页 4：底座与运维诊断 -->
+            <div class="vset-pane" data-vset-pane="diagnostics" hidden>
+              <div id="runtime-panel" class="vset-stack"></div>
             </div>
           </div>
         </section>
@@ -627,13 +987,13 @@
           </div>
           <div id="drawer-subtitle" class="muted" style="font-size:12px"></div>
         </div>
-        <button id="drawer-close" class="btn btn-sm">关闭</button>
+        <button id="drawer-close" type="button" class="btn btn-sm">关闭</button>
       </div>
       <div class="drawer-tabs">
-        <button class="dtab active" data-dtab="trace">实时步骤流</button>
-        <button class="dtab" data-dtab="diff">实时代码改动</button>
-        <button class="dtab" data-dtab="verify">门禁与审查</button>
-        <button class="dtab" data-dtab="prompt">提示词与命令</button>
+        <button class="dtab active" data-dtab="trace">执行步骤流</button>
+        <button class="dtab" data-dtab="diff">代码变更 Diff</button>
+        <button class="dtab" data-dtab="verify">质量门禁与审查</button>
+        <button class="dtab" data-dtab="prompt">上下文提示词</button>
       </div>
       <div id="drawer-body" class="drawer-body"></div>
     </div>

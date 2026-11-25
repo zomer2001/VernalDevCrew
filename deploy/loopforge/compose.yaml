@@ -68,11 +68,29 @@ services:
       GITEA__server__SSH_PORT: ${GITEA_SSH_PORT:-2222}
       GITEA__service__DISABLE_REGISTRATION: "false"
       GITEA__security__INSTALL_LOCK: "true"
+      GITEA__actions__ENABLED: "true"
+      GITEA__actions__DEFAULT_ACTIONS_URL: "self"
     ports:
       - "${GITEA_BIND:-127.0.0.1}:${GITEA_HTTP_PORT:-3000}:3000"
       - "${GITEA_BIND:-127.0.0.1}:${GITEA_SSH_PORT:-2222}:22"
     volumes:
       - gitea-data:/data
+    restart: unless-stopped
+
+  gitea-runner:
+    profiles: ["ci"]
+    image: ${GITEA_RUNNER_IMAGE:-gitea/act_runner:0.2.11}
+    environment:
+      GITEA_INSTANCE_URL: http://gitea:3000
+      GITEA_RUNNER_REGISTRATION_TOKEN_FILE: /run/vernal-pool/act-runner-token
+      GITEA_RUNNER_NAME: vernal-ci-runner
+      GITEA_RUNNER_LABELS: vernal-sandbox:docker://${VERNAL_SANDBOX_IMAGE:-autodev-runtime-sandbox:latest}
+    volumes:
+      - ./.runner/pool:/run/vernal-pool
+      - ${LOOPFORGE_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - gitea-runner-data:/data
+    depends_on:
+      - gitea
     restart: unless-stopped
 
   vernal:
@@ -85,7 +103,13 @@ services:
     environment:
       VERNAL_RUNNER_BOOTSTRAP_SECRET: ${VERNAL_RUNNER_BOOTSTRAP_SECRET:-}
       VERNAL_LOOPFORGE_URL: http://loopforge:8080
+      AGENTFLOW_TOKEN: ${AGENTFLOW_TOKEN:-}
+      VERNAL_REQUIRE_AUTH: ${VERNAL_REQUIRE_AUTH:-}
       VERNAL_POOL_DIR: /run/vernal-pool
+      VERNAL_TRUSTED_RUNNERS: ${VERNAL_TRUSTED_RUNNERS:-}
+      VERNAL_INTERNAL_MODEL_ALLOWLIST: ${VERNAL_INTERNAL_MODEL_ALLOWLIST:-}
+      VERNAL_ROLE_MCP: ${VERNAL_ROLE_MCP:-}
+      VERNAL_LEGACY_POOL_MODEL: ${VERNAL_LEGACY_POOL_MODEL:-1}
       VERNAL_POOL_ADMINS: ${VERNAL_POOL_ADMINS:-}
       VERNAL_SANDBOX_IMAGE: ${VERNAL_SANDBOX_IMAGE:-autodev-runtime-sandbox:latest}
       VERNAL_SANDBOX_URL: http://vernal:8787
@@ -116,3 +140,4 @@ volumes:
   mysql-data:
   platform-data:
   gitea-data:
+  gitea-runner-data:

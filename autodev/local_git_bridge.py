@@ -50,10 +50,13 @@ def password_path() -> Path:
 
 
 def validate_https_remote(url: str) -> None:
+    from autodev.security import validate_external_git_url
+
     parts = urlsplit(url)
     if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
             or parts.query or parts.fragment or any(c.isspace() for c in url)):
         raise ValueError("请输入无内嵌凭据的 HTTPS 仓库地址")
+    validate_external_git_url(url)
 
 
 def remote_git(cwd: Path, url: str, username: str, token: str, args: list[str]) -> str:
@@ -110,10 +113,14 @@ def push_remote_branch(root: Path, url: str, username: str, token: str, ref: str
 
 
 def publish_private_remote(root: Path, access_id: str, branch: str, commit: str, expected="") -> None:
+    publish_private_ref(root, access_id, "refs/heads/" + branch, commit, expected)
+
+
+def publish_private_ref(root: Path, access_id: str, ref: str, commit: str, expected="") -> None:
     if not re.fullmatch(r"[a-f0-9]{32}", access_id):
         raise gitops.GitError("该项目的仓库凭据记录无效")
     access = json.loads((public_pool.directory() / "remote-access" / f"{access_id}.json").read_text())
-    push_remote_branch(root, access["url"], access["username"], access["token"], f"refs/heads/{branch}", commit, expected)
+    push_remote_branch(root, access["url"], access["username"], access["token"], ref, commit, expected)
 
 
 def urls(project: str) -> tuple[str, str]:
@@ -134,6 +141,10 @@ def mirror_git(workspace: Path, args: list[str]) -> str:
     return p.stdout.strip()
 
 
+class MirrorOwnershipConflict(ValueError):
+    pass
+
+
 async def ensure_private_repo(project: str, marker: str = "") -> None:
     base = os.getenv("VERNAL_GITEA_URL", "http://127.0.0.1:3000").rstrip("/")
     async with httpx.AsyncClient(base_url=base, auth=("vernal-local", password_path().read_text().strip()),
@@ -148,7 +159,7 @@ async def ensure_private_repo(project: str, marker: str = "") -> None:
         if check.status_code != 200 or check.json().get("private") is not True:
             raise ValueError("Gitea 私有仓库不可用")
         if marker and check.json().get("description") != marker:
-            raise ValueError("Gitea 任务仓库名称已被占用")
+            raise MirrorOwnershipConflict("Gitea 任务仓库名称已被占用")
 
 
 async def prepare(project: str, workspace: Path, branch: str) -> str:
@@ -172,20 +183,87 @@ def deliver(project: str, workspace: Path, branch: str, commit: str, expected=""
         raise gitops.GitError("Gitea 返回的交付分支与本次里程碑不一致")
 
 
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def mirror_lock(db, key):
+    import fcntl
+    folder = db.path.parent / "mirror-locks"
+    folder.mkdir(exist_ok=True)
+    with (folder / key).open("a") as guard:
+        while True:
+            try:
+                fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                await asyncio.sleep(0.1)
+        yield
+
+
 async def task_remote(workspace, settings, db, task_id: str, snapshot: str) -> str:
     from autodev.loopforge.bridge import sign_context_sig
 
     project = settings.loopforge_project_id
     key = hashlib.sha256(f"{project}:{task_id}".encode()).hexdigest()
-    repo = "vernal-task-" + key[:32]
-    await ensure_private_repo(repo, marker=f"Vernal task {key}")
-    upstream, _ = urls(repo)
-    await asyncio.to_thread(push_once, workspace, upstream, snapshot, f"refs/heads/base/{snapshot}")
-    db.meta_set(f"gitea_task:{repo}", task_id)
-    expires = int(time.time()) + max(3600, settings.agent_timeout_sec + 900)
-    sig = sign_context_sig(settings.project_signing_key(), project, f"gitea:{repo}:{expires}")
-    base = settings.vernal_public_url.rstrip("/")
-    return f"{base}/vernal-api/git-bridge/{project}/{repo}/{expires}/{sig}"
+    async with mirror_lock(db,key):
+        repo = db.meta_get(f"task_mirror:{task_id}") or "vernal-task-" + key[:32]
+        try:
+            await ensure_private_repo(repo, marker=f"Vernal task {key}")
+        except MirrorOwnershipConflict:
+            if db.meta_get(f"gitea_task:{repo}") != task_id or repo.endswith("-v2"):
+                raise
+            # Older unmarked repositories may contain human data. Leave their existing leases intact.
+            repo += "-v2"
+            await ensure_private_repo(repo, marker=f"Vernal task {key}")
+        db.meta_set(f"task_mirror:{task_id}", repo)
+        upstream, _ = urls(repo)
+        await asyncio.to_thread(push_once, workspace, upstream, snapshot, f"refs/heads/base/{snapshot}")
+        db.meta_set(f"gitea_task:{repo}", task_id)
+        expires = int(time.time()) + max(3600, settings.agent_timeout_sec + 900)
+        db.meta_set(f"gitea_expiry:{repo}", str(expires))
+        sig = sign_context_sig(settings.project_signing_key(), project, f"gitea:{repo}:{expires}")
+        base = settings.vernal_public_url.rstrip("/")
+        return f"{base}/vernal-api/git-bridge/{project}/{repo}/{expires}/{sig}"
+
+
+async def collect_task_mirrors(engine):
+    if engine.db.meta_get("gitea_mirror") != "1":
+        return
+    db = engine.db
+    project = engine.settings.loopforge_project_id
+    base = os.environ.get("VERNAL_GITEA_URL", "http://127.0.0.1:3000").rstrip("/")
+    for task in db.list_tasks():
+        if task.status not in ("MERGED", "CANCELLED"):
+            continue
+        key = hashlib.sha256(f"{project}:{task.task_id}".encode()).hexdigest()
+        repo = db.meta_get(f"task_mirror:{task.task_id}") or "vernal-task-" + key[:32]
+        if db.meta_get(f"gitea_task:{repo}") != task.task_id:
+            continue
+        expiry = db.meta_get(f"gitea_expiry:{repo}")
+        if not expiry:
+            db.meta_set(f"gitea_expiry:{repo}", str(int(time.time()) + max(3600, engine.settings.agent_timeout_sec + 900)))
+            continue
+        async with mirror_lock(db,key):
+            expiry = db.meta_get(f"gitea_expiry:{repo}")
+            if not expiry or db.meta_get(f"gitea_task:{repo}") != task.task_id:
+                continue
+            if int(expiry) >= time.time():
+                continue
+            async with httpx.AsyncClient(base_url=base, auth=("vernal-local", password_path().read_text().strip()), trust_env=False) as client:
+                route = "/api/v1/repos/vernal-local/" + repo
+                info = await client.get(route)
+                if info.status_code != 404:
+                    info.raise_for_status()
+                    if info.json().get("description") != "Vernal task " + key or info.json().get("private") is not True:
+                        continue
+                    # A renewed execution or lease supersedes this collection pass.
+                    if db.get_task(task.task_id).status not in ("MERGED","CANCELLED") or db.meta_get(f"gitea_expiry:{repo}") != expiry:
+                        continue
+                    result = await client.delete(route)
+                    if result.status_code != 404:
+                        result.raise_for_status()
+                db.meta_set(f"gitea_task:{repo}", "")
 
 
 def restore_command(remote: str, snapshot: str) -> str:
@@ -206,7 +284,7 @@ async def relay(request, project: str, repo: str, expires: int, sig: str, operat
     from autodev.loopforge.bridge import verify_context_sig
 
     if (project != engine.settings.loopforge_project_id or expires < time.time()
-            or not verify_context_sig(engine.settings.project_signing_key(), project, f"gitea:{repo}:{expires}", sig)
+            or not any(verify_context_sig(key, project, f"gitea:{repo}:{expires}", sig) for key in engine.settings.verification_keys())
             or not engine.db.meta_get(f"gitea_task:{repo}")):
         raise HTTPException(403, "Git 任务仓库票据无效或过期")
     allowed = ("git-upload-pack", "git-receive-pack")

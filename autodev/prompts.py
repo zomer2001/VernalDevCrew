@@ -174,7 +174,15 @@ def _decisions_block(decisions: list[dict] | None) -> str:
 
 
 def build_coder_prompt(
-    task: Task, slices: list[DocSlice], contracts: str, settings: Settings, decisions: list[dict] | None = None
+    task: Task,
+    slices: list[DocSlice],
+    contracts: str,
+    settings: Settings,
+    decisions: list[dict] | None = None,
+    *,
+    ws_root: Path | None = None,
+    source_root: Path | None = None,
+    db=None,
 ) -> str:
     protected = ", ".join(settings.protected_paths)
     role_guidance = {
@@ -198,13 +206,16 @@ def build_coder_prompt(
         task.role,
         f"你是【{task.squad or task.module} · 模块开发工程师 (coder)】。严格在本组授权目录内开发；{protected} 是冻结契约，只读不得修改。",
     )
+    from autodev.context_bundle import build_task_input_bundle
+    bundle = build_task_input_bundle(ws_root, db, task, decisions=decisions, source_root=source_root)
+
     return f"""你是多智能体研发团队中的专职工程工位，在独立工作目录完成原子任务。交付方式为 {settings.collaboration_mode}，当前目录包含本任务的输入版本。
 
-{_decisions_block(decisions)}{_task_header(task)}
+{_task_header(task)}
 ## 岗位职责说明
 
 {role_guidance}
-
+{bundle}
 ## 上游契约（{protected}）
 
 {contracts}
@@ -262,15 +273,30 @@ def build_fallback_context(diffstat: str, feedback: str, steer_note: str | None)
 # ---------------- 审查 ----------------
 
 def build_review_prompt(
-    task: Task, slices: list[DocSlice], verify_summary: str, diff: str, decisions: list[dict] | None = None
+    task: Task,
+    slices: list[DocSlice],
+    verify_summary: str,
+    diff: str,
+    decisions: list[dict] | None = None,
+    *,
+    ws_root: Path | None = None,
+    source_root: Path | None = None,
 ) -> str:
-    criteria = "\n".join(f"{i}. {c}" for i, c in enumerate(task.acceptance_criteria, 1))
+    extra_criteria = list(task.acceptance_criteria)
+    if task.design_refs:
+        extra_criteria.append(f"实现符合详细设计 {', '.join(task.design_refs)}")
+    if task.requirement_ids:
+        extra_criteria.append(f"新增或更新测试覆盖需求 {', '.join(task.requirement_ids)}")
+    criteria = "\n".join(f"{i}. {c}" for i, c in enumerate(extra_criteria, 1))
+    from autodev.context_bundle import build_candidate_review_bundle
+    review_context = build_candidate_review_bundle(ws_root, task, diff, source_root=source_root)
+
     return f"""你是独立代码审查员，处于只读模式。请判断任务分支上的改动是否**真正**满足验收标准。当前目录是该任务的工作树，可阅读任何文件。
 
 {_decisions_block(decisions)}## 任务 {task.task_id}：{task.title}（模块 {task.module}，角色 {task.role}）
 
 {task.description}
-
+{review_context}
 ## 验收标准
 
 {criteria}

@@ -227,16 +227,31 @@ def register_project_mapping(
     source_mode: str,
     git_url: str = "",
     branch: str = "",
+    bind_state: str = "READY",
+    last_error: str = "",
+    delivery_target: str = "",
 ) -> None:
-    reg = load_project_registry(workspaces_parent)
-    reg[project_id] = {
-        "root": str(root.resolve()),
-        "source_mode": source_mode,
-        "git_url": git_url,
-        "branch": branch,
-    }
-    rp = _registry_path(workspaces_parent)
-    rp.write_text(json.dumps(reg, ensure_ascii=False, indent=2), "utf-8")
+    import sqlite3
+    from tempfile import NamedTemporaryFile
+    from autodev.governance.audit import platform_db_path_for
+    conn = sqlite3.connect(platform_db_path_for(workspaces_parent), timeout=10)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        reg = load_project_registry(workspaces_parent)
+        reg[project_id] = {
+            "bind_state": bind_state, "last_error": last_error, "delivery_target": delivery_target,
+            "root": str(root.resolve()),
+            "source_mode": source_mode,
+            "git_url": git_url,
+            "branch": branch,
+        }
+        rp = _registry_path(workspaces_parent)
+        with NamedTemporaryFile("w", dir=rp.parent, encoding="utf-8", delete=False) as temp:
+            json.dump(reg, temp, ensure_ascii=False, indent=2)
+        Path(temp.name).replace(rp)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def scan_workspace_source_files_detailed(

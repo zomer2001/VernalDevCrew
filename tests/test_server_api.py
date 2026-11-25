@@ -104,6 +104,7 @@ def test_server_endpoints_and_proxy_injection(tmp_path: Path) -> None:
             assert seen_origins == ["http://127.0.0.1:8090"]
             assert "af_session=signed123" in r_auth.headers.get("set-cookie", "")
 
+            client.cookies.clear()  # Exercise the offline CLI after testing cookie forwarding.
             # 3. Vernal 大脑接口与统一 Diff 渲染
             r = client.post("/vernal-api/ingest")
             assert r.status_code == 200
@@ -197,13 +198,11 @@ def test_runtime_bind_provisions_loopforge_assets_and_project_switch(tmp_path: P
             assert "proj-alpha-vernal-file-sop" in saved_workflows
             assert "proj-alpha-vernal-file-sop" in published
 
-            # 切换顶栏项目 -> 自动初始化并挂载对应工作区 + 自动注入该项目标准资产
+            # A purely native project can be selected without creating a local workspace.
             sw = client.post("/vernal-api/project/select", json={"project_id": "proj-beta", "project_name": "Beta"})
             assert sw.status_code == 200
             assert sw.json()["switched"] is True
-            assert sw.json()["workflow_id"] == "proj-beta-vernal-file-sop"
-            assert (ws_root / "proj-beta" / ".autodev" / "state.db").is_file()
-
-            # 校验远端 LoopForge Run 实时日志可观测转换
+            assert sw.json()["needs_binding"] is True
+            assert not (ws_root / "proj-beta").exists()
             st_beta = client.get("/vernal-api/state").json()
-            assert st_beta["name"] == "Beta"
+            assert st_beta["name"] == "Alpha"

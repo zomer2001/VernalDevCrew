@@ -118,9 +118,11 @@ def test_proxy_login_wish_and_explicit_runtime(tmp_path, monkeypatch):
             token=AsyncMock(return_value={"token":"test-value"})
             monkeypatch.setattr(LoopForgeClient,"create_token_with_cookie",token)
             monkeypatch.setattr(LoopForgeClient,"list_projects",AsyncMock(return_value=[{"id":"orbital"}]))
+            monkeypatch.setattr(LoopForgeClient,"list_projects_with_cookie",AsyncMock(return_value=[{"id":"orbital"}]))
             client.cookies.set("session","test-session")
             assert client.post("/vernal-api/runtime/bind").json()["project_id"]=="orbital"
-            assert "session=test-session" in token.await_args.args[0]
+            token.assert_not_awaited()
+            assert not ws.load_settings().loopforge_token
             assert client.post("/vernal-api/runtime/bind").json()["reused"]
             assert ws.load_settings().collaboration_mode=="files"
             assert ws.load_settings().loopforge_project_id=="orbital"

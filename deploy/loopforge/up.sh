@@ -32,6 +32,7 @@ LOOPFORGE_IMAGE='${IMG}'
 LOOPFORGE_BIND='127.0.0.1'
 GITEA_HTTP_PORT='3000'
 GITEA_SSH_PORT='2222'
+VERNAL_ENABLE_CI='${VERNAL_ENABLE_CI:-0}'
 EOF
   chmod 600 "$ENV_PATH"
   echo "Generated deploy/loopforge/.env"
@@ -49,9 +50,11 @@ if ! docker info >/dev/null 2>&1; then
   fi
 fi
 
+caller_ci="${VERNAL_ENABLE_CI:-}"
 set -a
 source .env
 set +a
+[[ -z "$caller_ci" ]] || export VERNAL_ENABLE_CI="$caller_ci"
 ./build-sandbox.sh || echo "公用池镜像未就绪，本机 Runner 可继续启动" >&2
 if [[ ${VERNAL_OFFLINE:-0} == 1 ]]; then
   docker compose up -d --no-build --pull never

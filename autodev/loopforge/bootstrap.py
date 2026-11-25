@@ -493,6 +493,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
 
     coder["skills"] = _skills("test-driven-development", "systematic-debugging")
     reviewer["skills"] = _skills("security-review")
+    reviewer["prompt"] += "\n审查前先读取运行根目录 vernal-review-context.md，核对真实 Diff 的调用方、工单内的详设与需求标记。"
 
     def _variant(lane: str, name: str, desc: str, skills: list[str], extra: str) -> dict[str, Any]:
         agent = copy.deepcopy(coder)
@@ -537,7 +538,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
             "model": model_id,
             "effort": "high" if exec_id == "codex" else "",
             "rules": [],
-            "skills": [],
+            "skills": _skills("spec-writing"),
             "mcpServers": [],
             "loop": {
                 "enabled": False,
@@ -1005,7 +1006,26 @@ def build_lane_workflows(project_id: str, sandbox_id: str = "local") -> dict[tup
     return out
 
 
-async def ensure_local_git_workflow(client: LoopForgeClient, project_id: str, lane: str) -> str:
+def candidate_upload_url(settings: Settings | None, project_id: str) -> str:
+    """Stable 7-day bucketed signed URL so >48KB candidates spill to Vernal disk instead of MySQL TEXT."""
+    if not settings or not project_id:
+        return ""
+    key = settings.project_signing_key()
+    if not key:
+        return ""
+    import time
+    from urllib.parse import quote
+    from autodev import public_pool
+    from autodev.loopforge.bridge import sign_context_sig
+
+    bucket = 86400 * 7
+    expiry = (int(time.time()) // bucket + 2) * bucket
+    sig = sign_context_sig(key, project_id, f"candidate-upload:{expiry}")
+    base = public_pool.context_url(settings).rstrip("/")
+    return f"{base}/vernal-api/candidate-upload/{quote(project_id, safe='')}/{expiry}/{sig}"
+
+
+async def ensure_local_git_workflow(client: LoopForgeClient, project_id: str, lane: str, *, settings: Settings | None = None) -> str:
     """复用对应泳道的角色、沙箱和评审门禁，交付二进制 Git 补丁。"""
     workflows = {w["id"]: w for w in await client.list_workflows(project_id)}
     template_id = lane_workflow_id(project_id, "files", lane)
@@ -1021,7 +1041,7 @@ async def ensure_local_git_workflow(client: LoopForgeClient, project_id: str, la
     package["script"] = PACKAGE_PATCH
     package["artifactOutputs"] = [{"name": "vernal-patch.json", "path": "vernal-patch.json",
                                    "mediaType": "application/json", "required": True}]
-    await _sync_workflow_template(client, wf, workflows)
+    await _sync_workflow_template(client, wf, workflows, upload_url=candidate_upload_url(settings, project_id))
     return wf["id"]
 
 
@@ -1082,23 +1102,72 @@ def _upgrade_legacy_workflow(existing: dict[str, Any]) -> dict[str, Any] | None:
     return updated if changed else None
 
 
+_NATIVE_METADATA = {"id", "projectId", "version", "revision", "publishedRevision", "status", "createdAt", "updatedAt"}
+
+
+def _managed_digest(asset, fields):
+    import hashlib, json
+    def normalize(value):
+        if isinstance(value, dict):
+            normalized = {k: normalize(v) for k, v in value.items()}
+            return {k: v for k, v in normalized.items() if v not in ("", None, [], {}, False)}
+        if isinstance(value, list):
+            return [normalize(v) for v in value]
+        return value
+    content = {k: asset.get(k) for k in fields}
+    content["description"] = (content.get("description") or "").split("\n[vernal-managed-v", 1)[0]
+    return hashlib.sha256(json.dumps(normalize(content), ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def managed_asset(asset):
+    fields = sorted(set(asset) - _NATIVE_METADATA)
+    sig = _managed_digest(asset, fields)
+    return {**asset, "description": (asset.get("description") or "") + f"\n[vernal-managed-v2:{sig}:{','.join(fields)}]"}
+
+
+def managed_clean(previous, desired):
+    import re
+    stamp = re.search(r"\n\[vernal-managed-v\d+:([a-f0-9]{64}):([\w,]+)\]$", previous.get("description") or "")
+    # Unknown nonempty user-authored fields (e.g. newly enabled hooks) are customizations too.
+    fields = set(stamp[2].split(",")) if stamp else set(desired) - _NATIVE_METADATA
+    if any(previous[name] for name in set(previous) - fields - _NATIVE_METADATA):
+        return False
+    if stamp:
+        return _managed_digest(previous, fields) == stamp[1]
+    return _managed_digest(previous, fields) == _managed_digest(desired, fields)
+
+
 async def _sync_workflow_template(
     client: LoopForgeClient,
     wf: dict[str, Any],
     existing_wfs: dict[str, dict[str, Any]],
+    *,
+    upload_url: str = "",
 ) -> bool:
     """幂等同步单个 SOP：不存在则新建并发布；已存在则仅升级未改动的旧版 Python 脚本节点，保留用户手工定制。"""
     wid = wf["id"]
+    from autodev.context_bundle import attach_native_review_context
+    legacy_template = wf
+    wf = managed_asset(attach_native_review_context(wf, upload_url=upload_url))
     if wid not in existing_wfs:
         saved = await client.put_workflow(wf)
         if saved.get("status") != "published":
             await client.publish_workflow(wid)
         return True
     prev = existing_wfs[wid]
+    if "vernal-managed-v" in (prev.get("description") or ""):
+        if managed_clean(prev, wf) and prev.get("description") != wf["description"]:
+            await client.put_workflow({**wf, "version": prev.get("version", 1), "revision": prev.get("revision", 0)})
+            await client.publish_workflow(wid)
+            return True
+        return False
     upgraded = _upgrade_legacy_workflow(prev)
-    if upgraded is not None or (prev.get("sandboxProfileId") and prev["sandboxProfileId"] != wf.get("sandboxProfileId")):
-        updated = dict(upgraded or prev)
-        updated["sandboxProfileId"] = wf["sandboxProfileId"]
+    if upgraded is None and (managed_clean(prev, legacy_template) or managed_clean(prev, wf)):
+        upgraded = wf
+    if upgraded is not None:
+        updated = {**upgraded, "revision": prev.get("revision", 0)}
+        if "sandboxProfileId" in wf:
+            updated["sandboxProfileId"] = wf["sandboxProfileId"]
         await client.put_workflow(updated)
         await client.publish_workflow(wid)
         return True
@@ -1163,14 +1232,22 @@ async def ensure_vernal_loopforge_assets(
         image = state["sandbox_image"]
         if not re.fullmatch(r"[a-zA-Z0-9./:@_-]+", image):
             raise LoopForgeError("公用沙箱镜像名称无效")
-        image_tag = hashlib.sha256(image.encode()).hexdigest()[:10]
+        import time
+        from autodev.loopforge.bridge import sign_context_sig
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", project_id):
+            raise LoopForgeError("非法原生项目 ID")
+        expiry = (int(time.time()) // 86400 + 7) * 86400
+        proof = sign_context_sig(settings.project_signing_key(), project_id, f"model-sandbox:{expiry}")
+        profile_source = (f"FROM {image}\nENV VERNAL_NATIVE_PROJECT={project_id} VERNAL_NATIVE_EXPIRY={expiry} "
+                          f"VERNAL_NATIVE_PROOF={proof}\n")
+        image_tag = hashlib.sha256(profile_source.encode()).hexdigest()[:10]
         dockerfile_id = f"{project_id}-vernal-image-{image_tag}"
         sandbox_id = f"{project_id}-vernal-docker-{image_tag}"
         existing = next((row for row in sandboxes if row.get("id") == sandbox_id), {})
         if existing.get("driver") != "docker" or existing.get("dockerfileId") != dockerfile_id:
             await client._req("PUT", "/api/dockerfiles", json_body={
                 "id": dockerfile_id, "projectId": project_id, "name": "Vernal 公用沙箱镜像",
-                "content": f"FROM {image}\n",
+                "content": profile_source,
             })
             await client._req("PUT", "/api/sandboxes", json_body={
                 "id": sandbox_id, "projectId": project_id, "name": "Vernal 公用 Docker",
@@ -1197,9 +1274,19 @@ async def ensure_vernal_loopforge_assets(
     for agent in build_vernal_agents(project_id, settings):
         agent["skills"] = [s for s in agent.get("skills", []) if s in registered]
         prev = existing_agents.get(agent["id"])
-        if prev and prev.get("version"):
-            agent["version"] = int(prev["version"])
-        await client.put_agent(agent)
+        import json, os
+        role = agent["id"].removeprefix(project_id + "-vernal-")
+        configured = json.loads(os.environ.get("VERNAL_ROLE_MCP") or "{}").get(role, [])
+        agent["mcpServers"] = [mid for mid in builtin["mcp"] if mid in configured or mid.removeprefix(project_id + "-") in configured]
+        desired = managed_asset(agent)
+        legacy = {**agent, "mcpServers": []}
+        if role.startswith("planner"):
+            legacy["skills"] = []
+        if role == "reviewer":
+            legacy["prompt"] = agent["prompt"].split("\n审查前先读取运行根目录", 1)[0]
+        if not prev or (prev.get("description") != desired["description"] and
+                        (managed_clean(prev, desired) or managed_clean(prev, legacy))):
+            await client.put_agent({**desired, "version": (prev or {}).get("version") or 1})
         agent_ids.append(agent["id"])
 
     # 4. 标准 SOP 与专项泳道（新建并发布；已存在时仅自动升级未改动的旧版 Python 节点，保留用户手工定制）
@@ -1207,9 +1294,10 @@ async def ensure_vernal_loopforge_assets(
     templates = build_lane_workflows(project_id, sandbox_id=sandbox_id)
     workflow_ids: dict[str, str] = {}
     lane_workflows: dict[str, str] = {}
+    upload_url = candidate_upload_url(settings, project_id)
     for (mode_key, lane), wf in templates.items():
         wid = wf["id"]
-        await _sync_workflow_template(client, wf, existing_wfs)
+        await _sync_workflow_template(client, wf, existing_wfs, upload_url=upload_url)
         lane_workflows[f"{mode_key}:{lane}"] = wid
         if lane == "backend":
             workflow_ids[mode_key] = wid
@@ -1251,3 +1339,15 @@ async def ensure_vernal_loopforge_assets(
         "selected_workflow_id": settings.loopforge_workflow_id,
         "default_runner_id": default_runner_id,
     }
+
+
+async def ensure_signoff_workflow(client, project_id):
+    wid = project_id + "-vernal-signoff"
+    existing = {w["id"]:w for w in await client.list_workflows(project_id)}
+    await _sync_workflow_template(client, {
+        "id":wid, "projectId":project_id,"name":"候选代码交付签字","version":1,"status":"published",
+        "sandboxProfileId":"local",
+        "description":"对同一工单开发 SOP 的固定候选与质量证据进行人工签字。",
+        "nodes":[{"id":"signoff","name":"指定审批人签字","type":"approval",
+                  "taskPrompt":"核对上游开发 SOP 的交付候选和审查报告，作出批准或驳回决定。"}], "edges":[]
+    }, existing)

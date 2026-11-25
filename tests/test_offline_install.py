@@ -8,12 +8,19 @@ from pathlib import Path
 
 def test_bundle_cold_install_restart_and_platform_guard(tmp_path):
     root = Path(__file__).resolve().parents[1]
-    source = tmp_path / "checkout"
+    source = tmp_path / "source with spaces/checkout"
     deploy = source / "deploy/loopforge"
     deploy.mkdir(parents=True)
     for name in ("vernal.sh", "pyproject.toml", "Dockerfile"):
         shutil.copy2(root / name, source / name)
-    (source / "autodev").mkdir()
+    (source / "autodev/assets").mkdir(parents=True)
+    shutil.copy2(root / "autodev/__init__.py", source / "autodev/__init__.py")
+    shutil.copytree(
+        root / "autodev/quality",
+        source / "autodev/quality",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    shutil.copytree(root / "autodev/assets/semgrep", source / "autodev/assets/semgrep")
     (source / "autodev/old.py").write_text("# previous source")
     for file in (root / "deploy/loopforge").iterdir():
         if file.suffix == ".sh" or file.name in ("Dockerfile.sandbox", "compose.yaml"):
@@ -45,7 +52,16 @@ elif a[:2] == ["image","inspect"]:
         for key, value in json.loads((base / "gateway-labels").read_text()).items():
             if key in " ".join(a): print(value)
 elif a[0] == "build" and "--label" in a:
+    sys.stdin.buffer.read()
     (base / "sandbox-label").write_text(a[a.index("--label")+1].split("=",1)[1])
+elif a[0] == "run":
+    if os.getenv("FAIL_SANDBOX_PROBE") == "1":
+        print("sandbox probe failed", file=sys.stderr)
+        sys.exit(17)
+    assert "--pull=never" in a
+    assert "--network" in a and a[a.index("--network") + 1] == "none"
+    assert "dsh --version" in a[-1] and "opencode --version" in a[-1] and "vernal-quality --help" in a[-1]
+    print("dsh 0.2.2\nopencode 0.1.0")
 elif a[0] == "create":
     assert "--pull=never" in a
     if "-i" in a:
@@ -89,7 +105,9 @@ elif "list" in a: print("1 vernal-local")
         return subprocess.run([directory / "vernal.sh", *args], cwd=directory,
                               env={**env, **overrides}, check=check, capture_output=True, text=True)
 
-    launch(source, "--pack")
+    pack_res = launch(source, "--pack")
+    assert "公用沙箱构建失败" not in pack_res.stderr
+    assert (deploy / ".runner/pool/image-ready").is_file()
     assert (deploy / ".runner/python-image").read_text().strip() == "public.ecr.aws/docker/library/python:3.12-slim"
     calls = tmp_path / "calls"
     previous = tmp_path / "previous"
@@ -116,22 +134,75 @@ elif "list" in a: print("1 vernal-local")
     calls.write_text("")
     launch(source)
     assert "--build vernal" in calls.read_text() and "commit " not in calls.read_text()
-    target = tmp_path / "install"
+    target = tmp_path / "offline dir with spaces"
     with tarfile.open(source / "dist/vernal-offline-arm64.tar.gz") as bundle:
         entries = bundle.getnames()
         assert "vernal-offline/images.tar" in entries
         assert all(Path(e).name not in {".env", ".data", ".runner", "private-helper.sh"} for e in entries)
         bundle.extractall(target, filter="data")
     target /= "vernal-offline"
+    assert not (target / "autodev").exists()
     calls.write_text("")
     (tmp_path / "loaded").unlink()
     assert launch(target, check=False, PLATFORM="linux/amd64").returncode != 0
     assert not (tmp_path / "loaded").exists()
-    launch(target)
-    launch(target)
+    offline_first = launch(target)
+    offline_second = launch(target)
+    assert "公用沙箱构建失败" not in offline_first.stderr
+    assert "公用沙箱构建失败" not in offline_second.stderr
     history = calls.read_text().splitlines()
     assert sum(line.startswith("image load ") for line in history) == 1
     assert not any(line.startswith(("pull ", "build ")) for line in history)
+    probe_runs = [
+        line for line in history
+        if line.startswith("run ") and "dsh --version" in line and "opencode --version" in line and "vernal-quality --help" in line
+    ]
+    assert len(probe_runs) >= 2
+    image_ready = target / "deploy/loopforge/.runner/pool/image-ready"
+    assert image_ready.is_file() and "dsh 0.2.2" in image_ready.read_text()
     starts = [line for line in history if " up -d" in line]
     assert any(line.endswith("vernal") for line in starts)
     assert all("--no-build" in line and "--pull never" in line for line in starts)
+
+    # 无 autodev 源码且目录名含空格时，单独执行 VERNAL_OFFLINE=1 build-sandbox.sh 必须探测成功并落地 image-ready；真实探测失败则原样报错
+    image_ready.unlink()
+    calls.write_text("")
+    standalone_ok = subprocess.run(
+        [target / "deploy/loopforge/build-sandbox.sh"],
+        cwd=target,
+        env={**env, "VERNAL_OFFLINE": "1"},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert standalone_ok.returncode == 0, standalone_ok.stderr
+    assert any(line.startswith("run ") and "vernal-quality --help" in line for line in calls.read_text().splitlines())
+    assert image_ready.is_file() and image_ready.read_text().strip()
+
+    standalone_fail = subprocess.run(
+        [target / "deploy/loopforge/build-sandbox.sh"],
+        cwd=target,
+        env={**env, "VERNAL_OFFLINE": "1", "FAIL_SANDBOX_PROBE": "1"},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert standalone_fail.returncode == 17
+    assert not image_ready.exists()
+
+    # 源码目录缺失 autodev/quality（quality_fp 为空）且路径含空格时，非离线构建与探测同样不得触发 pipefail 误退出
+    bare_src = tmp_path / "bare dir with spaces/checkout"
+    (bare_src / "deploy/loopforge").mkdir(parents=True)
+    shutil.copy2(root / "deploy/loopforge/build-sandbox.sh", bare_src / "deploy/loopforge/build-sandbox.sh")
+    shutil.copy2(root / "deploy/loopforge/Dockerfile.sandbox", bare_src / "deploy/loopforge/Dockerfile.sandbox")
+    (bare_src / "deploy/loopforge/build-sandbox.sh").chmod(0o755)
+    bare_ok = subprocess.run(
+        [bare_src / "deploy/loopforge/build-sandbox.sh"],
+        cwd=bare_src,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert bare_ok.returncode == 0, bare_ok.stderr
+    assert (bare_src / "deploy/loopforge/.runner/pool/image-ready").is_file()

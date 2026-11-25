@@ -1,0 +1,76 @@
+{
+  "id": "standard",
+  "name": "标准七阶段研发流水线 (Standard)",
+  "description": "覆盖需求规格、架构评审、详细设计、AI 编码、风险人工 Code Review、质量门禁与 CI 持续集成交付。",
+  "review_policy": "risk",
+  "review_checklist": [
+    "实现严格遵循详细设计与 ADR 约束",
+    "跨模块契约 (contracts/) 未被破坏",
+    "包含真实有效的断言测试且无空壳测试",
+    "无硬编码密钥、路径穿越或命令注入风险",
+    "异常分支与错误码处理完备"
+  ],
+  "quality": {
+    "changed_line_coverage": 70.0
+  },
+  "stages": [
+    {
+      "id": "requirements",
+      "name": "需求分析",
+      "enabled": true,
+      "required_artifacts": ["SRS"],
+      "gates": [
+        {"id": "srs_approval", "name": "需求规格说明书 (SRS) 评审", "kind": "human_approval", "scope": "project", "blocking": true}
+      ]
+    },
+    {
+      "id": "architecture",
+      "name": "架构设计",
+      "enabled": true,
+      "required_artifacts": ["ADD"],
+      "gates": [
+        {"id": "architecture_approval", "name": "架构设计与蓝图评审", "kind": "human_approval", "scope": "project", "blocking": true}
+      ]
+    },
+    {
+      "id": "detailed_design",
+      "name": "详细设计",
+      "enabled": true,
+      "required_artifacts": ["DETAILED_DESIGN"],
+      "gates": [
+        {"id": "detailed_design_approval", "name": "模块详细设计与接口测试用例评审", "kind": "human_approval", "scope": "milestone", "blocking": true}
+      ]
+    },
+    {"id": "implementation", "name": "AI 辅助编码", "enabled": true, "required_artifacts": [], "gates": []},
+    {
+      "id": "code_review",
+      "name": "人工与 AI 审查",
+      "enabled": true,
+      "required_artifacts": [],
+      "gates": [
+        {"id": "ai_independent_review", "name": "独立只读 AI 审查", "kind": "ai_review", "scope": "task", "blocking": true},
+        {"id": "human_code_review", "name": "风险人工 Code Review", "kind": "human_approval", "scope": "task", "blocking": true}
+      ]
+    },
+    {
+      "id": "testing",
+      "name": "自动化测试与质量门禁",
+      "enabled": true,
+      "required_artifacts": ["TEST_REPORT"],
+      "gates": [
+        {"id": "task_verify_cmd", "name": "单元测试与契约验证", "kind": "command", "scope": "task", "blocking": true},
+        {"id": "quality_gate", "name": "静态扫描、密钥与假测试检测", "kind": "quality", "scope": "task", "blocking": true}
+      ]
+    },
+    {
+      "id": "integration_delivery",
+      "name": "持续集成与交付",
+      "enabled": true,
+      "required_artifacts": [],
+      "gates": [
+        {"id": "milestone_ci", "name": "里程碑 CI 流水线", "kind": "ci", "scope": "milestone", "blocking": true},
+        {"id": "milestone_merge_approval", "name": "里程碑合入与发布签字", "kind": "human_approval", "scope": "milestone", "blocking": true}
+      ]
+    }
+  ]
+}

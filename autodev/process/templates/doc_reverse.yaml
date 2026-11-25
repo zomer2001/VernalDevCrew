@@ -1,0 +1,28 @@
+{
+  "id": "doc_reverse",
+  "name": "存量代码逆向规格化 (Doc Reverse)",
+  "description": "面向缺少文档的遗留工程：逆向梳理需求规格、架构说明与模块详细设计并经人工基线签字。",
+  "review_policy": "milestone",
+  "review_checklist": [
+    "逆向文档与真实代码目录及公开接口一致",
+    "架构图与时序图语法合法且无虚构模块"
+  ],
+  "quality": {},
+  "stages": [
+    {"id": "requirements", "name": "逆向需求梳理", "enabled": true, "required_artifacts": ["SRS"], "gates": [
+      {"id": "srs_approval", "name": "逆向需求基线确认", "kind": "human_approval", "scope": "project", "blocking": true}
+    ]},
+    {"id": "architecture", "name": "逆向架构还原", "enabled": true, "required_artifacts": ["ADD"], "gates": [
+      {"id": "architecture_approval", "name": "逆向架构图确认", "kind": "human_approval", "scope": "project", "blocking": true}
+    ]},
+    {"id": "detailed_design", "name": "模块设计归档", "enabled": true, "required_artifacts": ["DETAILED_DESIGN"], "gates": [
+      {"id": "detailed_design_approval", "name": "模块接口规格确认", "kind": "human_approval", "scope": "milestone", "blocking": true}
+    ]},
+    {"id": "implementation", "name": "文档补齐", "enabled": true, "required_artifacts": [], "gates": []},
+    {"id": "code_review", "name": "文档审查", "enabled": true, "required_artifacts": [], "gates": []},
+    {"id": "testing", "name": "校验检查", "enabled": true, "required_artifacts": [], "gates": []},
+    {"id": "integration_delivery", "name": "基线归档", "enabled": true, "required_artifacts": [], "gates": [
+      {"id": "milestone_merge_approval", "name": "文档基线归档确认", "kind": "human_approval", "scope": "milestone", "blocking": true}
+    ]}
+  ]
+}

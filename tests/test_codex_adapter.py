@@ -19,12 +19,12 @@ def _make_fake_codex(path: Path, script_body: str) -> str:
 
 
 def test_codex_command_building(tmp_path: Path) -> None:
-    # 默认模型已切换为 gpt-6.2-sol + high
+    # 默认不强塞私有模型名，沿用 CLI 自身默认模型 + high 推理强度
     default_h = CodexHarness(Settings(), "/usr/local/bin/codex")
     default_cmd = default_h.build_readonly_cmd(
         schema_path=tmp_path / "s.json", out_path=tmp_path / "o.txt", cwd=tmp_path, role="planner"
     )
-    assert "gpt-6.2-sol" in default_cmd
+    assert "-m" not in default_cmd
     assert 'model_reasoning_effort="high"' in default_cmd
 
     settings = Settings(

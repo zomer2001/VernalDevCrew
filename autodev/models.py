@@ -17,6 +17,7 @@ class TaskStatus(StrEnum):
     IN_PROGRESS = "IN_PROGRESS"
     VERIFYING = "VERIFYING"
     REVIEWING = "REVIEWING"
+    AWAITING_HUMAN_REVIEW = "AWAITING_HUMAN_REVIEW"
     APPROVED = "APPROVED"
     FUSED = "FUSED"
     CANCELLED = "CANCELLED"
@@ -29,6 +30,8 @@ ACTIVE_TASK_STATUSES = {TaskStatus.IN_PROGRESS, TaskStatus.VERIFYING, TaskStatus
 class MilestoneStatus(StrEnum):
     PENDING = "PENDING"
     INTEGRATING = "INTEGRATING"
+    CI_RUNNING = "CI_RUNNING"
+    PUBLISHING = "PUBLISHING"
     AWAITING_MERGE = "AWAITING_MERGE"
     MERGED = "MERGED"
     FAILED = "FAILED"
@@ -93,7 +96,15 @@ class CouncilConsensus(_Strict):
     spec_markdown: str
 
 
-# ---------- 1B. 产品经理输出：PRD 规格补全 ----------
+# ---------- 1B. 产品经理输出：PRD / SRS 规格补全 ----------
+
+class RequirementItem(_Strict):
+    req_id: str
+    title: str
+    statement: str
+    priority: Literal["P0", "P1", "P2"] = "P1"
+    acceptance: list[str] = []
+
 
 class ProductSpec(_Strict):
     product_vision: str
@@ -102,6 +113,38 @@ class ProductSpec(_Strict):
     error_conventions: list[str]
     global_acceptance_redlines: list[str]
     spec_markdown: str
+    requirements: list[RequirementItem] = []
+    nfrs: list[RequirementItem] = []
+
+
+# ---------- 1C. 架构师 / 研发组输出：详细设计规格（Detailed Design） ----------
+
+class DesignInterface(_Strict):
+    name: str
+    signature: str
+    inputs: str
+    outputs: str
+    errors: list[str]
+    req_ids: list[str]
+
+
+class DesignTestCase(_Strict):
+    tc_id: str
+    req_ids: list[str]
+    kind: Literal["unit", "integration", "e2e"]
+    description: str
+
+
+class DetailedDesign(_Strict):
+    squad_id: str
+    milestone_id: str
+    responsibilities: list[str]
+    interfaces: list[DesignInterface]
+    data_models: list[str]
+    sequences_mermaid: list[str]
+    error_handling: list[str]
+    test_cases: list[DesignTestCase]
+    design_markdown: str
 
 
 # ---------- 2. 经典单次规划 & 原子任务定义 ----------
@@ -133,6 +176,8 @@ class PlanTask(_Strict):
     allowed_paths: list[str]
     verify_cmds: list[str]
     priority: int
+    requirement_ids: list[str] = []
+    design_refs: list[str] = []
 
 
 class ProjectPlan(_Strict):
@@ -232,6 +277,7 @@ SCHEMA_MODELS: dict[str, type[BaseModel]] = {
     "council_opinion": CouncilOpinion,
     "council_consensus": CouncilConsensus,
     "prd_spec": ProductSpec,
+    "detailed_design": DetailedDesign,
     "project_plan": ProjectPlan,
     "project_blueprint": ProjectBlueprint,
     "milestone_wave": MilestoneWavePlan,

@@ -2,9 +2,11 @@
 package_images() (
   set -euo pipefail
   cd "$ROOT/deploy/loopforge"
+  local caller_ci="${VERNAL_ENABLE_CI:-}"
   set -a
   source .env
   set +a
+  [[ -z "$caller_ci" ]] || export VERNAL_ENABLE_CI="$caller_ci"
   local platform arch stage release image actual id service
   platform="$(docker version -f '{{.Server.Os}}/{{.Server.Arch}}')"
   case "$platform" in linux/arm64|linux/amd64) ;; *) echo "不支持的 Docker 平台 $platform" >&2; return 1 ;; esac
@@ -17,17 +19,25 @@ package_images() (
   cp "$ROOT/vernal.sh" "$release/"
   cp compose.yaml Dockerfile.sandbox offline.sh up.sh doctor.sh ensure-gitea.sh build-sandbox.sh \
     start-runner.sh wait-and-bind-runner.sh "$release/deploy/loopforge/"
+  if [[ -f backup.sh ]]; then cp backup.sh "$release/deploy/loopforge/"; fi
   local lock="$release/deploy/loopforge/images.lock"
   local -a images
   images=()
   echo "$platform" > "$lock"
   # Compose may include dependencies with config --images SERVICE. List the entire stack once.
-  local stack
-  stack="$(docker compose --profile full config --images)"
+  local stack expected_cnt=5
+  local runner_img="${GITEA_RUNNER_IMAGE:-gitea/act_runner:0.2.11}"
+  if [[ "${VERNAL_ENABLE_CI:-0}" == "1" ]]; then
+    stack="$(docker compose --profile full --profile ci config --images)"
+    expected_cnt=6
+  else
+    stack="$(docker compose --profile full config --images)"
+  fi
   for image in $stack "${VERNAL_SANDBOX_IMAGE:-autodev-runtime-sandbox:latest}"; do
     service=service
     if [[ "$image" == "${LOOPFORGE_IMAGE:-ghcr.io/tencent/loopforge:0.4.0}" ]]; then service=loopforge; fi
     if [[ "$image" == "${VERNAL_SANDBOX_IMAGE:-autodev-runtime-sandbox:latest}" ]]; then service=sandbox; fi
+    if [[ "${VERNAL_ENABLE_CI:-0}" == "1" && "$image" == "$runner_img" ]]; then service=ci_runner; fi
     # An untagged repository argument to docker save includes all locally tagged versions.
     if [[ "${image##*/}" != *:* && "$image" != *@* ]]; then image="$image:latest"; fi
     actual="$(docker image inspect -f '{{.Os}}/{{.Architecture}} {{.Id}}' "$image")"
@@ -39,7 +49,7 @@ package_images() (
     printf '%s %s %s\n' "$service" "$image" "$id" >> "$lock"
     images+=("$image")
   done
-  if [[ ${#images[@]} != 5 ]]; then echo "未能解析完整镜像清单" >&2; return 1; fi
+  if [[ ${#images[@]} != "$expected_cnt" ]]; then echo "未能解析完整镜像清单" >&2; return 1; fi
   echo "正在导出 ${#images[@]} 个本机镜像，镜像较大时可能需要几分钟"
   docker image save -o "$release/images.tar" "${images[@]}"
   COPYFILE_DISABLE=1 tar -C "$stage" -czf "$stage/release.tar.gz" vernal-offline
@@ -48,7 +58,7 @@ package_images() (
 )
 
 restore_images() {
-  local expected platform service image id current missing=0
+  local expected platform service image id current missing=0 has_ci_runner=0
   local lock="$ROOT/deploy/loopforge/images.lock"
   if ! docker info >/dev/null 2>&1 && command -v colima >/dev/null 2>&1; then colima start; fi
   platform="$(docker version -f '{{.Server.Os}}/{{.Server.Arch}}')"
@@ -68,6 +78,11 @@ restore_images() {
     case "$service" in
       loopforge) export LOOPFORGE_IMAGE="$image" ;;
       sandbox) export VERNAL_SANDBOX_IMAGE="$image" ;;
+      ci_runner)
+        export GITEA_RUNNER_IMAGE="$image"
+        export VERNAL_ENABLE_CI="${VERNAL_ENABLE_CI:-1}"
+        has_ci_runner=1
+        ;;
       service) ;;
       *) echo "离线镜像清单包含未知条目" >&2; return 1 ;;
     esac
@@ -76,7 +91,9 @@ restore_images() {
     current="$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)"
     [[ "$current" == "$id" ]] || missing=1
   done < <(tail -n +2 "$lock")
-  if [[ ${#images[@]} != 5 ]]; then echo "离线镜像清单不完整" >&2; return 1; fi
+  local expected_cnt=5
+  [[ "$has_ci_runner" == "1" ]] && expected_cnt=6
+  if [[ ${#images[@]} != "$expected_cnt" ]]; then echo "离线镜像清单不完整" >&2; return 1; fi
   if [[ "$missing" == 1 ]]; then
     echo "正在从安装包导入镜像"
     docker image load -i "$ROOT/images.tar"

@@ -84,7 +84,8 @@ def test_architecture_council_two_rounds_and_human_interjection(tmp_path: Path) 
         eng.db.close()
 
 
-def test_new_studio_ui_and_runtime_bff_endpoints(tmp_path: Path) -> None:
+def test_new_studio_ui_and_runtime_bff_endpoints(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("VERNAL_LOOPFORGE_URL", "http://127.0.0.1:19999")
     ws = init_workspace(tmp_path / "studio-demo", name="studio-demo")
     (ws.inputs_dir / "arch.md").write_text("# Studio Demo\n\n架构文档。\n", "utf-8")
 
@@ -119,7 +120,7 @@ def test_new_studio_ui_and_runtime_bff_endpoints(tmp_path: Path) -> None:
             # 保存底座配置
             save = client.post(
                 "/vernal-api/runtime/config",
-                json={"runtime_backend": "loopforge", "loopforge_url": "http://127.0.0.1:8090", "loopforge_project_id": "proj-1"},
+                json={"runtime_backend": "loopforge", "loopforge_url": "http://127.0.0.1:19999", "loopforge_project_id": "proj-1"},
             )
             assert save.status_code == 200
             assert eng.settings.runtime_backend == "loopforge"

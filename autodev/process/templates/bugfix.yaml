@@ -1,0 +1,29 @@
+{
+  "id": "bugfix",
+  "name": "缺陷热修快速流水线 (Bugfix)",
+  "description": "面向生产/集成缺陷修复：跳过架构与详细设计门，强制回归测试、质量扫描与人工补丁复核。",
+  "review_policy": "all",
+  "review_checklist": [
+    "包含能稳定复现原缺陷的回归测试",
+    "最小化改动面，未引入无关重构",
+    "密钥扫描与假测试检测通过"
+  ],
+  "quality": {},
+  "stages": [
+    {"id": "requirements", "name": "缺陷定位", "enabled": true, "required_artifacts": [], "gates": []},
+    {"id": "architecture", "name": "修复方案", "enabled": true, "required_artifacts": [], "gates": [
+      {"id": "architecture_approval", "name": "修复计划确认", "kind": "human_approval", "scope": "project", "blocking": true}
+    ]},
+    {"id": "detailed_design", "name": "详细设计", "enabled": false, "required_artifacts": [], "gates": []},
+    {"id": "implementation", "name": "补丁编码", "enabled": true, "required_artifacts": [], "gates": []},
+    {"id": "code_review", "name": "补丁人工审查", "enabled": true, "required_artifacts": [], "gates": [
+      {"id": "human_code_review", "name": "人工补丁审查", "kind": "human_approval", "scope": "task", "blocking": true}
+    ]},
+    {"id": "testing", "name": "回归测试", "enabled": true, "required_artifacts": [], "gates": [
+      {"id": "quality_gate", "name": "质量与测试真实性门禁", "kind": "quality", "scope": "task", "blocking": true}
+    ]},
+    {"id": "integration_delivery", "name": "热修交付", "enabled": true, "required_artifacts": [], "gates": [
+      {"id": "milestone_merge_approval", "name": "热修合入签字", "kind": "human_approval", "scope": "milestone", "blocking": true}
+    ]}
+  ]
+}

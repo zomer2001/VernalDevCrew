@@ -296,12 +296,13 @@ def test_new_project_first_open_does_not_404_and_initializes_cleanly(tmp_path: P
                 json={"project_id": "brand-new", "project_name": "Brand New"},
             )
             assert sel.status_code == 200
-            assert (ws_root / "brand-new" / ".autodev" / "config.toml").exists()
+            assert sel.json()["needs_binding"]
+            assert not (ws_root / "brand-new").exists()
 
             # 再次查询状态：已初始化为 True
             st2 = client.get("/vernal-api/runtime/status", headers={"X-Vernal-Project": "brand-new"})
             assert st2.status_code == 200
-            assert st2.json()["workspace_initialized"] is True
+            assert st2.json()["workspace_initialized"] is False
 
     eng.db.close()
 

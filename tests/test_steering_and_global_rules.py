@@ -76,6 +76,10 @@ def _make_steering_mock_lf(box: dict):
             if wf_id in box["workflows"]:
                 box["workflows"][wf_id]["status"] = "published"
             return httpx.Response(200, json={"status": "published"})
+        if p == "/api/tasks" and m == "GET":
+            return httpx.Response(200, json=[])
+        if p.startswith("/api/issues/") and p.endswith("/runs") and m == "GET":
+            return httpx.Response(200, json=[r for r in box["runs"].values() if r["issueId"] == p.split("/")[3]])
         if p == "/api/issues" and m == "POST":
             body = json.loads(req.content)
             iid = f"iss-{len(box['issues']) + 10}"
@@ -89,6 +93,7 @@ def _make_steering_mock_lf(box: dict):
             run_rec = {
                 "id": rid,
                 "issueId": iid,
+                "executionContext": {"projectId": "proj-s1", "issueId": iid},
                 "status": "running",
                 "workflowSnapshot": wf,
                 "nodes": {"pm_opinion": {"status": "running"}, "arch_opinion": {"status": "running"}, "qa_opinion": {"status": "running"}},
@@ -386,7 +391,7 @@ def test_steering_reject_loop_and_surgical_reopen_preserves_passed_tasks(tmp_pat
             assert r_rej.status_code == 200
             assert r_rej.json()["checkpoint"]["status"] == "RUNNING"
             assert len(box["rejections"]) == 1
-            assert box["rejections"][0]["targetNodeId"] == "director_plan"
+            assert box["rejections"][0]["targetId"] == "director_plan"
             assert box["rejections"][0]["nodeId"] == "human_gate"
 
             # 总监重议后给出精准修订版变更单，再次停在 human_gate
@@ -454,9 +459,10 @@ def test_steering_reject_loop_and_surgical_reopen_preserves_passed_tasks(tmp_pat
             assert box["issues"]["iss-3"]["status"] == "closed"
             assert t4 is not None and t4.depends_on == [] and t4.status == TaskStatus.READY
 
-            # 4) 验证新增任务 T-005 已落库并同步创建了 LoopForge Issue（等待 T-002 完成后解锁，故当前为 BLOCKED）
+            # 新增任务等待依赖解锁，实际派发时创建包含完整输入包的原生 Issue。
             assert t5 is not None and t5.status == TaskStatus.BLOCKED
-            assert t5.loopforge_issue_id in box["issues"]
+            assert t5.loopforge_issue_id is None
+            assert not any(i.get("title","").startswith("[T-005]") for i in box["issues"].values())
 
     eng.db.close()
 
