@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from autodev.assets import load_builtin_skills
 from autodev.docs_center.exporter import inspect_docx_structure, markdown_to_docx_bytes
-from autodev.docs_center.service import generate_detailed_design, save_doc_version
+from autodev.docs_center.service import generate_detailed_design, save_doc_version, sync_standard_docs_from_artifacts
 from autodev.docs_center.templates import render_detailed_design_markdown, render_srs_markdown
 from autodev.docs_center.validator import validate_detailed_design
 from autodev.engine import Engine, init_workspace
@@ -245,12 +245,17 @@ def test_docs_center_versions_diff_design_refs_prompt_injection_and_test_report(
         )
         eng.db.save_plan(plan, max_retries=2)
         eng.set_status(ProjectStatus.APPROVED)
+        sync_standard_docs_from_artifacts(eng)
+        save_doc_version(eng, "ARCHITECTURE.md", "# Order architecture")
+        for stage, gid in (("requirements", "srs_approval"), ("architecture", "architecture_approval")):
+            rec = ensure_gate_record(eng.db, stage_id=stage, gate_id=gid, kind="human_approval", scope_type="project", scope_id="project")
+            decide_gate(eng.db, rec["record_id"], "pass")
 
         # 1. 生成详细设计（第 1 轮校验拦截 -> 第 2 轮通过落盘）
         dd = asyncio.run(generate_detailed_design(eng, "M1", "order"))
         assert arch_calls == 2
         assert dd.interfaces[0].name == "createOrder"
-        assert (ws.root / "docs" / "design" / "order.md").is_file()
+        assert (ws.root / "docs" / "design" / "M1" / "order.md").is_file()
 
         # 2. H3 门禁未通过前阻止 coder 派单；批准后放行并在 coder / reviewer 提示词注入 design_refs 片段
         sched = Scheduler(eng)

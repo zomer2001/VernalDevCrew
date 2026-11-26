@@ -125,8 +125,8 @@ def test_ci_failure_creates_bugfix_round_plus_one_then_success_allows_merge(tmp_
         tpl = load_builtin_template("standard")
         tpl.review_policy = "off"
         for s in tpl.stages:
-            if s.id == "detailed_design":
-                s.enabled = False
+            if s.id in {"requirements", "architecture", "detailed_design"}:
+                s.enabled = False  # These fixtures isolate CI and candidate review.
             if s.id == "testing":
                 s.gates = [g for g in s.gates if g.kind != "quality"]
         save_custom_template(ws, json.dumps(tpl.model_dump(), ensure_ascii=False))
@@ -201,8 +201,8 @@ def test_ci_callback_signature_idempotency_timeout_and_merge_gate_guard(tmp_path
         tpl = load_builtin_template("standard")
         tpl.review_policy = "off"
         for s in tpl.stages:
-            if s.id == "detailed_design":
-                s.enabled = False
+            if s.id in {"requirements", "architecture", "detailed_design"}:
+                s.enabled = False  # These fixtures isolate CI and candidate review.
             if s.id == "testing":
                 s.gates = [g for g in s.gates if g.kind != "quality"]
         save_custom_template(ws, json.dumps(tpl.model_dump(), ensure_ascii=False))

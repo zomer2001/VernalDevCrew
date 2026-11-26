@@ -37,13 +37,14 @@ async function renderDocsCenter(state, onRefresh) {
           (d) =>
             `<button type="button" class="review-file-btn ${d.path === _selectedPath ? "active" : ""}" data-doc-pick="${esc(d.path)}">
               <span>[${esc(d.kind)}] ${esc(d.path.replace(/^docs\//, ""))}</span>
-              <span class="muted">v${d.version}</span>
+              <span class="muted">v${d.version} · ${esc(({APPROVED: "已批准", STALE: "已变更待重审", DRAFT: "草稿"})[d.status] || d.status)}</span>
             </button>`
         )
         .join("")
     : `<div class="muted" style="font-size:12px">尚无已归档规范文档，完成立项或点击「生成详细设计」后自动建档。</div>`;
 
   const activeMs = (state?.milestones || [])[0]?.milestone_id || "M1";
+  if (detail?.readonly) _editing = false;
 
   mount.innerHTML = `
     <div class="card">
@@ -70,7 +71,7 @@ async function renderDocsCenter(state, onRefresh) {
                     <span class="tag" style="margin-left:6px">v${detail.version} · ${esc(detail.author)}</span>
                   </div>
                   <div class="btn-group">
-                    <button type="button" id="btn-doc-edit-toggle" class="btn btn-xs">${_editing ? "取消编辑" : "在线修订"}</button>
+                    ${detail.readonly ? '<span class="tag">只读汇总，请编辑功能规格</span>' : `<button type="button" id="btn-doc-edit-toggle" class="btn btn-xs">${_editing ? "取消编辑" : "在线修订"}</button>`}
                     ${
                       versions.length >= 2
                         ? `<button type="button" id="btn-doc-diff" class="btn btn-xs" data-v-from="${versions[1].version}" data-v-to="${versions[0].version}">对比 v${versions[1].version}..v${versions[0].version}</button>`
@@ -118,7 +119,7 @@ async function renderDocsCenter(state, onRefresh) {
     try {
       await api(`/vernal-api/docs/${_selectedPath}`, {
         method: "PUT",
-        body: JSON.stringify({ content, note, actor: actorName() }),
+        body: JSON.stringify({ content, note, actor: actorName(), expected_sha: detail.content_sha }),
       });
       _editing = false;
       toast("已保存为新文档版本");

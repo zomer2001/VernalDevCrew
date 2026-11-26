@@ -142,32 +142,7 @@
           </nav>
 
           <div class="launcher-body">
-            <!-- 建项前先明确执行路线与额度来源，避免静默继承旧项目或误扣额度 -->
-            <div class="lf-route-box" id="launch-route-box">
-              <div class="lf-route-head">
-                <span class="lf-label">执行路线与额度来源（创建后即生效，不会继承其他项目设置）</span>
-                <span id="launch-route-live-meta" class="muted" style="font-size:12px"></span>
-              </div>
-              <div class="lf-route-grid" id="launch-route-picker" role="radiogroup" aria-label="选择执行路线">
-                <button type="button" class="lf-route-card active" data-route-pool="public_docker" data-route-harness="dsh">
-                  <strong>沙盒 DeepSeek (dsh)</strong>
-                  <span>公用 Docker 隔离 · 公用池额度</span>
-                </button>
-                <button type="button" class="lf-route-card" data-route-pool="public_docker" data-route-harness="opencode">
-                  <strong>沙盒 OpenCode</strong>
-                  <span>公用 Docker 隔离 · 公用池额度</span>
-                </button>
-                <button type="button" class="lf-route-card" data-route-pool="local_runner" data-route-harness="codex">
-                  <strong>我的本机 Codex</strong>
-                  <span>本机 Runner · 本机登录态</span>
-                </button>
-                <button type="button" class="lf-route-card" data-route-pool="auto" data-route-harness="auto">
-                  <strong>智能自动</strong>
-                  <span>优先在线本机，离线回退沙箱</span>
-                </button>
-              </div>
-            </div>
-
+            <label class="lf-field"><span class="lf-label">任务意图</span><select id="launch-intent"><option value="new_system">全新系统</option><option value="feature">增量特性</option><option value="bugfix">缺陷修复</option><option value="refactor">重构加固</option><option value="documentation">逆向文档</option></select></label>
             <form id="form-launch-scratch" class="launcher-pane" data-launch-pane="scratch">
               <div class="lf-row-2">
                 <label class="lf-field">
@@ -205,7 +180,7 @@
               </div>
 
               <footer class="launcher-foot">
-                <label class="check-inline"><input id="launch-scratch-autostart" type="checkbox" /> 创建后立即进入架构评审与蓝图拆解（将开始调用所选模型）</label>
+                <label class="check-inline"><input id="launch-scratch-autostart" type="checkbox" /> 创建后评估需求与必要澄清（将调用所选模型）</label>
                 <button id="btn-submit-scratch" type="submit" class="btn btn-primary btn-lg">创建项目</button>
               </footer>
             </form>
@@ -333,6 +308,31 @@
                 <button id="btn-submit-git" type="submit" class="btn btn-primary btn-lg">克隆并接入</button>
               </footer>
             </form>
+            <!-- 建项前先明确执行路线与额度来源，避免静默继承旧项目或误扣额度 -->
+            <details class="lf-route-box" id="launch-route-box"><summary>执行位置与额度来源</summary>
+              <div class="lf-route-head">
+                <span class="lf-label">执行路线与额度来源（创建后即生效，不会继承其他项目设置）</span>
+                <span id="launch-route-live-meta" class="muted" style="font-size:12px"></span>
+              </div>
+              <div class="lf-route-grid" id="launch-route-picker" role="radiogroup" aria-label="选择执行路线">
+                <button type="button" class="lf-route-card" data-route-pool="public_docker" data-route-harness="dsh">
+                  <strong>沙盒 DeepSeek (dsh)</strong>
+                  <span>公用 Docker 隔离 · 公用池额度</span>
+                </button>
+                <button type="button" class="lf-route-card" data-route-pool="public_docker" data-route-harness="opencode">
+                  <strong>沙盒 OpenCode</strong>
+                  <span>公用 Docker 隔离 · 公用池额度</span>
+                </button>
+                <button type="button" class="lf-route-card active" data-route-pool="local_runner" data-route-harness="auto">
+                  <strong>我的本机执行器</strong>
+                  <span>本机 Runner · 本机登录态</span>
+                </button>
+                <button type="button" class="lf-route-card" data-route-pool="auto" data-route-harness="auto">
+                  <strong>智能自动</strong>
+                  <span>优先在线本机，离线回退沙箱</span>
+                </button>
+              </div>
+            </details>
           </div>
         </section>
       </div>

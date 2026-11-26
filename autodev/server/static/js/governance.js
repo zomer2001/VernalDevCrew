@@ -1,10 +1,19 @@
-import { $, actorName, api, esc, toast } from "./api.js";
+import { $, actorName, api, esc, projectQuerySuffix, toast } from "./api.js";
+
+function refreshTraceExportLinks(host) {
+  for (const link of host.querySelectorAll("[data-trace-export]")) {
+    link.href = `/vernal-api/trace/export?format=${link.dataset.traceExport}${projectQuerySuffix("&")}`;
+  }
+}
 
 function ensureCouncilCodeIntelCard() {
   const councilView = document.getElementById("view-council");
   if (!councilView) return null;
   let host = document.getElementById("codeintel-trace-host");
-  if (host) return host;
+  if (host) {
+    refreshTraceExportLinks(host);
+    return host;
+  }
   host = document.createElement("section");
   host.id = "codeintel-trace-host";
   host.className = "panel";
@@ -17,8 +26,8 @@ function ensureCouncilCodeIntelCard() {
       </div>
       <div class="inline-form" style="gap:8px">
         <button type="button" class="btn btn-sm" id="btn-gen-wiki">生成代码百科与逆向架构</button>
-        <a class="btn btn-sm" href="/vernal-api/trace/export?format=csv" target="_blank" rel="noopener">导出追溯 CSV</a>
-        <a class="btn btn-sm" href="/vernal-api/trace/export?format=docx" target="_blank" rel="noopener">导出追溯 DOCX</a>
+        <a class="btn btn-sm" data-trace-export="csv" download>导出追溯 CSV</a>
+        <a class="btn btn-sm" data-trace-export="docx" download>导出追溯 DOCX</a>
       </div>
     </div>
     <div class="inline-form" style="margin:10px 0;gap:8px">
@@ -28,6 +37,7 @@ function ensureCouncilCodeIntelCard() {
     <div id="ask-codebase-result" class="muted" style="font-size:12px;margin-bottom:10px" hidden></div>
     <div id="trace-matrix-box"></div>
   `;
+  refreshTraceExportLinks(host);
   councilView.appendChild(host);
 
   $("btn-gen-wiki")?.addEventListener("click", async (ev) => {

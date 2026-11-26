@@ -62,6 +62,8 @@ async def get_state(request: Request) -> dict[str, Any]:
     snap = eng.snapshot()
     snap["scheduler_running"] = ctx.is_scheduler_running(slot)
     snap["planning"] = ctx.is_planning(slot)
+    from autodev.speckit.missions import all_missions
+    snap["mission_count"] = len(all_missions(eng))
     snap["recent_events"] = eng.db.events_after(max(0, eng.db.last_event_id() - 120))
     snap["decisions"] = eng.db.list_decisions()
     snap["checkpoints"] = eng.db.list_checkpoints()
@@ -103,6 +105,13 @@ def get_slices(request: Request) -> list[dict[str, Any]]:
 @router.get("/vernal-api/plan")
 def get_plan(request: Request) -> dict[str, Any]:
     eng = get_ctx(request).active_slot(request).engine
+    if eng.db.meta_get("speckit.enabled")=="1":
+        from autodev.speckit.service import current_specs,latest,product_spec
+        plans=[latest(eng,r["feature_id"],"plan") for r in current_specs(eng)]
+        return {"plan":{"summary":eng.db.meta_get("plan_summary", ""),"tasks":[t.to_dict() for t in eng.db.list_tasks() if t.feature_id],
+                        "milestones":[m.to_dict() for m in eng.db.list_milestones()],"modules":[]},
+                "blueprint":None,"prd":product_spec(eng).model_dump(),"squads":eng.db.list_squads(),
+                "markdown":"\n\n".join(r["content_text"] for r in plans if r)}
 
     def _load_json(p):
         if not p.exists():

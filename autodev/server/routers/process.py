@@ -26,6 +26,7 @@ class GateDecisionRequest(BaseModel):
     decision: str
     comment: str = ""
     expected_round: int | None = None
+    expected_sha: str | None = None
     actor: str = "owner"
     evidence: dict[str, Any] = Field(default_factory=dict)
 
@@ -89,6 +90,7 @@ async def api_decide_gate(record_id: int, request: Request, req: GateDecisionReq
             actor=actor,
             comment=req.comment,
             expected_round=req.expected_round,
+            expected_sha=req.expected_sha,
             evidence=req.evidence,
         )
     except PermissionError as exc:

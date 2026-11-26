@@ -43,8 +43,8 @@ def validate_detailed_design(
     """返回校验错误列表；空列表表示通过。"""
     errors: list[str] = []
     reqs = list(known_requirements or [])
-    known_ids = {r.req_id for r in reqs}
-    p0_ids = {r.req_id for r in reqs if r.priority == "P0"}
+    known_ids = {r.identity for r in reqs}
+    p0_ids = {r.identity for r in reqs if r.priority == "P0"}
 
     if not dd.interfaces:
         errors.append("详细设计至少需要定义一个模块接口 (interfaces)")

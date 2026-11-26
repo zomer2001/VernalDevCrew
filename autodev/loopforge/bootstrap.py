@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Any
 
 from autodev.assets import builtin_mcp_templates, load_builtin_skills
@@ -40,7 +41,7 @@ def classify_lane(role: str, allowed_paths: list[str] | None, title: str = "") -
 PACKAGE_FILES_SCRIPT = """\
 import json, os, pathlib
 
-SKIP = {"__pycache__", ".pytest_cache", ".DS_Store", "node_modules", ".git", ".autodev", ".venv", "vernal-files.json", "review-report.md"}
+SKIP = {"__pycache__", ".pytest_cache", ".DS_Store", "node_modules", ".git", ".autodev", ".venv", "vernal-files.json", "review-report.md", "handoff-brief.json"}
 root = pathlib.Path(".").resolve()
 baseline_path = root / ".vernal-baseline.json"
 baseline = {}
@@ -96,45 +97,12 @@ sha="$(git rev-parse HEAD)"
 printf '# Vernal Git 交付记录\\n\\n- Commit: %s\\n- Branch: %s\\n' "$sha" "${AGENTFLOW_WORK_BRANCH:-HEAD}" > "$AGENTFLOW_WORKSPACE/mr-body.md"
 """
 
-VALIDATE_PLAN_JSON_SCRIPT = """\
-import json, pathlib, sys
-
-root = pathlib.Path(".").resolve()
-out_path = root / "vernal-result.json"
-if not out_path.is_file():
-    raise SystemExit("缺少 vernal-result.json：请将满足 JSON Schema 的唯一 JSON 对象写入当前目录的 vernal-result.json")
-
-raw = out_path.read_text("utf-8").strip()
-try:
-    data = json.loads(raw)
-except Exception as exc:
-    raise SystemExit(f"vernal-result.json 不是合法 JSON：{exc}")
-
-if not isinstance(data, dict) or not data:
-    raise SystemExit("vernal-result.json 必须是非空 JSON 对象（object）")
-
-schema_path = root / ".vernal-schema.json"
-if schema_path.is_file():
-    try:
-        schema = json.loads(schema_path.read_text("utf-8"))
-        req = schema.get("required") or []
-        missing = [k for k in req if k not in data]
-        if missing:
-            raise SystemExit(f"vernal-result.json 缺少必填字段：{', '.join(missing)}")
-    except SystemExit:
-        raise
-    except Exception:
-        pass
-
-out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
-print(f"vernal-result.json 校验通过（{len(data)} 个顶层字段）")
-"""
-
+VALIDATE_PLAN_JSON_SCRIPT = (Path(__file__).parents[1] / "speckit" / "validate_output.py").read_text("utf-8")
 
 PACKAGE_FILES_NODE_SCRIPT = """\
 const fs = require("fs");
 const path = require("path");
-const SKIP = new Set(["__pycache__", ".pytest_cache", ".DS_Store", "node_modules", ".git", ".autodev", ".venv", "vernal-files.json", "review-report.md"]);
+const SKIP = new Set(["__pycache__", ".pytest_cache", ".DS_Store", "node_modules", ".git", ".autodev", ".venv", "vernal-files.json", "review-report.md", "handoff-brief.json"]);
 const root = process.cwd();
 let baseline = {};
 if (fs.existsSync(".vernal-baseline.json")) {
@@ -175,35 +143,7 @@ fs.writeFileSync("vernal-files.json", JSON.stringify({ files: outFiles }, null, 
 console.log(`已打包 ${Object.keys(outFiles).length} 个交付文件至 vernal-files.json`);
 """
 
-VALIDATE_PLAN_JSON_NODE_SCRIPT = """\
-const fs = require("fs");
-if (!fs.existsSync("vernal-result.json")) {
-  console.error("缺少 vernal-result.json：请将满足 JSON Schema 的唯一 JSON 对象写入当前目录的 vernal-result.json");
-  process.exit(1);
-}
-let data;
-try { data = JSON.parse(fs.readFileSync("vernal-result.json", "utf8").trim()); } catch (e) {
-  console.error(`vernal-result.json 不是合法 JSON：${e.message}`);
-  process.exit(1);
-}
-if (!data || typeof data !== "object" || Array.isArray(data) || !Object.keys(data).length) {
-  console.error("vernal-result.json 必须是非空 JSON 对象（object）");
-  process.exit(1);
-}
-if (fs.existsSync(".vernal-schema.json")) {
-  try {
-    const schema = JSON.parse(fs.readFileSync(".vernal-schema.json", "utf8"));
-    const missing = (schema.required || []).filter((k) => !(k in data));
-    if (missing.length) {
-      console.error(`vernal-result.json 缺少必填字段：${missing.join(", ")}`);
-      process.exit(1);
-    }
-  } catch {}
-}
-fs.writeFileSync("vernal-result.json", JSON.stringify(data, null, 2), "utf8");
-console.log(`vernal-result.json 校验通过（${Object.keys(data).length} 个顶层字段）`);
-"""
-
+VALIDATE_PLAN_JSON_NODE_SCRIPT = (Path(__file__).parents[1] / "speckit" / "validate_output.cjs").read_text("utf-8")
 
 def _dual_shell_script(py_src: str, node_src: str) -> str:
     return (
@@ -363,6 +303,7 @@ def build_decisions_rule(
     *,
     workflow_ids: list[str] | None = None,
     version: int = 1,
+    constitution: str = "",
 ) -> dict[str, Any]:
     """把项目当前所有生效的评审决定编译为 LoopForge 全局 Rule（global=True），由底座自动注入给所有 SOP 节点与对话角色。"""
     active = [d for d in decisions if str(d.get("status") or "ACTIVE") == "ACTIVE"]
@@ -382,6 +323,8 @@ def build_decisions_rule(
             scope = f"（适用范围：{', '.join(paths)}）" if paths else ""
             lines.append(f"- **[{did}] {title}**{scope}：{rule_txt}")
         body = "\n".join(lines) + "\n"
+    if constitution:
+        body = "# 项目宪章\n\n" + constitution + "\n\n" + body
     return {
         "id": decisions_rule_id(project_id),
         "projectId": project_id,
@@ -401,6 +344,7 @@ async def sync_decisions_rule(
     *,
     workflow_ids: list[str] | None = None,
     version: int = 1,
+    constitution: str = "",
 ) -> dict[str, Any]:
     if workflow_ids is None:
         wfs: list[str] = []
@@ -409,7 +353,7 @@ async def sync_decisions_rule(
                 wfs.append(lane_workflow_id(project_id, mk, ln))
         wfs.append(review_workflow_id(project_id))
         workflow_ids = wfs
-    rule = build_decisions_rule(project_id, decisions, workflow_ids=workflow_ids, version=version)
+    rule = build_decisions_rule(project_id, decisions, workflow_ids=workflow_ids, version=version,constitution=constitution)
     return await client.put_rule(rule)
 
 
@@ -666,7 +610,14 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
         ),
     }
 
-    return [coder, reviewer, frontend, contract, bugfix, planner, planner_pm, planner_qa, rev_pm, rev_arch, rev_qa, rev_director]
+    from autodev.prompts_style import COMMUNICATION_STYLE
+    agents = [coder, reviewer, frontend, contract, bugfix, planner, planner_pm, planner_qa, rev_pm, rev_arch, rev_qa, rev_director]
+    for agent in agents:
+        agent["prompt"] = COMMUNICATION_STYLE + "\n" + agent["prompt"]
+    for agent in [coder,reviewer,frontend,contract,bugfix]:
+        agent["prompt"] += '\n输出四段交接便签到 handoff-brief.json，字段 delivered、integration、boundaries、verification 均为非空中文字符串。该文件为过程产物，不要放入源码交付清单或 Git 提交。未执行验证须明确说明。'
+        agent["artifactOutputs"] = [*agent.get("artifactOutputs",[]),{"name":"handoff-brief.json","path":"handoff-brief.json","mediaType":"application/json","required":False}]
+    return agents
 
 
 def build_vernal_workflows(project_id: str, sandbox_id: str = "local") -> dict[str, dict[str, Any]]:
@@ -813,6 +764,10 @@ def build_vernal_workflows(project_id: str, sandbox_id: str = "local") -> dict[s
         ],
     }
 
+    for workflow in (file_wf,git_wf):
+        for node in workflow["nodes"]:
+            if node["id"] in ("implement","review"):
+                node["artifactOutputs"] = [*node.get("artifactOutputs",[]),{"name":"handoff-brief.json","path":"handoff-brief.json","mediaType":"application/json","required":False}]
     return {"files": file_wf, "git": git_wf}
 
 

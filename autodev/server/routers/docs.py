@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from autodev.docs_center.exporter import markdown_to_docx_bytes
 from autodev.docs_center.service import (
+    DocumentConflictError,
     add_doc_comment,
     diff_doc_versions,
     generate_detailed_design,
@@ -21,6 +22,7 @@ from autodev.docs_center.service import (
     save_doc_version,
     sync_standard_docs_from_artifacts,
 )
+from autodev.docs_center.paths import detailed_design_doc_path
 from autodev.engine import PlanningError
 from autodev.server.deps import effective_actor, get_ctx
 
@@ -31,6 +33,7 @@ class DocSaveRequest(BaseModel):
     content: str
     note: str = ""
     actor: str = "owner"
+    expected_sha: str | None = None
 
 
 class DocCommentRequest(BaseModel):
@@ -45,11 +48,23 @@ class DetailedDesignGenerateRequest(BaseModel):
 
 
 @router.get("/vernal-api/docs")
-async def api_list_docs(request: Request, sync: bool = True) -> list[dict[str, Any]]:
+async def api_list_docs(request: Request, sync: bool = False) -> list[dict[str, Any]]:
     eng = get_ctx(request).active_slot(request).engine
-    if sync:
-        sync_standard_docs_from_artifacts(eng)
     return list_docs(eng)
+
+
+@router.post("/vernal-api/docs/sync")
+async def api_sync_docs(request: Request) -> dict[str, Any]:
+    eng = get_ctx(request).active_slot(request).engine
+    from autodev.governance import check_role_permission
+    try:
+        check_role_permission(eng.db, effective_actor(), ("admin", "architect", "developer"),
+                              project=eng.settings.loopforge_project_id or eng.ws.root.name)
+        return {"written": sync_standard_docs_from_artifacts(eng)}
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/vernal-api/docs/design/generate")
@@ -63,7 +78,7 @@ async def api_generate_detailed_design(request: Request, req: DetailedDesignGene
     try:
         for sq_id in targets:
             await generate_detailed_design(eng, req.milestone_id, sq_id)
-            generated.append(f"docs/design/{sq_id}.md")
+            generated.append(detailed_design_doc_path(req.milestone_id, sq_id))
     except PlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"ok": True, "milestone_id": req.milestone_id, "generated": generated}
@@ -78,7 +93,6 @@ async def api_export_docs(
     classification: str = "内部公开",
 ) -> Response:
     eng = get_ctx(request).active_slot(request).engine
-    sync_standard_docs_from_artifacts(eng)
     all_docs = list_docs(eng)
     wanted = {k.strip().upper() for k in kinds.split(",") if k.strip()}
     matched = [d for d in all_docs if not wanted or d["kind"] in wanted]
@@ -181,6 +195,8 @@ async def api_put_doc(doc_path: str, request: Request, req: DocSaveRequest) -> d
     eng = get_ctx(request).active_slot(request).engine
     actor = effective_actor(req.actor)
     try:
-        return save_doc_version(eng, doc_path, req.content, author=actor, note=req.note)
+        return save_doc_version(eng, doc_path, req.content, author=actor, note=req.note, expected_sha=req.expected_sha)
+    except DocumentConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

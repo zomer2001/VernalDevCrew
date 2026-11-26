@@ -2249,3 +2249,23 @@ html[data-theme="dark"] #vernalStage {
 #vernalStage .vset-row { flex-direction: column; align-items: stretch; gap: 8px; }
 #vernalStage .vset-row-ctrl, #vernalStage .vset-row-ctrl.vset-ctrl-sm { width: 100%; }
 }
+#vernalStage .mission-panel { padding:24px; background:var(--surface); border:1px solid var(--border); border-radius:12px; margin-bottom:20px; }
+#vernalStage .mission-head, #vernalStage .mission-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:16px; flex-wrap:wrap; }
+#vernalStage .mission-head h2 { margin:0; font-size:20px; }
+#vernalStage .mission-panel label { display:block; margin:10px 0 6px; font-weight:500; }
+#vernalStage .mission-panel textarea, #vernalStage .mission-panel input, #vernalStage .mission-panel select { max-width:100%; box-sizing:border-box; }
+#vernalStage .mission-panel textarea { width:100%; resize:vertical; }
+#vernalStage .mission-panel > select, #vernalStage .mission-panel > textarea { margin-bottom:12px; }
+#vernalStage .mission-status { padding:10px 0; color:var(--primary); font-weight:600; }
+#vernalStage .mission-question { padding:16px 0; border-top:1px solid var(--border); }
+#vernalStage .mission-question select, #vernalStage .mission-question input { width:100%; }
+#vernalStage .mission-document { white-space:pre-wrap; overflow-wrap:anywhere; max-height:400px; overflow:auto; font:inherit; padding:12px 0; }
+#vernalStage .mission-panel details, #vernalStage #missions-advanced { padding:12px 0; }
+#vernalStage #missions-advanced > summary { cursor:pointer; color:var(--muted); }
+#vernalStage #project-launcher .lf-route-box { margin-top:16px; }
+#vernalStage #project-launcher .lf-route-box > summary { cursor:pointer; padding:8px 0; }
+@media (max-width:640px) {
+#vernalStage .mission-panel { padding:16px; }
+#vernalStage .mission-toolbar { align-items:stretch; }
+#vernalStage .mission-toolbar label { width:100%; }
+}

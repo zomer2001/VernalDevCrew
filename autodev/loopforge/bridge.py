@@ -17,7 +17,7 @@ from autodev.harnesses.base import Usage
 from autodev.loopforge.bootstrap import classify_lane, ensure_local_git_workflow, ensure_vernal_loopforge_assets, lane_workflow_id
 from autodev.loopforge.client import LoopForgeClient, LoopForgeError
 from autodev.models import TaskStatus
-from autodev.prompts import FILE_DELIVERY_STAGES
+from autodev.loopforge.protocol import FILE_DELIVERY_STAGES
 
 
 _RESTORE_PY_SCRIPT = (
@@ -401,8 +401,13 @@ class LoopForgeBridge:
         """幂等确保 LoopForge 项目、Vernal 标准角色、规则与交付 SOP 已全部就绪。"""
         pid = await self.ensure_project()
         try:
-            return await ensure_vernal_loopforge_assets(self.client, pid, self.settings)
+            result = await ensure_vernal_loopforge_assets(self.client, pid, self.settings)
+            from autodev.speckit.service import sync_rule
+            await sync_rule(self,self.client,pid)
+            return result
         except LoopForgeError as exc:
+            if self.db.meta_get("speckit.enabled") == "1":
+                raise
             self.db.add_event(
                 "loopforge.assets_warning",
                 f"装配标准角色/SOP 跳过或降级（将沿用项目默认 SOP）：{exc}",
@@ -490,6 +495,8 @@ class LoopForgeBridge:
                 return False, str(exc)
 
         from autodev.context_bundle import build_task_input_bundle
+        from autodev.speckit.service import sync_rule
+        await sync_rule(self,self.client,self.settings.loopforge_project_id)
         from pathlib import Path
         source_root = Path(task.worktree_path) if task.worktree_path else None
         try:
@@ -555,6 +562,12 @@ class LoopForgeBridge:
         receipt, fresh = reserve(self.db, task.task_id, expected_exec_seq or task.exec_seq,
                                  expected_attempt or task.retry_count + 1, self.settings.selected_pool,
                                  str(self.settings.native_executor_user_id or "deployment-service"), task.loopforge_issue_id, task.loopforge_run_id)
+        if task.feature_id:
+            from autodev.speckit.compiler import assert_package_current
+            from autodev.loopforge.dispatch import bind_baseline
+            package = assert_package_current(self.db, task)
+            bind_baseline(self.db,receipt,{"spec_sha":package.spec_sha,"contract_sha":package.contract_sha,
+                                         "compiled_task_hash":package.compiled_task_hash,"asset_versions":package.asset_versions})
         if fresh:
             self.db.meta_set(f"signoff-policy:{receipt['dispatch_id']}", json.dumps(
                 [self.settings.native_executor_user_id, self.settings.native_approver_user_id]))
@@ -727,6 +740,26 @@ class LoopForgeBridge:
             on_progress=_on_progress,
             on_auto_passed=_on_auto_passed,
         )
+        if ok and task.feature_id:
+            from autodev.speckit.compiler import assert_package_current
+            assert_package_current(self.db,self.db.get_task(task.task_id))
+            from autodev.models import HandoffBrief
+            from autodev.prompts_style import validate_public_text
+            briefs = {}
+            try:
+                for node in ("implement","review"):
+                    raw = await dispatch_client.named_artifact(_run,"handoff-brief.json",node_id=node)
+                    if not raw:
+                        raise ValueError("缺少开发或审查节点的交接便签")
+                    brief = HandoffBrief.model_validate_json(raw)
+                    for value in brief.model_dump().values():
+                        validate_public_text(value)
+                    briefs[node]=brief.model_dump()
+            except (ValueError,LoopForgeError) as exc:
+                record(self.db,receipt,"FAILED")
+                self.db.add_event("speckit.handoff_invalid",str(exc),task_id=task.task_id,actor="VernalBridge")
+                return False,"开发或审查交接便签缺失或格式无效，请检查本次运行产物"
+            self.db.update_task(task.task_id,handoff_brief_json=json.dumps(briefs,ensure_ascii=False))
         if _run.get("status") in ("succeeded", "failed", "cancelled", "completed"):
             record(self.db, receipt, "FINISHED" if ok else "FAILED")
         return ok, msg

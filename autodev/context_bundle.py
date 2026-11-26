@@ -6,6 +6,21 @@ from pathlib import Path
 
 
 def build_task_input_bundle(ws, db, task, *, decisions=None, source_root=None, files=None):
+    specification = ""
+    if db is not None and db.meta_get("speckit.enabled") == "1":
+        from autodev.speckit.compiler import assert_package_current
+        assert_package_current(db,task)
+    if db is not None and getattr(task,"feature_id",""):
+        from autodev.speckit.compiler import assert_package_current
+        package = assert_package_current(db,task)
+        row = db._query("SELECT d.content_text FROM spec_revisions r JOIN doc_versions d ON d.id=r.content_version_id WHERE r.rev_id=?",
+                        (package.spec_rev_id,))[0]
+        specification = "\n## 已批准的功能规格\n" + row["content_text"]
+        for kind,feature in (("constitution","project"),("plan",task.feature_id)):
+            source=db._query("SELECT d.content_text FROM spec_revisions r JOIN doc_versions d ON d.id=r.content_version_id "
+                             "WHERE r.feature_id=? AND r.source_kind=? ORDER BY r.rev_no DESC LIMIT 1",(feature,kind))[0]
+            specification += "\n## " + ("项目宪章" if kind == "constitution" else "技术方案") + "\n" + source["content_text"]
+        specification += "\n<details><summary>版本诊断</summary>\n" + package.model_dump_json() + "\n</details>\n"
     ws_root = ws if isinstance(ws, Path) else getattr(ws, "root", None)
     if decisions is None and db is not None:
         decisions = db.list_decisions(active_only=True)
@@ -25,7 +40,7 @@ def build_task_input_bundle(ws, db, task, *, decisions=None, source_root=None, f
     if task.design_refs or task.requirement_ids:
         from autodev.docs_center.service import resolve_design_refs_snippet
 
-        snippet = resolve_design_refs_snippet(ws_root, task.design_refs) if (ws_root and task.design_refs) else ""
+        snippet = resolve_design_refs_snippet(ws_root, task.design_refs, milestone_id=task.milestone_id) if (ws_root and task.design_refs) else ""
         req_line = f"- **关联需求编号**：{', '.join(task.requirement_ids)}（编写测试时请用 `@pytest.mark.req(\"REQ-xxx\")` 或注释标注对应需求 ID）\n" if task.requirement_ids else ""
         ref_line = f"- **关联详细设计引用**：{', '.join(task.design_refs)}\n" if task.design_refs else ""
         design_block = f"\n## 关联需求与详细设计约束\n\n{req_line}{ref_line}{snippet}\n"
@@ -41,7 +56,7 @@ def build_task_input_bundle(ws, db, task, *, decisions=None, source_root=None, f
 
     from autodev.prompts import _decisions_block
     body = ("允许修改路径：" + ", ".join(task.allowed_paths) + "\n验收标准：\n" +
-            "\n".join(task.acceptance_criteria) + design_block + repomap_block + _decisions_block(decisions))
+            "\n".join(task.acceptance_criteria) + specification + design_block + repomap_block + _decisions_block(decisions))
     digest = hashlib.sha256(body.encode()).hexdigest()
     return f"\n## Vernal Task Input v1 · {digest}\n{body}\n"
 
@@ -51,7 +66,7 @@ def build_candidate_review_bundle(ws_root, task, diff, *, source_root=None):
     if ws_root and task.design_refs:
         from autodev.docs_center.service import resolve_design_refs_snippet
 
-        snip = resolve_design_refs_snippet(ws_root, task.design_refs)
+        snip = resolve_design_refs_snippet(ws_root, task.design_refs, milestone_id=task.milestone_id)
         if snip:
             design_sec = f"\n## 详细设计对照片段\n\n{snip}\n"
 

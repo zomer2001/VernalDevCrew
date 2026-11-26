@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "speckit_version": "1.4.4",
+  "upstream_repository": "https://github.com/github/spec-kit",
+  "upstream_commit": "c8133f463a586879e3af6dfd2864beb8995a8764",
+  "upstream_tag": "v1.4.4",
+  "files": {
+    "upstream/v1.4.4/templates/constitution-template.md": "ce7549540fa45543cca797a150201d868e64495fdff39dc38246fb17bd4024b3",
+    "upstream/v1.4.4/templates/spec-template.md": "3945437fc35cd30a5b2bf7beea680337c3516826d3efa5a6b92c4a7eca1ba28e",
+    "upstream/v1.4.4/templates/plan-template.md": "dfba43da2b2a207ff8c177a0fba03af074fd45e261696b4b64172041fad2e992",
+    "upstream/v1.4.4/templates/tasks-template.md": "1e448e9153462e8c5b5a55231a54c756d870a82950d4dd9425a2bf5b7008a0d9",
+    "upstream/v1.4.4/templates/checklist-template.md": "c65b7f10aa9a965ea9c7f4e879d4ab0240665473731c5e9e638c4acb3ca9afc4",
+    "upstream/v1.4.4/templates/commands/constitution.md": "a915ba6ae5fdbd499c143204eab3888b95a0ff0656e2c16b40282375acb5902c",
+    "upstream/v1.4.4/templates/commands/specify.md": "e3e7595ef13e1f05fd8dd72f794f1f46fe6074beb6abb0602c6ab036312c5a02",
+    "upstream/v1.4.4/templates/commands/clarify.md": "5260d798c5671deb9ac7e59d6ffdb69b30c26fb28878d3cc25e30fb71cacc734",
+    "upstream/v1.4.4/templates/commands/plan.md": "206a0386d20b3eed4c087a4d9de247a3e7b2b59348bf3c801fc74f63ca2726a5",
+    "upstream/v1.4.4/templates/commands/tasks.md": "01220df769d94449a70842dba91a16d824520b9f7bf483f597dd1a378b036866",
+    "upstream/v1.4.4/templates/commands/analyze.md": "bfd5a822d517f53d155e037535475bf94a6c6a7eeef801503b010832674ca686",
+    "upstream/v1.4.4/templates/commands/checklist.md": "1192784f378fb977b408b72ca1bfb8fc55e129519f3f44bc5d0a7e152c480654",
+    "upstream/v1.4.4/LICENSE": "2510b446bc1f0cf9702453075d20cd88631e20e5642658edb7325d9c1eb534f7",
+    "presets/vernal-core.json": "69589a48a05a6e34f638cf26e6c7cad981e0e9c6dab33296b8fe32e79cf8ffa9",
+    "presets/vernal-lite.json": "e91b9294a0248b494fc7e1b744c2b172f3768c69f997b448c128d20860a2e85d"
+  },
+  "presets": {
+    "vernal-core": {
+      "version": "1.0.0",
+      "path": "presets/vernal-core.json",
+      "mode": "append"
+    },
+    "vernal-lite": {
+      "version": "1.0.0",
+      "path": "presets/vernal-lite.json",
+      "mode": "append"
+    }
+  }
+}

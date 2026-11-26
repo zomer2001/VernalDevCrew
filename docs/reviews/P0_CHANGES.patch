@@ -1,0 +1,2529 @@
+--- a/VERNAL_STANDARD_DELIVERY_SPEC.md
++++ b/VERNAL_STANDARD_DELIVERY_SPEC.md
+@@ -1,8 +1,10 @@
+ # Vernal 标准化 AI 软件交付体系架构与实施开发方案书
+ 
+-> **文档状态**：Formal Architecture & Implementation Spec v1.0（2026-11-26）  
++> **文档状态**：Formal Architecture & Implementation Spec v1.1（2026-11-26）  
+ > **适用代码库**：`vernal-loopforge`（基于上游 `LoopForge 0.4.0` 执行主干 + `Vernal` 编排治理延伸层 + `Spec Kit` 规格协议层 + `Superpowers` 任务纪律层）  
+-> **前置基线**：默认 `runtime_backend="loopforge"` 下本机 Runner 与公用 Docker 沙箱双链路模型调用已跑通；`CODEX_UNIFIED_ARCHITECTURE_SPEC.md` 单一工作台与原生 `Task/Run` 派单主干已合入。  
++> **前置基线**：基于本次工作区代码快照开展增量实现。默认 `runtime_backend="loopforge"` 的本机 Runner、公用 Docker 沙箱及不同 Harness，必须按批提供对应的实测证据；不得由单元测试通过推断真实模型调用已跑通，也不得把工作区改动称为已合入主分支。  
++> **修订说明**：v1.1 纳入审批并发、不可变快照、需求身份、运行基线、收敛补单与分期依赖审查。按批交付，开发者完成自审和测试后交由负责人验收，验收后推进下一批。P0 暂保留旧规格生产入口；Spec Kit 接管写源在 P1 完成迁移后启用。
++
+ > **核心目标**：以**“版本化单一事实源 + 三体合一防断裂约束”**为脊梁，把 `Spec Kit` 深度贯穿软件交付全流程，融合条件式多轮圆桌辩论、去机器味“人话”交接、6 套经典工程 SOP 模板、回归 LoopForge 原生精密美学的前端工作台，以及 `Superpowers` 角色化工程纪律，实现从“一句话想法/存量改造”到“可审计、可回滚、证据闭环”的标准化交付。
+ 
+ ---
+@@ -19,10 +21,10 @@
+ 
+ | 领域对象 | 唯一权威写源（Authoritative Owner） | 其余两方职责（严禁独立改写） | 明确退役 / 严禁行为 |
+ |---|---|---|---|
+-| **项目宪章与工程规矩** | Spec Kit `docs/CONSTITUTION.md` + Vernal `project_decisions` 表（带版本号） | 单向编译并幂等同步为 LoopForge 全局 `Rule`（`decisions_rule_id`） | 严禁在 LoopForge 侧手工维护第二套不同步的全局规则 |
+-| **功能规格与澄清结论** | Spec Kit 目录 `specs/<feature_id>/spec.md` + Vernal `spec_revisions` / `clarifications` 表 | `docs/SRS.md` 仅为跨功能只读聚合视图；LoopForge Issue 仅消费绑定版本的规格快照 | **彻底退役 `prd_spec.json` 与 `PRD_SPEC.md` 双写**（旧工作区仅保留只读兼容读取） |
++| **项目宪章与工程规矩** | Spec Kit `.specify/memory/constitution.md` 的不可变修订；`docs/CONSTITUTION.md` 为展示投影，`project_decisions` 保存不得抵触宪章的版本化决策 | 单向编译并幂等同步为 LoopForge 全局 `Rule`（`decisions_rule_id`） | 严禁在 LoopForge 侧手工维护第二套不同步的全局规则 |
++| **功能规格与澄清结论** | Spec Kit 文件为工作副本；发布后的权威正文为 `doc_versions` 不可变快照，`spec_revisions` 引用该快照，`clarifications` 记录问答来源 | `docs/SRS.md` 仅为跨功能只读聚合视图；LoopForge Issue 仅消费绑定版本的规格快照 | **彻底退役 `prd_spec.json` 与 `PRD_SPEC.md` 双写**（旧工作区仅保留只读兼容读取） |
+ | **架构方案、ADR 与详设** | `specs/<feature_id>/plan.md` + `docs/adr/ADR-*.md` + 统一详设产物 `.autodev/design/<milestone_id>/<squad_id>.json`（渲染至 `docs/design/`） | Vernal 统一路径解析器供文档中心与追溯矩阵共同消费；LoopForge 编码/审查只读消费版本化上下文包 | 严禁写入方与扫描方各自拼路径；严禁在详设中篡改需求定义 |
+-| **任务草案 vs 运行任务** | `specs/<feature_id>/tasks.md` **仅为编译前规划草案**；发布后唯一运行真源归 **LoopForge `Issue / Task / Run`** + Vernal `tasks` / `dispatch_records` 扩展锚点 | 任务经独立验证通过后，由 Vernal 单向回写 `tasks.md` 勾选状态与交付引用 | 严禁把 `tasks.md` 逐行裸建工单；严禁运行期手改 `tasks.md` 绕过编译器 |
++| **任务草案 vs 运行任务** | `specs/<feature_id>/tasks.md` **是版本化任务计划，发布后修改必须生成新修订并重新编译**；发布后唯一运行真源归 **LoopForge `Issue / Task / Run`** + Vernal `tasks` / `dispatch_records` 扩展锚点 | 任务经独立验证通过后，由 Vernal 单向回写 `tasks.md` 勾选状态与交付引用 | 严禁把 `tasks.md` 逐行裸建工单；严禁运行期手改 `tasks.md` 绕过编译器 |
+ | **候选产物与验证证据** | LoopForge Run 产出不可变候选（`candidate_commit_sha` / `artifact_digest`）→ Vernal 独立验证写入 `candidate_evidence` 与 `quality_results` | 追溯矩阵与交付清单只认绑定当前 `candidate_sha` 的实测证据 | 严禁仅凭任务状态 `APPROVED` 或目录静态 grep 标记判需求已验证 |
+ | **审批门禁与交付签收** | 执行节点审批归 LoopForge 原生 `approval` 节点；规格/详设/行级 Diff/里程碑签收归 Vernal `gate_records` / `code_reviews` | 全部强制绑定 `target_sha` 乐观锁，双向状态对账，汇聚至统一收件箱 | 严禁无内容哈希绑定的“永久批准”；严禁恢复第二套平行原生审批队列 |
+ 
+@@ -30,7 +32,7 @@
+ - Spec Kit 的所有 AI 步骤（`constitution`、`specify`、`clarify`、`checklist`、`plan`、`tasks`、`analyze`、`converge`）与编码、验证、审查步骤，**100% 经由 LoopForge 原生 SOP Run（本机 Runner 或公用 Docker 沙箱）派发执行**。
+ - **硬禁令**：
+   1. 严禁 Spec Kit 另起旁路 CLI 直接请求外部模型 API，绕过 Vernal 模型安全网关（密级隔离、预算预留、真实模型审计）与 LoopForge 执行日志；
+-  2. 严禁启用 Spec Kit 自带的独立审批流/失败恢复调度器与 LoopForge / Vernal 调度器形成双控重试；若未来引入子流，必须受 Vernal 单一调度租约与 `dispatch_records` 管控。
++  2. 适配 Spec Kit 或其扩展时不得另建独立审批流/失败恢复调度器，与 LoopForge / Vernal 形成双控重试；若未来引入子流，必须受 Vernal 单一调度租约与 `dispatch_records` 管控。
+ 
+ ### 0.3 铁律三：一根不可断链的版本指纹贯穿全周期（One Content-SHA Thread）
+ 全链路所有持久化记录与远端上下文包，必须强制串联以下版本链条：
+@@ -47,7 +49,7 @@
+                   → delivery_manifest (不可变交付清单)
+ ```
+ - **硬规则**：
+-  - 任何上游产物内容变化产生新 `sha`，下游引用旧 `sha` 的批准自动变更为 **`STALE`（待重审）**，禁止放行派单或合并；
++  - 上游变化后计算需求、契约与依赖的影响集合；受影响批准对新基线标为 **`STALE`**，历史决定及其内容快照保留。无关任务依据冻结的工作包输入继续运行，纳入新交付基线前须记录兼容性判定或重新验证；无法证明无关时按受影响处理。
+   - 迟到的旧 `exec_seq` / 旧 `spec_sha` / 旧 `compiled_task_hash` 执行结果**必须被硬拒收**，绝不覆盖新版状态。
+ 
+ ### 0.4 铁律四：唯一领域契约模块 + 严禁静默吞错（Single Schema + Fail-Loud）
+@@ -60,7 +62,7 @@
+ 
+ ### 0.6 铁律六：唯一用户心智与无缝工作台（One Unified Vernal Experience）
+ - 用户视角下**只存在一个产品 Vernal**，严禁向用户暴露“Spec Kit 原始文件区 / Vernal 独立壳层 / LoopForge 原生区”三套割裂心智。
+-- 面向人类的规格书、圆桌辩论、任务标题、交接便签与主时间线中，**严禁泄露** `issue-179560...`、`FILE_DELIVERY_STAGES`、`.vernal-baseline.json`、`submit_gate_result` 等底层协议术语。
++- 面向人类的规格书、圆桌辩论、任务标题、交接便签与主时间线默认摘要中，**不展示** `issue-179560...`、`FILE_DELIVERY_STAGES`、`.vernal-baseline.json`、`submit_gate_result` 等底层协议术语；授权用户的诊断展开区可保留可追溯标识与必要技术细节。
+ 
+ ### 0.7 铁律七：Superpowers“只管门内、不越门外”
+ - Superpowers 技能（TDD、系统排障、完成前核验、两阶段审查）严格限定在**单个受控工作包内部**生效：
+@@ -70,9 +72,9 @@
+   - 技能不得绕过平台独立验证节点自行合并分支、清理现场或宣布交付完成。
+ 
+ ### 0.8 铁律八：写入 CI 的「跨边界反断裂集成探针」（每批必过）
+-P0–P6 每一批次合并前，除既有单元测试全绿外，必须通过自动化跨边界探针套件 `tests/test_anti_fragmentation_probes.py`（无 Mock 绕过关键转换）：
++P0 起逐批启用与该批已实现能力对应的探针；P0 启用规格、文档、门禁与追溯探针，P1/P2 加入最小编译派发，P3 加入变更传播，P4 加入收敛。每批合并前，既有已启用探针持续必过。自动化跨边界探针套件 `tests/test_anti_fragmentation_probes.py`（无 Mock 绕过关键转换）：
+ 1. **规格-追溯闭环探针**：真实产出圆桌/Spec 产物 → 真实调用文档同步与追溯构建 → 断言 `docs/SRS.md` 非空、需求条数 > 0、详设链接非空且字段完全吻合；
+-2. **版本失效探针**：批准 `SRS v1`（绑定 `sha_v1`）→ 修改文档生成 `v2`（`sha_v2`）→ 断言门禁与文档状态自动变 `STALE`，拦截下游派单；
++2. **版本失效探针**：批准源规格 `v1`（绑定快照）→ 修改源规格发布 `v2`（P0 过渡期使用版本化 SRS，P1 后 SRS 只读）→ 断言门禁与文档状态自动变 `STALE`，拦截下游派单；
+ 3. **编译-派发-防回滚探针**：任务编译器真实编译 `tasks.md` → 验证生成的 LoopForge Issue 载荷携带 `spec_sha` / `contract_sha` / `preset_version` → 注入迟到旧 `exec_seq` / 旧 `spec_sha` 结果断言被拒收；
+ 4. **收敛不改需求探针**：模拟集成后漏实现一条 `REQ-002` → 运行 `converge` → 断言追加补缺任务且 `spec.md` 原哈希保持零改动。
+ 
+@@ -145,14 +147,14 @@
+ 
+ | 编号 | 现状缺陷（已源码核实） | 根因位置 | 精确修复方案 |
+ |---|---|---|---|
+-| **BUG-1** | SRS v1 批准后修改为 v2，文档状态与门禁仍显示 `PASSED / APPROVED` | [docs_center/service.py:110-120](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/docs_center/service.py#L110-L120)、[process/runner.py:218-220](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/process/runner.py#L218-L220)、[db.py:233-249](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/db.py#L233-L249) | 为 `gate_records` 增量增加 `target_sha TEXT NOT NULL DEFAULT ''` 与 `target_version INTEGER NOT NULL DEFAULT 0`；`decide_gate` 批准时必须写入当前文档/产物的真实 `content_sha`（支持前端传 `expected_sha` 防并发错批）；`save_doc_version` 产生新 `content_sha` 时，自动检测同文档已通过门禁，若 `gate.target_sha != latest.content_sha`，将文档状态判定为 **`STALE`（已变更待重审）**，并触发 `ensure_gate_record(..., force_new_round=True)` 创建新一轮 `PENDING` 门禁。 |
+-| **BUG-2** | 圆桌输出写入 `prd_spec.json` 含 `adrs` 字段，被 `ProductSpec(_Strict)` 拒绝且被 `except Exception: pass` 静默吞掉，导致 `docs/SRS.md` 根本未生成 | [council.py:268-277](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/council.py#L268-L277)、[models.py:68-118](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/models.py#L68-L118)、[docs_center/service.py:225-232](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/docs_center/service.py#L225-L232) | ① 统一圆桌共识与 `ProductSpec` 契约：`CouncilConsensus` 输出结构化 `requirements: list[RequirementItem]` 与 `nfrs: list[RequirementItem]`，ADR 单独存储于 `consensus.adrs` 与 `docs/adr/`，写入规格快照时严格通过 `ProductSpec.model_validate(...)` 校验；② **删除 `sync_standard_docs_from_artifacts` 中吞掉异常的 `except Exception: pass`**，改为显式抛错/记录 `doc.sync_failed` 事件并阻断进入下游阶段；③ 为旧工作区遗留 `prd_spec.json` 提供显式迁移函数剥离冗余 `adrs` 字段。 |
+-| **BUG-3** | 详设写入 `.autodev/design/<milestone_id>/<squad_id>.json`，但追溯扫描只用 `design_dir.glob("*.json")` 查顶层，详设追溯恒为空 | [docs_center/service.py:328](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/docs_center/service.py#L328)、[trace/service.py:49-73](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/trace/service.py#L49-L73) | 抽取共享路径函数 `iter_detailed_design_json_paths(ws)`，使用 `design_dir.rglob("*.json")` 并同时支持按 `milestone_id` 过滤与去重最新修订；同时兼容解析 `squad_id` / `module` 与 `tc_id` / `id`。 |
+-| **BUG-4** | `ProductSpec` 使用 `requirements` / `nfrs`（字段 `acceptance`），追溯读取 `functional_requirements` / `non_functional_requirements`（字段 `acceptance_criteria`） | [models.py:101-118](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/models.py#L101-L118)、[trace/scan.py:30-50](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/trace/scan.py#L30-L50) | `extract_requirements_from_sources` 改为**直接消费规范模型 `RequirementItem`（主字段 `requirements` / `nfrs` / `acceptance`）与 Spec Kit `specs/*/spec.md` 结构化解析器**，仅对历史遗留 `functional_requirements` 保留只读回退解析，并补充双字段对照回归测试。 |
++| **BUG-1** | SRS v1 批准后修改为 v2，文档状态与门禁仍显示 `PASSED / APPROVED` | [docs_center/service.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/docs_center/service.py)、[process/runner.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/process/runner.py)、[db.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/db.py) | 为 `gate_records` 增量增加 `target_sha TEXT NOT NULL DEFAULT ''` 与 `target_version INTEGER NOT NULL DEFAULT 0`；创建审批请求时冻结 `target_sha` 与快照引用；`decide_gate` 在同一事务中核对请求轮次、冻结目标与当前内容，绝不在批准时把旧请求重新绑定到最新内容。前端回传 `expected_sha`，服务端独立校验；`save_doc_version` 产生新 `content_sha` 时，自动检测同文档已通过门禁，若 `gate.target_sha != latest.content_sha`，将文档状态判定为 **`STALE`（已变更待重审）**，并创建新一轮 `PENDING`。强制新轮次须覆盖旧记录仍为 PENDING 的情形；旧记录保留 `decision_status`、审批人和正文快照。 |
++| **BUG-2** | 圆桌输出写入 `prd_spec.json` 含 `adrs` 字段，被 `ProductSpec(_Strict)` 拒绝且被 `except Exception: pass` 静默吞掉，导致 `docs/SRS.md` 根本未生成 | [council.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/council.py)、[models.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/models.py)、[docs_center/service.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/docs_center/service.py) | ① 统一圆桌共识与 `ProductSpec` 契约：`CouncilConsensus` 输出结构化 `requirements: list[RequirementItem]` 与 `nfrs: list[RequirementItem]`，ADR 单独存储于 `consensus.adrs` 与 `docs/adr/`，写入规格快照时严格通过 `ProductSpec.model_validate(...)` 校验；② **删除 `sync_standard_docs_from_artifacts` 中吞掉异常的 `except Exception: pass`**，改为显式抛错/记录 `doc.sync_failed` 事件并阻断进入下游阶段；③ 对旧工作区遗留 `prd_spec.json` 只读兼容：验证前在内存副本中剥离冗余 `adrs` 字段，保留原文件，不做破坏性迁移。 |
++| **BUG-3** | 详设写入 `.autodev/design/<milestone_id>/<squad_id>.json`，但追溯扫描只用 `design_dir.glob("*.json")` 查顶层，详设追溯恒为空 | [docs_center/service.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/docs_center/service.py)、[trace/service.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/trace/service.py) | 抽取共享路径函数 `iter_detailed_design_json_paths(ws)`，使用 `design_dir.rglob("*.json")` 并同时支持按 `milestone_id` 过滤与去重最新修订；同时兼容解析 `squad_id` / `module` 与 `tc_id` / `id`。 |
++| **BUG-4** | `ProductSpec` 使用 `requirements` / `nfrs`（字段 `acceptance`），追溯读取 `functional_requirements` / `non_functional_requirements`（字段 `acceptance_criteria`） | [models.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/models.py)、[trace/scan.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/trace/scan.py) | `extract_requirements_from_sources` 在 P0 **直接消费规范模型 `RequirementItem`（主字段 `requirements` / `nfrs` / `acceptance`）**；Spec Kit `specs/*/spec.md` 解析器在 P1 接入，仅对历史遗留 `functional_requirements` 保留只读回退解析，并补充双字段对照回归测试。 |
+ 
+ ### 2.2 增量版本绑定数据模型（复用既有 SQLite 表，防过度建模）
+ 
+-不在现有数据库旁另建第二套平行元数据系统，而是在 [autodev/db.py](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/db.py) 中做**极简增量扩展**（2 张新表 + 5 张既有表补齐版本锚点）：
++复用现有正文快照及数据库。P0 实现审批目标绑定与需求生命周期，P1 才启用规格修订/澄清表，P3/P4 按实际消费方补齐任务和证据锚点。不得预先宣称尚未接通的表已形成闭环。在 [autodev/db.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/db.py) 中做**极简增量扩展**（2 张新表 + 5 张既有表补齐版本锚点）：
+ 
+ #### A. 新增 2 张核心表（幂等 `CREATE TABLE IF NOT EXISTS`）
+ ```sql
+@@ -164,6 +166,7 @@
+     source_kind TEXT NOT NULL DEFAULT 'spec',  -- 'constitution' | 'spec' | 'plan' | 'tasks'
+     rel_path TEXT NOT NULL,                    -- 如 "specs/001-clarify-gate/spec.md"
+     content_sha TEXT NOT NULL,                 -- 规范化 UTF-8 内容 SHA-256
++    content_version_id INTEGER NOT NULL REFERENCES doc_versions(id), -- 不可变正文，不得只保存可变路径
+     parent_rev_id INTEGER,
+     preset_id TEXT NOT NULL DEFAULT '',
+     preset_version TEXT NOT NULL DEFAULT '',
+@@ -199,7 +202,7 @@
+ ```
+ 
+ #### B. 既有 5 张表增量补齐版本锚点（`PRAGMA table_info` 幂等 `ALTER TABLE`）
+-1. **`gate_records`**：新增 `target_path TEXT DEFAULT ''`、`target_sha TEXT DEFAULT ''`、`target_rev_id INTEGER DEFAULT 0`、`stale_reason TEXT DEFAULT ''`（状态枚举扩充 `STALE`）；
++1. **`gate_records`**：P0 新增 `target_path`、`target_sha`、`target_version`、`target_snapshot_json`、`decision_status`、`stale_reason`；快照集合引用 `doc_versions.id`。P1 按需增加功能修订关联，历史决定单独保留。
+ 2. **`tasks`**：新增 `feature_id TEXT DEFAULT ''`、`spec_rev_id INTEGER DEFAULT 0`、`spec_sha TEXT DEFAULT ''`、`plan_sha TEXT DEFAULT ''`、`compiled_task_hash TEXT DEFAULT ''`、`resource_locks_json TEXT DEFAULT '[]'`、`handoff_brief_json TEXT DEFAULT '{}'`；
+ 3. **`dispatch_records`**：新增 `spec_sha TEXT DEFAULT ''`、`contract_sha TEXT DEFAULT ''`、`compiled_task_hash TEXT DEFAULT ''`、`asset_versions_json TEXT DEFAULT '{}'`（记录 `speckit_version` / `preset_version` / `skill_versions`）；
+ 4. **`candidate_evidence`**：新增 `spec_sha TEXT DEFAULT ''`、`contract_sha TEXT DEFAULT ''`、`evidence_sha TEXT DEFAULT ''`、`spec_review_verdict TEXT DEFAULT ''`、`quality_review_verdict TEXT DEFAULT ''`；
+@@ -212,10 +215,10 @@
+ | 任务当前状态 | 是否受变更影响（命中变更的 `REQ-xxx` / 契约 / 依赖上游） | 系统确定性行为 |
+ |---|---|---|
+ | `BLOCKED` / `READY`（未派发） | 是 | 立即按新 `spec_sha` 重新运行任务编译器，更新 `compiled_task_hash` 与上下文包后再允许派发 |
+-| `IN_PROGRESS` / `VERIFYING` / `REVIEWING`（在途） | **否（无关）** | **不受打扰，继续正常执行与收割** |
+-| `IN_PROGRESS` / `VERIFYING` / `REVIEWING`（在途） | **是（受影响）** | 标记当前 `dispatch_record` 为 `SUPERSEDING`，请求 LoopForge `pause_run`；**仅在确认远端已暂停/终态后**递增 `exec_seq` 重编译派发新版 |
++| `IN_PROGRESS` / `VERIFYING` / `REVIEWING`（在途） | **否（无关）** | 按原工作包输入基线继续执行；归入新交付基线时记录兼容依据或追加重验 |
++| `IN_PROGRESS` / `VERIFYING` / `REVIEWING`（在途） | **是（受影响）** | 标记当前 `dispatch_record` 为 `SUPERSEDING`，请求 LoopForge `pause_run`；**撤销旧尝试的写入租约并隔离旧工作区，仅在确认远端已暂停/终态且旧尝试不能再写入新版工作区后**递增 `exec_seq` 重编译派发新版 |
+ | `APPROVED` / `MERGED`（已完成） | **是（受影响）** | 保留已有代码实现不粗暴删除，仅对受影响的需求承诺发起增量返工或 `verify_only` 回归重验；其旧 `candidate_evidence` 对新 `spec_sha` 自动标为失效 |
+-| **迟到的旧 Run 回传结果** | 任意 | 调度器收割时强制比对 `dispatch.spec_sha == task.spec_sha` 且 `dispatch.exec_seq == task.exec_seq`，**不匹配直接丢弃入库记录 `stale_result_rejected` 事件**，绝不污染新版状态 |
++| **迟到的旧 Run 回传结果** | 任意 | 调度器收割时强制比对 `dispatch.spec_sha == task.spec_sha` 且 `dispatch.exec_seq == task.exec_seq`，**不匹配时保留历史尝试、产物和费用记录，标记 `stale_result_rejected`，禁止更新当前任务或发布状态**，绝不污染新版状态 |
+ 
+ ---
+ 
+@@ -241,11 +244,11 @@
+ 
+ #### 第一层：离线固化上游资产层（`autodev/assets/speckit/`）
+ - 在仓库内锁定经过验证的 Spec Kit 上游模板、规范 Schema 与版本清单 `autodev/assets/speckit/manifest.json`（含 `speckit_version`、文件 SHA-256 校验和）。
+-- 随 `./vernal.sh --pack` 一并离线打包，**运行期零公网依赖**。
++- 随 `./vernal.sh --pack` 一并离线打包，**规格资产运行期零公网依赖；模型、构建依赖与执行器联网策略另行声明并验收**。
+ - 每次项目初始化或步进执行时将 `speckit_version` 与 `preset_version` 写入 `spec_revisions` 和 `dispatch_records`：升级上游版本时先跑标准样板回归集，**正在进行中的历史项目继续锁定原资产版本**，防止升级导致解析失效。
+ 
+ #### 第二层：四套 Vernal 中文 Presets（`autodev/assets/speckit/presets/`）
+-遵循 Spec Kit 分层覆盖机制（项目本地覆盖 > 启用 Preset > 固化核心默认），不修改上游核心模板文件，沉淀 4 套面向中文软件交付的官方 Preset：
++遵循 Spec Kit 分层覆盖机制（项目本地覆盖 > 启用 Preset > 启用 Extension > 固化核心默认；逐模板明确 replace/append/prepend/wrap 与优先级，基础约束由平台校验器兜底），不修改上游核心模板文件，沉淀 4 套 Vernal 维护的中文交付 Preset：
+ 
+ | Preset ID | 服务对象 | 定制核心内容 |
+ |---|---|---|
+@@ -259,25 +262,25 @@
+ 
+ 1. **规格适配器（Spec Adapter）**：
+    - 统一封装 `run_step(engine, feature_id, step_name, preset_id)`；
+-   - **全部通过 LoopForge 规划 SOP 派发执行**，不依赖 `specify-cli` 独立进程；
+-   - **针对 `dsh` 等 CLI 的专门兜底**：由于 Spec Kit 原生 `dsh` 集成忽略 `model` 与结构化输出参数，Vernal 规格适配器统一由 `LoopForgeHarness` 注入显式模型配置与文件落地协议（写入指定 Markdown 产物 + 结构化摘要 JSON），并经 `validate` 确定性脚本节点做格式与 Schema 校验，不合法自动打回重写，确保 `dsh` / `codex` / `opencode` / `claude-code` 行为一致。
++   - **全部通过 LoopForge 规划 SOP 派发执行**，允许调用固定版本的 `specify-cli` 做确定性初始化与模板解析；禁止另建 AI 调度与审批主干；
++   - **针对 `dsh` 等 CLI 的专门兜底**：由于 Spec Kit 原生 `dsh` 集成忽略 `model` 与结构化输出参数，Vernal 规格适配器统一由 `LoopForgeHarness` 注入显式模型配置与文件落地协议（写入指定 Markdown 产物 + 结构化摘要 JSON），并经 `validate` 确定性脚本节点做格式与 Schema 校验，不合法自动打回重写，统一输出契约并验证各执行器能力；无法验证模型选择或结构化产物时明确阻塞，不承诺各执行器原生能力相同。
+    - 步骤完成后自动计算 `content_sha`、落库 `spec_revisions`、触发聚合视图 `docs/SRS.md` 同步与门禁状态刷新。
+ 
+-2. **任务编译器（Task Compiler，扩展自 [autodev/context_bundle.py](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/context_bundle.py)）**：
++2. **任务编译器（Task Compiler，扩展自 [autodev/context_bundle.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/context_bundle.py)）**：
+    - 将 `specs/<feature_id>/tasks.md` 中的微观步骤（2~5 分钟颗粒度）**按高内聚模块、同一验收边界和同一研发组领地合并编译为可独立验收的工作包（CompiledWorkPackage）**，绝不 1:1 裸建碎片工单。
+    - **8 项强制编译校验（任一不通过即阻断发布并退回修订）**：
+      1. **需求存在性**：任务引用的所有 `REQ-xxx` 必须存在于当前批准版 `spec_revisions`；
+      2. **依赖无环且有序**：DAG 拓扑排序校验无环，跨里程碑依赖方向合法；
+      3. **修改范围明确且无冲突**：`allowed_paths` 非空且明确，非 `contract` 任务不含受保护契约路径；
+      4. **前置契约真实可访问**：依赖契约任务或已冻结 `contract_sha` 真实存在且可读；
+-     5. **验证命令可执行且自洽**：存在非空 `verify_cmds`，且当命令为测试发现类（`unittest discover` / `pytest` / `node --test`）时白名单必须包含测试文件（杜绝 0 用例 exit code 5 死锁）；
++     5. **验证命令可执行且自洽**：存在非空 `verify_cmds`，且当命令为测试发现类（`unittest discover` / `pytest` / `node --test`）时必须校验测试文件可读、测试被真实发现并执行；只有需要新增或修改测试时才要求写入白名单包含测试路径；
+      6. **执行环境能力匹配**：对照当前生效执行池（本机 Runner / 公用 Docker）真实探测能力检查所需工具链是否存在，缺依赖直接给出可执行预检提示；
+      7. **幂等防重发**：基于 `(feature_id, task_key, compiled_task_hash)` 核查既有已发布工单，禁止重复创建相同任务；
+-     8. **共享资源冲突检测（Resource Locks）**：显式标注可能争用的共享资源（如 `db:migrations`、`lockfile:uv.lock`、`port:8080`、`file:package.json`、`config:global`），即使任务在 `tasks.md` 中被标为 `[P]` 可并行，**凡共享资源锁有交集的任务由编译器自动注入串行依赖或资源互斥锁，禁止调度器并发派发导致互相踩踏**。
++     8. **共享资源冲突检测（Resource Locks）**：显式标注可能争用的共享资源（如 `db:migrations`、`lockfile:uv.lock`、`port:8080`、`file:package.json`、`config:global`），即使任务在 `tasks.md` 中被标为 `[P]` 可并行，**凡同一实际资源作用域内存在互斥访问的任务，由编译器注入串行依赖或带租约的资源锁，禁止调度器并发派发导致互相踩踏**。
+ 
+ ### 3.3 多轮迭代与持续演进机制（Spec Kit 不只跑一次）
+ - 第一版交付并归档后，用户提出第二轮需求（如“增加批量导出”）：
+-  - 新建功能目录 `specs/002-batch-export/`，**直接继承当前仓库已有 `docs/CONSTITUTION.md` 与 `docs/ARCHITECTURE.md` 基线**（无需推翻重写）；
++  - 新建功能目录 `specs/002-batch-export/`，**直接引用当前仓库已批准的 `.specify/memory/constitution.md` 修订 与 `docs/ARCHITECTURE.md` 基线**（无需推翻重写）；
+   - 使用 `vernal-existing` Preset 生成 Delta Spec、澄清增量歧义、增量冻结受影响接口契约、编译增量工作包并执行；
+   - 交付通过后自动将增量规格合入聚合 `docs/SRS.md` 与架构索引，保持全生命周期持续一致。
+ 
+@@ -292,15 +295,15 @@
+ | 维度 1：项目来源 (`source_origin`) | 维度 2：需求清晰度 (`clarity_level`) | 自动推荐 Preset & 流程路径 |
+ |---|---|---|
+ | `greenfield`（全新构建） / `existing_local`（本机目录） / `existing_git`（Git 仓库） | **`READY_LITE`（目标、范围、验收明确且影响面局部）** | 直接选用 `vernal-lite` + `quick-prototype`（或 `bugfix-triage`），展示默认约束，免重型圆桌直达快速规格与编码 |
+-| 任意来源 | **`NEEDS_CLARIFICATION`（目标/边界/验收/约束存在影响交付承诺的缺口）** | **强制先进入 Clarify Gate**：PM 围绕“目标形态、首版范围/Non-Goals、接口边界、验收方式”提出 2~5 个聚焦问题，用户确认后自动重评估 |
++| 任意来源 | **`NEEDS_CLARIFICATION`（目标/边界/验收/约束存在影响交付承诺的缺口）** | **强制先进入 Clarify Gate**：PM 围绕“目标形态、首版范围/Non-Goals、接口边界、验收方式”只提出尚未解决且影响交付承诺的问题，允许 0 个；单轮原则上不超过 3 个，用户确认后自动重评估 |
+ | 任意来源 | **`READY_STANDARD`（复杂多模块需求或自带完整 PRD/架构文档）** | 选用 `vernal-standard`（存量叠 `vernal-existing`）+ 条件式圆桌 + `analyze` 体检 + 分波次契约冻结与多组并行开发 |
+ 
+-- **前置条件与人工体验项分流**：体检阶段识别出的物理真机体验、外部未授权账号/密钥、断网环境缺失系统二进制等事项，直接标为「前置条件阻塞」或写入 `spec.md` 的「交付后人工体验项」，禁止排入自动化开发 DAG。
++- **前置条件与人工体验项分流**：体检阶段识别出的物理真机体验、外部未授权账号/密钥、断网环境缺失系统二进制等事项，直接标为「前置条件阻塞」或写入 `spec.md` 的「交付后人工体验项」，自动化 DAG 可包含明确的人工作业等待节点和可自动安装的环境准备节点；核心验收条件不得自动降级为交付后体验项。
+ 
+ ### 4.2 交互式澄清门（Clarify Gate）设计
+ - 仅对**影响交付承诺（架构选型、用户核心体验、接口边界、验收红线）**的歧义标为 `severity="BLOCKING"`，暂停流程交由用户作答；
+ - 对**低风险工程细节**（如默认端口、分页默认值、内部目录名）标为 `severity="DEFAULTED"`，直接展示“已按推荐默认值选定，展开可修改”，不打断用户；
+-- 所有 `BLOCKING` 问题必须支持选择题优先 + 推荐项标注 + 一键“全部按推荐方案确认”；回答后持久化至 `clarifications` 表，自动生成新 `spec_rev_id` 并进入下游。
++- `BLOCKING` 问题优先提供选择题；只有存在有依据的安全默认值时提供推荐项与批量确认，否则等待负责人明确决定；回答后持久化至 `clarifications` 表，自动生成新 `spec_rev_id` 并进入下游。
+ 
+ ### 4.3 条件式多轮架构圆桌（Debate-on-Conflict）
+ 
+@@ -315,19 +318,21 @@
+     BIZ -- "是" --> HUM["暂停弹出分歧投票卡<br/>请负责人一键定夺"]
+     HUM --> DIR
+     BIZ -- "否 · 若仍有未决技术博弈<br/>且未达上限(默认最多3轮)" --> R3["Round 3 · 焦点收敛辩论"]
+-    R3 --> DIR
++    R3 --> FINAL{"是否已解决阻塞分歧？"}
++    FINAL -- "是" --> DIR
++    FINAL -- "否" --> HUM
+     BIZ -- "否 · 已收敛" --> DIR
+ ```
+ 
+ - **铁律约束（防止空洞辩论）**：
+   1. **不强制反对**：允许任何角色在给出具体依据的前提下表达 `AGREE`，严禁为了凑辩论而挑刺；
+-  2. **质疑必须带锚点**：任何 `CHALLENGE` / `AMEND` 发言必须明确绑定以下至少一项——关联的 `REQ-xxx`、具体接口签名、可验证实验/测试成本、或明确的工程取舍代价（Trade-off）；
++  2. **质疑必须带锚点**：任何 `CHALLENGE` / `AMEND` 发言必须明确绑定以下至少一项：关联的 `REQ-xxx`、具体接口签名、可验证实验/测试成本、或明确的工程取舍代价（Trade-off）；
+   3. **增量契约冻结**：研发总监裁决后只冻结**本轮功能及下游依赖所需接口契约**（如 `contracts/<domain>/`），避免一期把整套未来系统契约一次性冻死。
+ 
+ ### 4.4 彻底去“机器味”的 Prompt 重构与《工程师交接便签》
+ 
+ #### A. 物理隔离「业务思考层」与「平台搬运协议层」
+-- 从 [autodev/prompts.py](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/prompts.py) 的圆桌、澄清、规划、蓝图与审查主提示词中**彻底移除** `FILE_DELIVERY_STAGES`、`.vernal-baseline.json`、`vernal-files.json`、`submit_gate_result` 等底层搬运指令；
++- 从 [autodev/prompts.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/prompts.py) 的圆桌、澄清、规划、蓝图与审查主提示词中**彻底移除** `FILE_DELIVERY_STAGES`、`.vernal-baseline.json`、`vernal-files.json`、`submit_gate_result` 等底层搬运指令；
+ - 搬运协议仅作为 LoopForge 节点末尾的隔离系统脚手架注入，并在共享 Prompt 模块 `autodev/prompts_style.py` 中硬性规定：**“所有对外发言、规格书、ADR、任务描述与交接便签中，严禁出现 `issue-xxx`、工作项编号、文件交接模式、本工位独立完成、平台集成验证等平台内部黑话。”**
+ 
+ #### B. 全角色共享《沟通风格规范》与正反 Few-shot
+@@ -364,13 +369,13 @@
+ 
+ 1. **LoopForge 交付泳道质量左移**：
+    - 将单任务标准泳道升级为：`implement（编码与自测） → package（产物打包 + Diff 影响面生成） → deterministic_gate（确定性质量脚本门） → review（两阶段独立审查）`；
+-   - `deterministic_gate` 脚本节点在**不消耗 Reviewer LLM Token** 的前提下，直接执行路径白名单守卫、密钥扫描（`secrets`）、空壳测试检测（`test_integrity`）与 Lint 检查，任一失败直接按 `rejectTo: implement` 自动打回编码节点；
++   - `deterministic_gate` 脚本节点在**不消耗 Reviewer LLM Token** 的前提下，直接执行路径白名单守卫、密钥扫描（`secrets`）、空壳测试检测（`test_integrity`）与 Lint 检查；代码失败退回编码，环境或鉴权失败进入阻塞处理，配置重试次数、总预算及超时；
+    - 仅当确定性硬门禁全绿时，才进入 Reviewer Agent 做“规格合规 + 代码深度质量”两阶段审查。
+ 2. **Bugfix 泳道“真红灯”校验判据（修正假红灯漏洞）**：
+    - 在 `bugfix` 泳道增加前置复现节点 `reproduce` + 脚本校验 `verify_reproduction`；
+    - **严禁仅凭“命令退出码 != 0”判定复现成功**！脚本必须同时校验：
+      1. 新增/指定的复现测试文件真实被测试框架发现并执行（executed tests ≥ 1，排除 pytest exit code 5 / unittest 0 tests）；
+-     2. 退出码并非 `SyntaxError` / `ImportError` / `ModuleNotFoundError` / 缺命令（exit 127）；
++     2. 失败符合预先定义的目标缺陷签名；若目标本身是导入、启动或语法错误，则该错误可以构成有效复现。与目标无关的依赖缺失和运行器故障进入环境阻塞；
+      3. 失败类型来自真实断言失败或目标缺陷异常（`AssertionError` / 目标异常栈命中被修模块）。
+ 
+ ### 5.3 六套经典工程 SOP 模板矩阵
+@@ -379,12 +384,12 @@
+ 
+ | 模板 ID | 适用场景 | 绑定 Preset | 启用阶段与核心门禁 | 对应 LoopForge 泳道特征 |
+ |---|---|---|---|---|
+-| **`quick-prototype`**（新增，替换过重的默认轻量体验） | 单体小工具、算法模块、极简网页/原型、低风险小改 | `vernal-lite` | 可选澄清 → 1 页规格 → 直接编码与两段式审查 → 预览/交付（跳过多组圆桌与独立详设门） | 精简 1~2 组 2~4 卡，`implement → deterministic_gate → review` |
++| **`quick-prototype`**（新增，替换过重的默认轻量体验） | 单体小工具、算法模块、极简网页/原型、低风险小改 | `vernal-lite` | 可选澄清 → 1 页规格 → 直接编码与两段式审查 → 预览/交付（跳过多组圆桌与独立详设门） | 精简 1~2 组 2~4 卡，`implement → freeze_candidate → deterministic_gate → review → independent_verify` |
+ | **`greenfield-standard`**（升级 `standard`） | 多模块全新系统、正式产品研发 | `vernal-standard` | `CONSTITUTION` → 澄清 + EARS SRS（版本绑定批准）→ 条件式多轮圆桌 + ADR → `analyze` 体检 → M1 增量契约冻结 + 组级详设 → 并行 TDD + 风险人工 Diff 审查 → 五类质量门 + CI + `converge` 缺口核对 | 分泳道（backend/frontend/contract），全量质量左移 + 两段式审查 |
+ | **`brownfield-feature`**（升级 `feature`） | 存量本机目录 / Git 仓库新增特性 | `vernal-existing` | Repo Map 侦察 → Delta Spec（增/改/删 + 兼容红线）→ 增量设计与影响面确认 → `analyze` → 隔离分支开发 + 存量回归 + 人工 Diff 审查 → CI 合入并归档 Delta | 强制注入局部 Repo Map + 外部调用方影响面检查 |
+-| **`bugfix-triage`**（升级 `bugfix`） | 缺陷定位、集成报错与生产热修 | `vernal-existing` | 缺陷定界 → **真红灯复现门禁** → 最小外科手术补丁 → 复现转绿 + 回归 + 密钥/假测试门 → 人工补丁复核合入 | 专用 `bugfix` 泳道：`reproduce → verify_red → fix → deterministic_gate → review` |
++| **`bugfix-triage`**（升级 `bugfix`） | 缺陷定位、集成报错与生产热修 | `vernal-existing` | 缺陷定界 → **真红灯复现门禁** → 最小外科手术补丁 → 复现转绿 + 回归 + 密钥/假测试门 → 人工补丁复核合入 | 专用 `bugfix` 泳道：`reproduce → verify_red → fix → freeze_candidate → verify_green → deterministic_gate → review` |
+ | **`refactor-hardening`**（新增） | 代码重构、解耦、性能与安全加固 | `vernal-existing` | **行为基线锁定（补齐特征测试）** → 重构计划（外部契约零破坏）→ 分步重构 + SAST/覆盖率/契约门禁 → 前后回归对比签收 | 强化静态安全扫描、变更行覆盖率与契约零破坏校验 |
+-| **`doc-reverse-onboarding`**（升级 `doc_reverse`） | 无文档遗留仓库首次接管建档 | `vernal-existing` | 静态符号拓扑 + Repo Map → 逆向还原 C4 架构、接口清单与核心 SRS → 人工基线签字 → 自动生成 `CONSTITUTION.md` 与 `AGENTS.md` | 只读分析 + 文档校验泳道，完成后平滑切换至 `brownfield-feature` |
++| **`doc-reverse-onboarding`**（升级 `doc_reverse`） | 无文档遗留仓库首次接管建档 | `vernal-existing` | 静态符号拓扑 + Repo Map → 逆向还原 C4 架构、接口清单与核心 SRS → 人工基线签字 → 生成宪章与 `AGENTS.md` 修改建议，保留已有人工规则并经审核合入 | 只读分析 + 文档校验泳道，完成后平滑切换至 `brownfield-feature` |
+ 
+ > **向后兼容策略**：保留旧 `legacy` 模板 ID 映射到轻量兼容行为，确保既有工作区与 146+ 回归测试零破坏。
+ 
+@@ -397,7 +402,7 @@
+ ### 6.1 视觉基线与架构减负（对齐 LoopForge 原生 Harness UI 精密克制美学）
+ 
+ 1. **回归原生 Design Tokens，做减法不做加法**：
+-   - 清理 [vernal-overlay.css](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/server/static/vernal-overlay.css#L9-L51) 中与 LoopForge 原生 `--hui-*` 强行对抗的大段 `!important` 覆写；
++   - 清理 [vernal-overlay.css](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/server/static/vernal-overlay.css) 中与 LoopForge 原生 `--hui-*` 强行对抗的大段 `!important` 覆写；
+    - **撤掉 `#vernalStage` 全屏点阵背景**（点阵仅保留在 DAG 拓扑画布中）、撤掉顶栏与进度条的高饱和蓝青渐变装饰；
+    - 全站收敛为 **1 套中性灰阶（Slate/Zinc）+ 1 个克制品牌主色 + 3 个低饱和语义色（绿/琥珀/红）**；正文字号从 `13px` 提升至 `13.5~14px`（行高 `1.65`），彻底消灭密密麻麻的 `11px` 小字和 6 色打架。
+ 2. **拆除“双重导航 + 四层套娃顶栏”**：
+@@ -407,7 +412,7 @@
+    - 主工作区采用宽敞留白（内边距 `24px`），列表项之间改用 **1px 柔和分隔线 + 悬停微浮底色**，彻底拆掉 `stage-card → task-card → nodes-stack → node-card → vst-feed → vst-item → pre` 的 6 层嵌套边框；
+    - 单行任务只保留 **状态圆点 + 任务号 + 清晰人话标题 + 1 个核心状态胶囊**，其余耗时、执行池、快捷操作弱化呈现或悬停显示。
+ 4. **CSS 架构瘦身**：
+-   - 将已膨胀至 2358 行的 [styles.css](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/server/static/styles.css) 拆分为清晰的模块化源码 `styles/tokens.css`、`styles/layout.css`、`styles/components.css`、`styles/views.css`（清理废弃的 `.goal-bar`、`.vmc-*` 等死代码），由 [scripts/build_vernal_stage_css.py](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/scripts/build_vernal_stage_css.py) 合并编译输出作用域安全的 `vernal-stage.css`，保持零 Node 构建链与离线可用。
++   - 将已膨胀至 2358 行的 [styles.css](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/server/static/styles.css) 拆分为清晰的模块化源码 `styles/tokens.css`、`styles/layout.css`、`styles/components.css`、`styles/views.css`（清理废弃的 `.goal-bar`、`.vmc-*` 等死代码），由 [scripts/build_vernal_stage_css.py](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/scripts/build_vernal_stage_css.py) 合并编译输出作用域安全的 `vernal-stage.css`，保持零 Node 构建链与离线可用。
+ 
+ ### 6.2 五大核心交互面升级
+ 
+@@ -420,62 +425,64 @@
+    - 当存在 `STALE` 失效门禁或待回答澄清时，在轨道下方展示**唯一一条紧凑行动提示条**直达处理。
+ 3. **澄清向导与圆桌辩论室**：
+    - **澄清面板**：聚焦展示 `BLOCKING` 选择题卡片（含推荐标签与自定义补充输入），低风险默认值折叠成一行摘要，提交后即时展示新生成的 `spec.md` Diff 与修订号；
+-   - **圆桌辩论室**：按 `Round 1 独立提案 → Round 2 定向质询（带 @引用 气泡与 AGREE/CHALLENGE 标记）→ 人类分歧裁决卡 → 总监 ADR 拍板` 分轮呈现，**彻底删除 [stage-drilldown.js:658](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/server/static/js/stage-drilldown.js#L658) 中直接裸吐原始 JSON 的 `<pre>`**；
+-   - 将原 [index.html:486-544](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/server/static/index.html#L486-L544) 中长达数屏拼接的 `view-council` 拆分为顶部 3 个清晰分段视图（`圆桌与澄清` / `规范文档中心` / `蓝图与研发组`）。
++   - **圆桌辩论室**：按 `Round 1 独立提案 → Round 2 定向质询（带 @引用 气泡与 AGREE/CHALLENGE 标记）→ 人类分歧裁决卡 → 总监 ADR 拍板` 分轮呈现，**彻底删除 [stage-drilldown.js](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/server/static/js/stage-drilldown.js) 中直接裸吐原始 JSON 的 `<pre>`**；
++   - 将原 [index.html:486-544](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/server/static/index.html) 中长达数屏拼接的 `view-council` 拆分为顶部 3 个清晰分段视图（`圆桌与澄清` / `规范文档中心` / `蓝图与研发组`）。
+ 4. **离线规范文档中心（告别 `<pre>` 裸源码）**：
+-   - 将轻量 MIT 开源渲染库 `marked` 与 `mermaid` 离线 vendor 至 `autodev/server/static/vendor/`（启动前实测零 `eval`、完全通过 LoopForge CSP 校验）；
+-   - 取代 [docs-center.js:91](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/server/static/js/docs-center.js#L91) 的纯 `<pre>` 展示，直接渲染带目录导航、EARS 需求高亮、版本批准徽章（`APPROVED v2` / `STALE 待重审`）与可缩放 C4/时序图的精装文档视图。
++   - 将轻量 MIT 开源渲染库 `marked` 与 `mermaid` 与 HTML 清理库一同离线 vendor 至 `autodev/server/static/vendor/`（固定版本，清理 HTML、限制链接与资源加载；实测 CSP、恶意文档和离线渲染）；
++   - 取代 [docs-center.js](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/server/static/js/docs-center.js) 的纯 `<pre>` 展示，直接渲染带目录导航、EARS 需求高亮、版本批准徽章（`APPROVED v2` / `STALE 待重审`）与可缩放 C4/时序图的精装文档视图。
+ 5. **单列执行流与统一原生扩展抽屉**：
+    - 任务展开后默认置顶展示 4 段式《工程师交接便签》与关键验证结论，技术命令流与平台心跳作为可展开明细藏在下方；
+-   - 将 [vernal-overlay.js:390-444](file:///Users/zomeryang/Documents/春天/个人科研/lattice-mesh/autodev/server/static/vernal-overlay.js#L390-L444) 挂在 LoopForge 原生 Issue/Run 详情页的裸 `<dialog>` 替换为视觉风格与原生完全统一的侧滑抽屉，呈现详设约束、行级 Diff 审查与五类质量证据。
++   - 将 [vernal-overlay.js](sandbox:/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/autodev/server/static/vernal-overlay.js) 挂在 LoopForge 原生 Issue/Run 详情页的裸 `<dialog>` 替换为视觉风格与原生完全统一的侧滑抽屉，呈现详设约束、行级 Diff 审查与五类质量证据。
+ 
+ ---
+ 
+ ## 第 7 章 · 执行端演进（借鉴 OpenHands）与后置质量生态路线
+ 
+ ### 7.1 近期优先落地：借鉴 OpenHands 改进现有 Runner 与 Link（融入 P3/P6）
+-不替换 LoopForge 执行主干，而是吸收 OpenHands SDK / Agent Server 的 6 项成熟实践直接升级现有执行端接入：
++不替换 LoopForge 执行主干，而是参考 OpenHands SDK / Agent Server 的职责拆分，在核验上游版本后落实以下 4 项执行端改进：
+ 1. **执行端本地真实探测**：由实际运行任务的 Runner / Link 节点实时上报已安装 CLI、版本号与路径，不再由中心网关猜测 PATH；
+ 2. **凭据、登录态与可用模型聚合呈现**：按当前选定执行池（本机 Runner / 公用 Docker）真实返回已鉴权 Provider 与动态可用模型列表，消除静态硬编码模型下拉框导致的误选；
+ 3. **分离会话、工作区与控制视图**：清晰界定本机目录、容器沙箱与远端主机三类工作区的文件读写范围与凭据传递边界；
+ 4. **结构化事件与恢复标识**：统一记录可恢复会话/Run 锚点，断线重连或网关重启后幂等续查而非重跑。
+ 
+ ### 7.2 增强验证插件生态（Phase 2 · P6 之后按需插拔）
+-将高价值开源验证工具作为标准插件挂入现有 `autodev/quality/gates/` 与 CI 体系，**不阻塞首版 P0–P6 主干**：
++将高价值开源验证工具作为标准插件挂入现有 `autodev/quality/gates/` 与 CI 体系，**不阻塞首版 P0 至 P6 主干**：
+ - **契约破环门禁（`oasdiff`）**：对含 OpenAPI 契约的项目，自动检测 Breaking Changes 阻断向下不兼容提交；
+ - **API 边界探索测试（`Schemathesis`）**：基于 OpenAPI Schema 自动生成异常与边界请求探针；
+ - **固定浏览器行为回归（Playwright Test）**：对前端泳道任务提供可重复的关键交互冒烟断言（零 console/pageerror、核心操作闭环）；
+ - **链路性能可观测（OpenTelemetry）与交付 SBOM（`Syft`）**：关联跨节点耗时瓶颈，正式发布归档时生成依赖物料清单。
+ 
+ ### 7.3 可选 P7：ACP 协议与 OpenHands 执行后端评估门禁
+-- 仅在 P0–P6 全链路稳定后，选取 1~2 个原生支持 ACP 的执行器做小范围受控 PoC；
++- 仅在 P0 至 P6 全链路稳定后，选取 1~2 个原生支持 ACP 的执行器做小范围受控 PoC；
+ - **准入标准**：只有当实测证明 ACP 或 OpenHands 执行后端在“多执行器维护成本、断网/凭据边界清晰度、运行稳定性”上的净收益明确高于新增维护复杂度时，才正式合入主干。
+ 
+ ---
+ 
+ ## 第 8 章 · 分期施工蓝图、首个黄金试点与验收矩阵
+ 
+-### 8.1 分期实施路线（增量纵向闭环，核心预估 5–8 周）
++### 8.1 分期实施路线（增量纵向闭环）
++
++原方案的 5 至 8 周仅为粗估。P0 验收后，依据真实执行器接入、前端改造、迁移与团队投入重新估算；每批以验收结果推进，不把粗估当成交付承诺。
+ 
+ | 批次 | 核心目标与交付物 | 涉及主要模块 | 本批硬验收门禁（Definition of Done） |
+ |---|---|---|---|
+-| **P0 · 地基止血与版本锚定** | 修复 4 处已复现衔接 Bug；落地 `spec_revisions`/`clarifications` 2 张表与 5 张既有表版本锚点；建立跨边界反断裂探针测试骨架 | `autodev/db.py`、`models.py`、`council.py`、`docs_center/service.py`、`process/runner.py`、`trace/scan.py`、`trace/service.py` | ① 既有全量回归测试 100% 通过；② 改动 SRS 到 v2 后旧批准立刻变 `STALE`；③ 圆桌产出真实生成 `docs/SRS.md`；④ 追溯矩阵真实读到全部需求与子目录详设；⑤ 跨模块零 `except Exception: pass` |
+-| **P1 · Spec Kit 固化、适配器与人话规范** | 离线固化 Spec Kit 资产清单；交付 `vernal-core` / `vernal-lite` 中文 Preset；落地规格适配器（含 `dsh` 结构化输出兜底）；完成业务/协议 Prompt 剥离与《工程师交接便签》规范 | `autodev/assets/speckit/`、`autodev/speckit/adapter.py`、`prompts.py`、`prompts_style.py`、`loopforge/bootstrap.py`、`harnesses/loopforge_harness.py` | ① 离线断网可加载固化资产并记录版本；② 通过 LoopForge 规划 SOP 跑通 `constitution/specify/clarify/plan/tasks`；③ 真实输出中零 `issue-xxx` 与搬运黑话，均含 4 段式交接便签 |
+-| **P2 · 黄金试点闭环（含视觉基线落地）** | 二维需求准入评估；Clarify Gate 全栈实现；`quick-prototype` 轻量交付流程；锁定 LoopForge 原生视觉基线、Mission Composer 与澄清/审批界面 | `autodev/speckit/triage.py`、`server/routers/planning.py`、`server/static/`（样式规范、输入台、澄清卡片） | **首个黄金试点验收：用本套流程从一句话需求端到端交付 Vernal 自己的「需求澄清功能」**（澄清持久化 → 回答更新修订 → 未答阻塞开工 → 编译执行 → 同一候选验收交付） |
+-| **P3 · 任务编译器、条件式辩论与变更传播** | 落地任务编译器（8 项硬校验 + 共享资源锁 + 扩展 `context_bundle.py`）；升级条件式多轮辩论圆桌；实现运行中需求变更影响传播与迟到旧结果拦截；按本轮功能增量冻结契约 | `autodev/speckit/compiler.py`、`context_bundle.py`、`council.py`、`scheduler.py`、`steering.py` | ① 共享资源冲突任务自动串行防踩踏；② 重复发布幂等不重单；③ 中途改需求后无关在途任务续跑、受影响任务确认暂停重派、迟到旧 Run 被拒收；④ 圆桌仅在真实争议时追加定向质询且支持人工投票 |
+-| **P4 · Superpowers 装配、质量左移与收敛** | 角色化装配 Superpowers 并写入防双控护栏；LoopForge 泳道前置 `deterministic_gate`；两阶段独立审查；Bugfix 真红灯校验；集成后 `converge` 缺口闭环 | `autodev/assets/skills/`、`loopforge/bootstrap.py`、`quality/`、`speckit/converge.py` | ① 空壳测试/密钥错误在进入 Reviewer 前被脚本门拦下；② Bugfix 0 用例或 ImportError 不算红灯；③ 集成漏需求时 `converge` 真实追加补缺任务且 `spec.md` 哈希不变；④ 技能零越权建 worktree/自宣交付 |
++| **P0 · 地基止血与版本锚定** | 修复 4 处已复现衔接 Bug；复用 `doc_versions` 保存不可变正文；补审批快照、需求唯一身份及 ACTIVE/RETIRED 状态；建立跨边界反断裂探针测试骨架 | `autodev/db.py`、`models.py`、`council.py`、`docs_center/service.py`、`process/runner.py`、`trace/scan.py`、`trace/service.py` | ① 既有全量回归测试 100% 通过；② 改动 SRS 到 v2 后旧批准立刻变 `STALE`；③ 圆桌产出真实生成 `docs/SRS.md`；④ 追溯矩阵真实读到全部需求与子目录详设；⑤ 本批规格解析、文档同步、门禁及追溯路径无静默吞错 |
++| **P1 · Spec Kit 固化、适配器与人话规范** | 离线固化 Spec Kit 资产清单；交付 `vernal-core` / `vernal-lite` 中文 Preset；落地规格适配器、规格修订/澄清表和最小任务编译器（含 `dsh` 能力预检与结构化输出兜底）；完成业务/协议 Prompt 剥离与《工程师交接便签》规范 | `autodev/assets/speckit/`、`autodev/speckit/adapter.py`、`prompts.py`、`prompts_style.py`、`loopforge/bootstrap.py`、`harnesses/loopforge_harness.py` | ① 离线断网可加载固化资产并记录版本；② 通过 LoopForge 规划 SOP 跑通 `constitution/specify/clarify/plan/tasks`；③ 真实输出中零 `issue-xxx` 与搬运黑话，均含 4 段式交接便签 |
++| **P2 · 黄金试点闭环（含视觉基线落地）** | 来源、清晰度、变更类型与风险评估；Clarify Gate 全栈实现；`quick-prototype` 轻量交付流程；锁定 LoopForge 原生视觉基线、Mission Composer 与澄清/审批界面 | `autodev/speckit/triage.py`、`server/routers/planning.py`、`server/static/`（样式规范、输入台、澄清卡片） | **黄金试点 A：使用已完成能力交付最小「需求澄清功能」，P4 再完成增强自举验收**（澄清持久化 → 回答更新修订 → 未答阻塞开工 → 编译执行 → 同一候选验收交付） |
++| **P3 · 任务编译器、条件式辩论与变更传播** | 扩展最小任务编译器（8 项硬校验 + 共享资源锁 + 扩展 `context_bundle.py`）；升级条件式多轮辩论圆桌；实现运行中需求变更影响传播与迟到旧结果拦截；按本轮功能增量冻结契约 | `autodev/speckit/compiler.py`、`context_bundle.py`、`council.py`、`scheduler.py`、`steering.py` | ① 共享资源冲突任务自动串行防踩踏；② 重复发布幂等不重单；③ 中途改需求后无关在途任务续跑、受影响任务确认暂停重派、迟到旧 Run 被拒收；④ 圆桌仅在真实争议时追加定向质询且支持人工投票 |
++| **P4 · Superpowers 装配、质量左移与收敛** | 角色化装配 Superpowers 并写入防双控护栏；LoopForge 泳道前置 `deterministic_gate`；两阶段独立审查；Bugfix 真红灯校验；集成后 `converge` 缺口闭环及黄金试点 B | `autodev/assets/skills/`、`loopforge/bootstrap.py`、`quality/`、`speckit/converge.py` | ① 空壳测试/密钥错误在进入 Reviewer 前被脚本门拦下；② Bugfix 0 用例不算红灯；与目标缺陷无关的 ImportError 进入环境阻塞；③ 集成漏需求时 `converge` 真实追加补缺任务且 `spec.md` 哈希不变；④ 技能零越权建 worktree/自宣交付 |
+ | **P5 · 统一工作台全面审美收敛** | 彻底拆除 `.vernal-subtabs` 双顶栏与 6 层嵌套套框；上线纤细七阶段轨道、分轮辩论室、离线 vendored `marked+mermaid` 文档中心、单列交接时间轴与统一原生抽屉；重构瘦身 CSS | `autodev/server/static/`、`scripts/build_vernal_stage_css.py` | ① 1280px 视口无双顶栏、无 7 阶段横向挤压、无全屏点阵；② 零原始 JSON/Markdown `<pre>` 裸露；③ 严格通过 LoopForge CSP 无 `eval` 校验与前端契约烟测 |
+ | **P6 · 全模板矩阵、OpenHands 探测借鉴与离线总验** | 补齐全部 6 套经典 SOP 模板（含 `vernal-standard` / `vernal-existing`、`refactor-hardening`、`doc-reverse-onboarding`）；执行端真实能力探测与模型聚合展示；全环境/离线/升级兼容总回归 | `autodev/process/templates/`、`autodev/assets/speckit/presets/`、`server/project_launcher.py`、`vernal.sh` | 覆盖全新/存量/热修/重构/逆向 5 类样板任务 + 本机 Codex / 沙箱 dsh / OpenCode + 断网打包 + 进程重启恢复 + 老工作区无损启动 |
+ | **P7 · 扩展生态（可选）** | 接入 `oasdiff` / `Schemathesis` / Playwright 行为回归 / OTel / `Syft` 插件；开展 ACP / OpenHands 后端小范围对照 PoC | `autodev/quality/gates/`、`autodev/harnesses/` | 插件按需启停且离线可降级；PoC 形成量化收益评估报告后再决策合入 |
+ 
+ ### 8.2 首个黄金试点设计：用 Vernal + Spec Kit 交付「需求澄清功能」本身
+ 
+-为避免纸上谈兵，P2 结束前即用真实环境跑通第一条端到端试点：
+-1. **输入**：仅输入一句话需求——“为 Vernal 增加交互式需求澄清能力，遇到模糊需求时先向用户提选择题确认边界，再进入规划与编码”；
++为避免纸上谈兵，P2 完成试点 A：步骤 1 至 4 使用最小编译器，执行基础冻结、独立验证并输出基本清单。P4 完成试点 B：补齐下述增强审查与收敛。不得用后期尚未实现的能力作为 P2 的前置验收条件。
++1. **输入**：仅输入一句话需求：“为 Vernal 增加交互式需求澄清能力，遇到模糊需求时先向用户提选择题确认边界，再进入规划与编码”；
+ 2. **检验闭环**：
+    - `specify` 产出结构化 `specs/001-clarify-gate/spec.md`；
+    - `clarify` 自动生成持久化 `BLOCKING` 澄清问题并阻塞下游；
+-   - 人类回答后生成 `spec_rev_id=2`（`spec_sha_v2`），确认旧修订自动变 `STALE`；
++   - 人类回答后生成该功能下一修订（例如 `rev_no=2`，数据库主键不固定为 2）（`spec_sha_v2`），确认旧修订自动变 `STALE`；
+    - `plan` + `tasks` + `analyze` 核验一致后，任务编译器产出自包含工作包发布至 LoopForge；
+    - `implement`（挂载 TDD）→ `deterministic_gate` → 两阶段 `review` → 独立验证绑定 `candidate_sha`；
+    - 模拟漏掉“默认选项一键跳过”一条需求，跑 `converge` 确认自动补单并返工转绿；
+@@ -486,7 +493,7 @@
+ | 验收维度 | 测试场景 | 预期硬结果 |
+ |---|---|---|
+ | **三体防断裂** | 完整执行 Spec → 圆桌 → 详设 → 编译 → LoopForge Run → 追溯 | 全链共享同一 `spec_sha`，`docs/SRS.md` 与追溯矩阵 100% 非空一致，零静默吞错 |
+-| **版本防漂移** | 批准 `v1` 后修改 `spec.md` 到 `v2` | 旧批准立即失效标 `STALE`；调度器拒绝按 `v1` 派单；界面高亮需重审 |
++| **版本防漂移** | 批准 `v1` 后修改 `spec.md` 到 `v2` | 受影响批准对新基线标 `STALE`；调度器拒绝按过期工作包派单；历史决定保留，界面高亮需重审 |
+ | **并发与防回滚** | 需求变更重派后，旧 Run 延迟回传 `PASS` | 调度器校验 `exec_seq` 与 `spec_sha` 不匹配，硬拒收旧结果并记审计事件 |
+ | **共享资源防踩踏** | 两个 `[P]` 并行任务同时声明改 `uv.lock` / 迁移脚本 | 任务编译器自动插入串行/资源锁，调度器绝不同时派发 |
+ | **执行器差异兜底** | 在公用 Docker 沙箱下用 `dsh` 跑规格与规划步骤 | 正确命中指定模型，产物经 `validate` 节点校验通过，不因 `dsh` 原生限制丢结构化输出 |
+@@ -497,4 +504,18 @@
+ 
+ ---
+ 
+-> **后续推进建议**：本方案书已锁定全部防断裂约束、数据模型增量、Spec Kit 三层接入、人话交接、6 套模板与前端视觉基线。确认无误后，可直接启动 **P0（地基止血与版本锚定 + 反断裂探针测试）** 实施。
++> **后续推进建议**：本方案书定义目标约束；各批以对应实现、自审记录和负责人验收作为完成依据，不能把设计条目视为已实现能力。P0 完成自审后提交负责人验收；P1 才启动 Spec Kit 资产固化、适配器及最小编译器。后续批次各自提交实现与证据。
++
++
++## v1.1 补充实施契约
++
++1. 需求身份：采用项目范围内稳定键；跨功能使用 `feature_id:REQ-001`，显示编号与内部身份明确区分。重复定义显式报错；需求删除转为 RETIRED，重新引入恢复 ACTIVE；历史修订保留于正文快照。P0 兼容读取历史字段，P1 才接管 Spec Kit 文件解析。
++2. 三层基线：项目交付基线选择功能修订；工作包冻结需求、契约、设计、代码基线与资产版本；验证证据绑定候选、环境与命令。旧批准对旧内容的历史事实不得被覆盖。
++3. 收敛补单：缺口报告生成新的 tasks 修订，经过编译校验与幂等发布后执行；保存原任务条目与工作包映射。收敛不得修改规格降低验收标准，必须有次数、预算和停止条件。
++4. 编译与派发：编译时允许引用 DAG 中尚待生成的契约任务；实际派发时必须取得已冻结契约。共享资源锁记录实际作用域、访问模式、租约与释放规则，添加依赖后重新检查环。
++5. 失败处理：分别处理需求冲突、格式错误、代码失败、环境/鉴权错误、预算耗尽与取消。禁止把所有失败都交给编码 Agent 重试。暂停或重启只能恢复已确认的尝试，不能重复派发。
++6. 权限与人工门：复用既有角色体系，逐动作定义澄清、规格修订、审批、豁免、重派和签收权限；服务端使用真实身份。人工验收若属于交付承诺，则必须是发布前门禁。
++7. 需求准入：项目来源、清晰度、变更类型、风险分别记录，完整文档不自动代表无歧义。技术辩论达到上限仍未解决时转为实验或负责人决策，不自动宣称共识。
++8. 离线验收：分开验证资产与界面离线、构建依赖离线及模型推理离线；允许外部模型的执行池不属于推理离线。P1 起具备最低能力/鉴权预检，P6 扩充执行器矩阵。
++9. 前端与发布：P2 起提供关键交互行为回归。技术细节放在诊断展开区。交付清单包含最终集成候选及独立验证；部署回滚须补制品、配置和数据库迁移边界，不能用一个 SHA 声称全部可回滚。
++10. P0 验收：旧页错批被拒、待审批期间修改产生新轮次、历史内容可恢复、外部文件变更阻断放行、主执行路径与发布路径均检查当前批准、圆桌到 SRS/需求/详设追溯通路正常、需求删除和重复编号行为正确、旧工作区迁移可重复执行。
+--- a/autodev/context_bundle.py
++++ b/autodev/context_bundle.py
+@@ -25,7 +25,7 @@
+     if task.design_refs or task.requirement_ids:
+         from autodev.docs_center.service import resolve_design_refs_snippet
+ 
+-        snippet = resolve_design_refs_snippet(ws_root, task.design_refs) if (ws_root and task.design_refs) else ""
++        snippet = resolve_design_refs_snippet(ws_root, task.design_refs, milestone_id=task.milestone_id) if (ws_root and task.design_refs) else ""
+         req_line = f"- **关联需求编号**：{', '.join(task.requirement_ids)}（编写测试时请用 `@pytest.mark.req(\"REQ-xxx\")` 或注释标注对应需求 ID）\n" if task.requirement_ids else ""
+         ref_line = f"- **关联详细设计引用**：{', '.join(task.design_refs)}\n" if task.design_refs else ""
+         design_block = f"\n## 关联需求与详细设计约束\n\n{req_line}{ref_line}{snippet}\n"
+@@ -51,7 +51,7 @@
+     if ws_root and task.design_refs:
+         from autodev.docs_center.service import resolve_design_refs_snippet
+ 
+-        snip = resolve_design_refs_snippet(ws_root, task.design_refs)
++        snip = resolve_design_refs_snippet(ws_root, task.design_refs, milestone_id=task.milestone_id)
+         if snip:
+             design_sec = f"\n## 详细设计对照片段\n\n{snip}\n"
+ 
+--- a/autodev/council.py
++++ b/autodev/council.py
+@@ -12,7 +12,7 @@
+ from autodev import gitops
+ from autodev.db import DocSlice, now_iso
+ from autodev.ingest import summarize
+-from autodev.models import CouncilConsensus, CouncilOpinion, ProjectStatus
++from autodev.models import CouncilConsensus, CouncilOpinion, ProductSpec, ProjectStatus
+ from autodev.prompts import (
+     PLANNER_FULLTEXT_BUDGET,
+     build_council_consensus_prompt,
+@@ -272,13 +272,18 @@
+                     "error_conventions": [consensus.contract_strategy],
+                     "global_acceptance_redlines": [f"{a.adr_id} {a.title}: {a.decision}" for a in consensus.adrs],
+                     "spec_markdown": consensus.spec_markdown,
+-                    "adrs": [a.model_dump() for a in consensus.adrs],
++                    "requirements": [r.model_dump() for r in consensus.requirements],
++                    "nfrs": [r.model_dump() for r in consensus.nfrs],
+                 }
++                compat_prd = ProductSpec.model_validate(compat_prd).model_dump()
+                 engine.ws.prd_json_path.write_text(json.dumps(compat_prd, ensure_ascii=False, indent=2), "utf-8")
+                 engine.ws.prd_md_path.parent.mkdir(parents=True, exist_ok=True)
+                 engine.ws.prd_md_path.write_text(consensus.spec_markdown.strip() + "\n", "utf-8")
++                from autodev.docs_center.service import sync_standard_docs_from_artifacts
++
++                generated_docs = sync_standard_docs_from_artifacts(engine)
+                 engine.record_documents(
+-                    ["docs/PRD_SPEC.md"],
++                    ["docs/PRD_SPEC.md", *generated_docs],
+                     "autodev(council): publish architecture council consensus & ADRs",
+                     author_name=ident["author_name"],
+                     author_email=ident["author_email"],
+@@ -300,8 +305,9 @@
+                     from autodev.steering import sync_council_adrs_to_decisions
+ 
+                     await sync_council_adrs_to_decisions(engine, consensus)
+-                except Exception:
+-                    pass
++                except Exception as exc:
++                    engine.db.add_event("council.decision_sync_failed", str(exc), actor=ident["label"])
++                    raise
+                 engine.db.add_event(
+                     "council.consensus",
+                     f"圆桌拍板完成：形成 {len(consensus.adrs)} 项 ADR 决策，裁决 {len(consensus.resolved_debates)} 项分歧",
+--- a/autodev/db.py
++++ b/autodev/db.py
+@@ -517,6 +517,14 @@
+             return {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+ 
+         additions = {
++            "gate_records": {
++                "target_path": "TEXT NOT NULL DEFAULT ''",
++                "target_sha": "TEXT NOT NULL DEFAULT ''",
++                "target_version": "INTEGER NOT NULL DEFAULT 0",
++                "target_snapshot_json": "TEXT NOT NULL DEFAULT '[]'",
++                "decision_status": "TEXT NOT NULL DEFAULT ''",
++                "stale_reason": "TEXT NOT NULL DEFAULT ''",
++            },
+             "link_codes": {"owner_id": "TEXT", "verified_at": "REAL NOT NULL DEFAULT 0"},
+             "host_links": {"codex_login": "INTEGER NOT NULL DEFAULT 0", "owner_id": "TEXT",
+                            "verified_at": "REAL NOT NULL DEFAULT 0", "revoked_at": "REAL", "expires_at": "REAL"},
+--- /dev/null
++++ b/autodev/docs_center/paths.py
+@@ -0,0 +1,42 @@
++"""Shared paths for versioned, milestone-scoped detailed designs."""
++
++from pathlib import Path
++import re
++
++
++def _identifier(value: str) -> str:
++    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", value) or value in {".", ".."}:
++        raise ValueError(f"非法的设计范围标识：{value}")
++    return value
++
++
++def detailed_design_json_path(ws, milestone_id: str, squad_id: str) -> Path:
++    return ws.state_dir / "design" / _identifier(milestone_id) / f"{_identifier(squad_id)}.json"
++
++
++def detailed_design_doc_path(milestone_id: str, squad_id: str) -> str:
++    return f"docs/design/{_identifier(milestone_id)}/{_identifier(squad_id)}.md"
++
++
++def detailed_design_approval_paths(workspace_root: Path, milestone_id: str) -> list[Path]:
++    """List the complete on-disk approval group, including unarchived new members."""
++    scope = _identifier(milestone_id)
++    roots = [(workspace_root / "docs/design", "*.md"), (workspace_root / ".autodev/design", "*.json")]
++    scoped = [p for root, pattern in roots for p in (root / scope).rglob(pattern) if p.is_file()]
++    paths = scoped or [p for root, pattern in roots for p in root.glob(pattern) if p.is_file()]
++    for path in paths:
++        if not path.resolve().is_relative_to(workspace_root.resolve()):
++            raise ValueError(f"详设文件越出工作区：{path.name}")
++    return sorted(paths)
++
++
++def iter_detailed_design_json_paths(ws, milestone_id: str | None = None):
++    root = ws.state_dir / "design"
++    if not root.is_dir():
++        return
++    for path in sorted(root.rglob("*.json")):
++        if not path.resolve().is_relative_to(root.resolve()):
++            raise ValueError(f"详设文件越出工作区：{path.name}")
++        rel = path.relative_to(root)
++        if milestone_id is None or len(rel.parts) == 1 or rel.parts[0] == _identifier(milestone_id):
++            yield path
+--- a/autodev/docs_center/service.py
++++ b/autodev/docs_center/service.py
+@@ -3,8 +3,9 @@
+ from __future__ import annotations
+ 
+ import difflib
+-import hashlib
+ import json
++import os
++import tempfile
+ from pathlib import Path
+ from typing import TYPE_CHECKING, Any
+ 
+@@ -18,11 +19,25 @@
+     render_srs_markdown,
+ )
+ from autodev.docs_center.validator import validate_detailed_design
++from autodev.docs_center.paths import detailed_design_doc_path, detailed_design_json_path, iter_detailed_design_json_paths
+ from autodev.models import CouncilConsensus, DetailedDesign, ProductSpec, RequirementItem, TaskStatus
+-from autodev.process.runner import ensure_gate_record, is_gate_passed, load_template
++from autodev.process.runner import ensure_gate_record, is_gate_passed, load_template, refresh_document_gates
++from autodev.process.targets import document_sha, normalize_document
+ 
+ if TYPE_CHECKING:
+     from autodev.engine import Engine
++
++
++class DocumentConflictError(ValueError):
++    """The editor no longer holds the current document revision."""
++
++
++def load_product_spec(engine: "Engine") -> ProductSpec:
++    """Read legacy ADR-bearing snapshots without modifying or discarding the original."""
++    data = json.loads(engine.ws.prd_json_path.read_text("utf-8"))
++    if isinstance(data, dict) and "adrs" in data:
++        data = {k: v for k, v in data.items() if k != "adrs"}
++    return ProductSpec.model_validate(data)
+ 
+ 
+ def _safe_doc_relpath(ws_root: Path, rel_path: str) -> Path:
+@@ -39,8 +54,10 @@
+ 
+ def _classify_doc_kind(rel_path: str) -> str:
+     norm = rel_path.replace("\\", "/")
+-    if norm in ("docs/SRS.md", "docs/PRD_SPEC.md"):
++    if norm == "docs/SRS.md":
+         return "SRS"
++    if norm == "docs/PRD_SPEC.md":
++        return "LEGACY_SPEC"
+     if norm == "docs/ARCHITECTURE.md":
+         return "ADD"
+     if norm.startswith("docs/adr/"):
+@@ -61,52 +78,81 @@
+     *,
+     author: str = "owner",
+     note: str = "",
++    expected_sha: str | None = None,
+ ) -> dict[str, Any]:
+     full = _safe_doc_relpath(engine.ws.root, rel_path)
++    version = _save_snapshot(engine, full, content, author=author, note=note, expected_sha=expected_sha)
++    return get_doc(engine, full.relative_to(engine.ws.root.resolve()).as_posix(), version=version)
++
++
++def _save_snapshot(engine: "Engine", full: Path, content: str, *, author: str, note: str,
++                   expected_sha: str | None = None, refresh_gates: bool = True, write_projection: bool = True) -> int:
++    full = full.resolve()
++    if not full.is_relative_to(engine.ws.root.resolve()):
++        raise ValueError("产物路径越出工作区")
+     canonical_rel = full.relative_to(engine.ws.root.resolve()).as_posix()
+     full.parent.mkdir(parents=True, exist_ok=True)
+-    normalized_text = content.rstrip() + "\n"
+-    full.write_text(normalized_text, "utf-8")
+-
+-    sha = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
+-    rows = engine.db._query("SELECT version, content_sha FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1", (canonical_rel,))
+-    if rows and rows[0]["content_sha"] == sha:
+-        ver = int(rows[0]["version"])
+-        return get_doc(engine, canonical_rel, version=ver)
+-
+-    next_ver = (int(rows[0]["version"]) + 1) if rows else 1
+-    ts = now_iso()
+-    engine.db._exec(
+-        "INSERT INTO doc_versions(path, version, content_sha, content_text, author, note, created_at)"
+-        " VALUES(?, ?, ?, ?, ?, ?, ?)",
+-        (canonical_rel, next_ver, sha, normalized_text, author, note.strip(), ts),
+-    )
+-    engine.db.add_event("doc.saved", f"规范文档已保存新版本：{canonical_rel} (v{next_ver})", actor=author)
+-    return get_doc(engine, canonical_rel, version=next_ver)
++    normalized_text = normalize_document(content)
++    sha = document_sha(normalized_text)
++    with engine.db.transaction():
++        rows = engine.db._query("SELECT version, content_sha FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1", (canonical_rel,))
++        old_sha = rows[0]["content_sha"] if rows else ""
++        if expected_sha is not None and (expected_sha != old_sha or
++                (full.is_file() and document_sha(full.read_text("utf-8")) != old_sha)):
++            raise DocumentConflictError("文档已被其他操作修改，请刷新后重新编辑")
++        if rows and old_sha == sha:
++            next_ver = int(rows[0]["version"])
++        else:
++            next_ver = int(rows[0]["version"]) + 1 if rows else 1
++            engine.db._exec(
++                "INSERT INTO doc_versions(path, version, content_sha, content_text, author, note, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
++                (canonical_rel, next_ver, sha, normalized_text, author, note.strip(), now_iso()),
++            )
++        # A committed snapshot remains available even when an external edit damages the projection.
++        if write_projection:
++            fd, name = tempfile.mkstemp(prefix=".vernal-doc-", dir=full.parent)
++            try:
++                with os.fdopen(fd, "w", encoding="utf-8") as stream:
++                    stream.write(normalized_text)
++                    stream.flush()
++                    os.fsync(stream.fileno())
++                os.replace(name, full)
++            finally:
++                if os.path.exists(name):
++                    os.unlink(name)
++        if refresh_gates:
++            refresh_document_gates(engine.db)
++        if old_sha != sha:
++            engine.db.add_event("doc.saved", f"规范文档已保存新版本：{canonical_rel} (v{next_ver})", actor=author)
++    return next_ver
++
++
++def _observe_document(engine: "Engine", path: Path) -> None:
++    """Archive a working copy without rewriting it during a read request."""
++    with engine.db.transaction():
++        text = path.read_text("utf-8")
++        _save_snapshot(engine, path, text, author="system", note="发现工作副本新内容", write_projection=False)
+ 
+ 
+ def list_docs(engine: "Engine") -> list[dict[str, Any]]:
+     docs_dir = engine.ws.root / "docs"
+-    seen_paths: set[str] = set()
+     items: list[dict[str, Any]] = []
++    doc_paths = sorted(p for p in docs_dir.rglob("*.md") if p.is_file())
++
++    # Archive the whole group before rendering any approval badges.
++    for path in [*iter_detailed_design_json_paths(engine.ws), *doc_paths]:
++        rel = path.relative_to(engine.ws.root).as_posix()
++        rows = engine.db._query("SELECT content_sha FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1", (rel,))
++        if not rows or document_sha(path.read_text("utf-8")) != rows[0]["content_sha"]:
++            _observe_document(engine, path)
+ 
+     if docs_dir.is_dir():
+-        for fp in sorted(docs_dir.rglob("*.md")):
+-            if not fp.is_file():
+-                continue
++        for fp in doc_paths:
+             rel = fp.relative_to(engine.ws.root).as_posix()
+-            seen_paths.add(rel)
+             v_rows = engine.db._query(
+                 "SELECT version, content_sha, author, created_at FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1",
+                 (rel,),
+             )
+-            if not v_rows:
+-                # 首次发现磁盘已有文档时自动纳入 v1 版本基线
+-                save_doc_version(engine, rel, fp.read_text("utf-8", errors="replace"), author="system", note="初始纳入版本管理")
+-                v_rows = engine.db._query(
+-                    "SELECT version, content_sha, author, created_at FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1",
+-                    (rel,),
+-                )
+             kind = _classify_doc_kind(rel)
+             status = "DRAFT"
+             if kind == "SRS" and is_gate_passed(engine.db, "srs_approval", "project", "project"):
+@@ -114,15 +160,25 @@
+             elif kind == "ADD" and is_gate_passed(engine.db, "architecture_approval", "project", "project"):
+                 status = "APPROVED"
+             elif kind == "DETAILED_DESIGN":
+-                ms_list = engine.db.list_milestones()
+-                if ms_list and all(is_gate_passed(engine.db, "detailed_design_approval", "milestone", m.milestone_id) for m in ms_list if m.planned):
++                parts = rel.split("/")
++                ms_ids = [parts[2]] if len(parts) == 4 else [m.milestone_id for m in engine.db.list_milestones() if m.planned]
++                if ms_ids and all(is_gate_passed(engine.db, "detailed_design_approval", "milestone", mid) for mid in ms_ids):
+                     status = "APPROVED"
++            if status != "APPROVED":
++                gate_id = {"SRS": "srs_approval", "ADD": "architecture_approval", "DETAILED_DESIGN": "detailed_design_approval"}.get(kind)
++                if gate_id:
++                    scopes = ms_ids if kind == "DETAILED_DESIGN" else ["project"]
++                    for scope in scopes:
++                        records = engine.db._query("SELECT 1 FROM gate_records WHERE gate_id=? AND scope_id=? AND status='STALE' LIMIT 1", (gate_id, scope))
++                        if records:
++                            status = "STALE"
+             items.append(
+                 {
+                     "path": rel,
+                     "kind": kind,
+                     "status": status,
+                     "version": int(v_rows[0]["version"]) if v_rows else 1,
++                    "content_sha": v_rows[0]["content_sha"] if v_rows else "",
+                     "author": v_rows[0]["author"] if v_rows else "system",
+                     "updated_at": v_rows[0]["created_at"] if v_rows else "",
+                 }
+@@ -151,8 +207,10 @@
+             "SELECT * FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1",
+             (canonical,),
+         )
+-        if not rows:
+-            return save_doc_version(engine, canonical, content, author="system", note="初始读取建档")
++        if not rows or document_sha(content) != rows[0]["content_sha"]:
++            _observe_document(engine, full)
++            latest = engine.db._query("SELECT version FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1", (canonical,))[0]
++            return get_doc(engine, canonical, version=latest["version"])
+         row = dict(rows[0])
+         ver = int(row["version"])
+ 
+@@ -165,6 +223,7 @@
+         "kind": _classify_doc_kind(canonical),
+         "version": ver,
+         "content": content,
++        "content_sha": row["content_sha"],
+         "author": row.get("author", "system"),
+         "note": row.get("note", ""),
+         "created_at": row.get("created_at", ""),
+@@ -222,40 +281,53 @@
+     proj_name = engine.db.meta_get("name", engine.ws.root.name) or engine.ws.root.name
+     written: list[str] = []
+ 
++    def render_version(path: str, content: str, author: str, note: str) -> None:
++        key = f"doc.rendered_sha:{path}"
++        digest = document_sha(content)
++        # Refreshing unchanged source must not erase a human revision.
++        if engine.db.meta_get(key) == digest and (engine.ws.root / path).is_file():
++            return
++        save_doc_version(engine, path, content, author=author, note=note)
++        engine.db.meta_set(key, digest)
++        written.append(path)
++
+     if engine.ws.prd_json_path.is_file():
+         try:
+-            spec = ProductSpec.model_validate(json.loads(engine.ws.prd_json_path.read_text("utf-8")))
++            spec = load_product_spec(engine)
+             srs_md = render_srs_markdown(spec, profile=profile, project_name=proj_name)
+-            save_doc_version(engine, "docs/SRS.md", srs_md, author="PM-Agent", note=f"按 {profile} 规范生成 SRS")
+-            written.append("docs/SRS.md")
+-        except Exception:
+-            pass
++            render_version("docs/SRS.md", srs_md, author="PM-Agent", note=f"按 {profile} 规范生成 SRS")
++        except (ValueError, OSError) as exc:
++            engine.db.add_event("doc.sync_failed", f"SRS 同步失败：{exc}", actor="DocumentService")
++            raise ValueError(f"SRS 规格契约无效：{exc}") from exc
+ 
+     cons: CouncilConsensus | None = None
+     c_msgs = [m for m in engine.db.list_council_messages() if m.get("kind") == "consensus"]
+     if c_msgs:
+         try:
+             cons = CouncilConsensus.model_validate(c_msgs[-1]["body"])
+-        except Exception:
+-            cons = None
++        except ValueError as exc:
++            engine.db.add_event("doc.sync_failed", f"圆桌共识无效：{exc}", actor="DocumentService")
++            raise ValueError(f"圆桌共识契约无效：{exc}") from exc
+ 
+     bp_dict: dict[str, Any] | None = None
+-    if engine.ws.blueprint_path.is_file():
++    architecture_source = engine.ws.blueprint_path if engine.ws.blueprint_path.is_file() else engine.ws.plan_json_path
++    if architecture_source.is_file():
+         try:
+-            bp_dict = json.loads(engine.ws.blueprint_path.read_text("utf-8"))
+-        except Exception:
+-            bp_dict = None
++            bp_dict = json.loads(architecture_source.read_text("utf-8"))
++            if not isinstance(bp_dict, dict):
++                raise ValueError("架构方案顶层必须是对象")
++        except (ValueError, OSError) as exc:
++            engine.db.add_event("doc.sync_failed", f"架构同步失败：{exc}", actor="DocumentService")
++            raise ValueError(f"架构方案无效：{exc}") from exc
+ 
+     if cons or bp_dict:
+         add_md = render_architecture_markdown(cons, bp_dict, profile=profile, project_name=proj_name)
+-        save_doc_version(engine, "docs/ARCHITECTURE.md", add_md, author="Architect-Council", note="同步架构说明书")
+-        written.append("docs/ARCHITECTURE.md")
++        render_version("docs/ARCHITECTURE.md", add_md, author="Architect-Council", note="同步架构说明书")
+ 
+     if cons and cons.adrs:
+         for adr in cons.adrs:
+             adr_path = f"docs/adr/{adr.adr_id}.md"
+-            save_doc_version(engine, adr_path, render_adr_madr(adr), author="Director", note=adr.title)
+-            written.append(adr_path)
++            render_version(adr_path, render_adr_madr(adr), author="Director", note=adr.title)
+ 
+     return written
+ 
+@@ -264,10 +336,11 @@
+     if not engine.ws.prd_json_path.is_file():
+         return []
+     try:
+-        spec = ProductSpec.model_validate(json.loads(engine.ws.prd_json_path.read_text("utf-8")))
+-        return list(spec.requirements)
+-    except Exception:
+-        return []
++        spec = load_product_spec(engine)
++        return list(spec.requirements) + list(spec.nfrs)
++    except (ValueError, OSError) as exc:
++        engine.db.add_event("doc.sync_failed", f"需求加载失败：{exc}", actor="DocumentService")
++        raise ValueError(f"需求规格无法读取：{exc}") from exc
+ 
+ 
+ async def generate_detailed_design(
+@@ -287,7 +360,7 @@
+     add_txt = (engine.ws.root / "docs" / "ARCHITECTURE.md").read_text("utf-8") if (engine.ws.root / "docs" / "ARCHITECTURE.md").is_file() else ""
+ 
+     req_hint = (
+-        "\n".join(f"- {r.req_id} [{r.priority}] {r.title}: {r.statement}" for r in known_reqs)
++        "\n".join(f"- {r.identity} [{r.priority}] {r.title}: {r.statement}" for r in known_reqs)
+         if known_reqs
+         else "（当前 SRS 未显式列出结构化 REQ 编号，可按需自建或留空 req_ids）"
+     )
+@@ -321,17 +394,19 @@
+                 # 单组详设只校验组内引用合法与接口 TC 闭环；单组工程（仅 1 个研发组）同时强制覆盖全部 P0 REQ
+                 enforce_p0 = len(squads) <= 1
+                 errors = validate_detailed_design(dd_obj, known_reqs, enforce_all_p0=enforce_p0)
++                if dd_obj.milestone_id != milestone_id or dd_obj.squad_id != squad_id:
++                    errors.append("详细设计的里程碑或研发组与请求范围不一致")
+             except ValidationError as exc:
+                 errors = [str(exc)]
+ 
+         if dd_obj is not None and not errors:
+-            json_out = engine.ws.state_dir / "design" / milestone_id / f"{squad_id}.json"
+-            json_out.parent.mkdir(parents=True, exist_ok=True)
+-            json_out.write_text(json.dumps(dd_obj.model_dump(), ensure_ascii=False, indent=2), "utf-8")
+-
++            json_out = detailed_design_json_path(engine.ws, milestone_id, squad_id)
+             md_text = render_detailed_design_markdown(dd_obj, profile=engine.settings.doc_profile or "default")
+-            rel_doc = f"docs/design/{squad_id}.md"
+-            save_doc_version(engine, rel_doc, md_text, author="Architect", note=f"{milestone_id} 详细设计生成")
++            rel_doc = detailed_design_doc_path(milestone_id, squad_id)
++            with engine.db.transaction():
++                _save_snapshot(engine, json_out, json.dumps(dd_obj.model_dump(), ensure_ascii=False, indent=2),
++                               author="Architect", note=f"{milestone_id} 详细设计结构化快照", refresh_gates=False)
++                save_doc_version(engine, rel_doc, md_text, author="Architect", note=f"{milestone_id} 详细设计生成")
+ 
+             tpl = load_template(engine.ws, engine.settings)
+             dd_stage = next((s for s in tpl.stages if s.id == "detailed_design" and s.enabled), None)
+@@ -358,7 +433,7 @@
+     raise PlanningError(errors)
+ 
+ 
+-def resolve_design_refs_snippet(ws_root: Path, design_refs: list[str], max_chars: int = 4000) -> str:
++def resolve_design_refs_snippet(ws_root: Path, design_refs: list[str], max_chars: int = 4000, *, milestone_id: str = "") -> str:
+     """根据任务卡上的 design_refs（如 `design/backend.md#接口-createOrder`）提取对应设计章节片段。"""
+     if not design_refs:
+         return ""
+@@ -368,6 +443,10 @@
+         rel = file_part.strip().lstrip("/")
+         if not rel.startswith("docs/"):
+             rel = f"docs/{rel}"
++        if milestone_id and rel.startswith("docs/design/") and len(rel.split("/")) == 3:
++            scoped = detailed_design_doc_path(milestone_id, Path(rel).stem)
++            if (ws_root / scoped).is_file():
++                rel = scoped
+         fp = (ws_root / rel).resolve()
+         if not fp.is_relative_to(ws_root.resolve() / "docs") or not fp.is_file():
+             chunks.append(f"- 引用 `{ref}`（文件尚未落盘）")
+--- a/autodev/docs_center/templates.py
++++ b/autodev/docs_center/templates.py
+@@ -25,7 +25,7 @@
+     lines += ["", "## 3. 功能性需求规定（EARS）" if profile == "gbt8567" else "## 3. 功能需求清单 (REQ)", ""]
+     if spec.requirements:
+         for req in spec.requirements:
+-            lines.append(f"### {req.req_id} [{req.priority}] {req.title}")
++            lines.append(f"### {req.identity} [{req.priority}] {req.title}")
+             lines.append(f"- **规范表述**：{req.statement}")
+             if req.acceptance:
+                 lines.append("- **验收判据**：")
+@@ -39,7 +39,9 @@
+     if spec.nfrs:
+         lines += ["## 4. 非功能性需求与质量属性 (NFR)", ""]
+         for nfr in spec.nfrs:
+-            lines.append(f"- **{nfr.req_id} [{nfr.priority}] {nfr.title}**：{nfr.statement}")
++            lines.append(f"### {nfr.identity} [{nfr.priority}] {nfr.title}")
++            lines.append(nfr.statement)
++            lines.extend(f"- {criterion}" for criterion in nfr.acceptance)
+         lines.append("")
+ 
+     lines += ["## 5. 异常边界与错误码约定", ""]
+--- a/autodev/docs_center/validator.py
++++ b/autodev/docs_center/validator.py
+@@ -43,8 +43,8 @@
+     """返回校验错误列表；空列表表示通过。"""
+     errors: list[str] = []
+     reqs = list(known_requirements or [])
+-    known_ids = {r.req_id for r in reqs}
+-    p0_ids = {r.req_id for r in reqs if r.priority == "P0"}
++    known_ids = {r.identity for r in reqs}
++    p0_ids = {r.identity for r in reqs if r.priority == "P0"}
+ 
+     if not dd.interfaces:
+         errors.append("详细设计至少需要定义一个模块接口 (interfaces)")
+--- a/autodev/engine.py
++++ b/autodev/engine.py
+@@ -440,6 +440,11 @@
+                     self.db.meta_set("prd_vision", spec.product_vision)
+                     self.set_status(ProjectStatus.SPECIFIED)
+                     from autodev.process.runner import ensure_gate_record, load_template
++                    from autodev.docs_center.service import sync_standard_docs_from_artifacts
++
++                    generated_docs = sync_standard_docs_from_artifacts(self)
++                    if generated_docs:
++                        self.record_documents(generated_docs, "autodev: archive generated specification")
+ 
+                     tpl = load_template(self.ws, self.settings)
+                     req_stage = next((s for s in tpl.stages if s.id == "requirements" and s.enabled), None)
+@@ -535,6 +540,11 @@
+ 
+     def _sync_planning_gates(self) -> None:
+         from autodev.process.runner import decide_gate, ensure_gate_record, load_template
++        from autodev.docs_center.service import sync_standard_docs_from_artifacts
++
++        generated_docs = sync_standard_docs_from_artifacts(self)
++        if generated_docs:
++            self.record_documents(generated_docs, "autodev: archive generated planning documents")
+ 
+         tpl = load_template(self.ws, self.settings)
+         arch_stage = next((s for s in tpl.stages if s.id == "architecture" and s.enabled), None)
+@@ -1135,7 +1145,7 @@
+ 
+     def _reserve_publication(self, milestone_id):
+         from autodev.ci.service import ci_gate_enabled, list_ci_runs
+-        from autodev.process.runner import is_gate_passed, load_template
++        from autodev.process.runner import blocking_document_gates, is_gate_passed, load_template
+         from autodev.review.policy import effective_review_policy
+         from autodev.review.service import current_milestone_candidate_ref, list_reviews
+ 
+@@ -1160,6 +1170,9 @@
+                 raise OpsError(f"{milestone_id} 当前候选尚未通过里程碑人工代码审查，禁止合入")
+ 
+         tpl = load_template(self.ws, self.settings)
++        blocked = blocking_document_gates(self.db, tpl, milestone_id)
++        if blocked:
++            raise OpsError(f"当前文档版本尚未批准，禁止交付：{', '.join(blocked)}")
+         if ci_gate_enabled(self):
+             if not is_gate_passed(self.db, "milestone_ci", "milestone", milestone_id):
+                 raise OpsError(f"{milestone_id} 尚未通过持续集成 (CI) 流水线门禁，禁止合入")
+--- a/autodev/models.py
++++ b/autodev/models.py
+@@ -4,11 +4,12 @@
+ 
+ import copy
+ import json
++import re
+ from enum import StrEnum
+ from pathlib import Path
+ from typing import Any, Literal
+ 
+-from pydantic import BaseModel, ConfigDict
++from pydantic import BaseModel, ConfigDict, model_validator
+ 
+ 
+ class TaskStatus(StrEnum):
+@@ -94,6 +95,8 @@
+     contract_strategy: str
+     adrs: list[CouncilADR]
+     spec_markdown: str
++    requirements: list[RequirementItem] = []
++    nfrs: list[RequirementItem] = []
+ 
+ 
+ # ---------- 1B. 产品经理输出：PRD / SRS 规格补全 ----------
+@@ -104,6 +107,19 @@
+     statement: str
+     priority: Literal["P0", "P1", "P2"] = "P1"
+     acceptance: list[str] = []
++    feature_id: str = ""
++
++    @model_validator(mode="after")
++    def validate_identity(self):
++        if not self.req_id.strip() or self.req_id != self.req_id.strip():
++            raise ValueError("需求编号不得为空或带首尾空格")
++        if self.feature_id and (not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", self.feature_id) or ":" in self.req_id):
++            raise ValueError("feature_id 必须是单层范围标识，req_id 不得重复携带范围")
++        return self
++
++    @property
++    def identity(self) -> str:
++        return f"{self.feature_id}:{self.req_id}" if self.feature_id else self.req_id
+ 
+ 
+ class ProductSpec(_Strict):
+@@ -115,6 +131,15 @@
+     spec_markdown: str
+     requirements: list[RequirementItem] = []
+     nfrs: list[RequirementItem] = []
++
++    @model_validator(mode="after")
++    def unique_requirement_ids(self):
++        seen = set()
++        for item in self.requirements + self.nfrs:
++            if not item.req_id.strip() or item.identity in seen:
++                raise ValueError(f"需求编号为空或重复：{item.identity}")
++            seen.add(item.identity)
++        return self
+ 
+ 
+ # ---------- 1C. 架构师 / 研发组输出：详细设计规格（Detailed Design） ----------
+--- a/autodev/process/runner.py
++++ b/autodev/process/runner.py
+@@ -39,6 +39,7 @@
+ from autodev.db import Database, now_iso
+ from autodev.models import MilestoneStatus, ProjectStatus, TaskStatus
+ from autodev.process.model import GateDef, ProcessTemplate, StageDef, StageState, StageView
++from autodev.process.targets import DOCUMENT_GATES, document_target, target_is_current
+ 
+ if TYPE_CHECKING:
+     from autodev.config import Settings, Workspace
+@@ -126,9 +127,13 @@
+     return tpl
+ 
+ 
+-def _hydrate_gate_row(row: Any) -> dict[str, Any]:
++def _hydrate_gate_row(row: Any, db: Database | None = None) -> dict[str, Any]:
+     d = dict(row)
+     d["evidence"] = json.loads(d.pop("evidence_json", None) or "{}")
++    if db is not None and d["status"] in ("PENDING", "PASSED", "WAIVED") and not target_is_current(db, d):
++        d["decision_status"] = d.get("decision_status") or d["status"]
++        d["status"] = "STALE"
++        d["stale_reason"] = d.get("stale_reason") or "审批目标已变更、缺失或尚未归档"
+     return d
+ 
+ 
+@@ -160,7 +165,7 @@
+         params.append(scope_id)
+     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+     rows = db._query(f"SELECT * FROM gate_records{where} ORDER BY record_id ASC", params)
+-    return [_hydrate_gate_row(r) for r in rows]
++    return [_hydrate_gate_row(r, db) for r in rows]
+ 
+ 
+ def latest_gate_record(db: Database, gate_id: str, scope_type: str, scope_id: str) -> dict[str, Any] | None:
+@@ -168,7 +173,7 @@
+         "SELECT * FROM gate_records WHERE gate_id=? AND scope_type=? AND scope_id=? ORDER BY round DESC LIMIT 1",
+         (gate_id, scope_type, scope_id),
+     )
+-    return _hydrate_gate_row(rows[0]) if rows else None
++    return _hydrate_gate_row(rows[0], db) if rows else None
+ 
+ 
+ def ensure_gate_record(
+@@ -184,25 +189,28 @@
+     force_new_round: bool = False,
+ ) -> dict[str, Any]:
+     """幂等创建或返回门禁记录。"""
+-    latest = latest_gate_record(db, gate_id, scope_type, scope_id)
+-    if latest is not None:
+-        if latest["status"] == "PENDING":
+-            return latest
+-        if not force_new_round:
+-            if latest["status"] in ("PASSED", "WAIVED"):
+-                return latest
+-            if latest["status"] == "FAILED" and not new_round_if_failed:
+-                return latest
+-        next_round = int(latest["round"]) + 1
+-    else:
+-        next_round = 1
+-
+     ts = now_iso()
+     with db.transaction():
++        target = document_target(db, gate_id, scope_id)
++        rows = db._query("SELECT * FROM gate_records WHERE gate_id=? AND scope_type=? AND scope_id=? ORDER BY round DESC LIMIT 1",
++                         (gate_id, scope_type, scope_id))
++        latest = _hydrate_gate_row(rows[0]) if rows else None
++        if latest:
++            same_target = latest.get("target_sha", "") == target["target_sha"]
++            if same_target and not force_new_round:
++                if latest["status"] in ("PENDING", "PASSED", "WAIVED"):
++                    return _hydrate_gate_row(rows[0], db)
++                if latest["status"] == "FAILED" and not new_round_if_failed:
++                    return latest
++            if latest["status"] in ("PENDING", "PASSED", "WAIVED"):
++                db._exec("UPDATE gate_records SET decision_status=status, status='STALE', stale_reason=? WHERE record_id=?",
++                         ("审批目标已变更" if not same_target else "已发起新一轮评审", latest["record_id"]))
++        next_round = int(latest["round"]) + 1 if latest else 1
+         cur = db._exec(
+-            "INSERT INTO gate_records(stage_id, gate_id, kind, scope_type, scope_id, status, round, summary, evidence_json, created_at)"
+-            " VALUES(?, ?, ?, ?, ?, 'PENDING', ?, ?, '{}', ?)",
+-            (stage_id, gate_id, kind, scope_type, scope_id, next_round, summary, ts),
++            "INSERT INTO gate_records(stage_id, gate_id, kind, scope_type, scope_id, status, round, summary, evidence_json, created_at,"
++            " target_path, target_sha, target_version, target_snapshot_json) VALUES(?, ?, ?, ?, ?, 'PENDING', ?, ?, '{}', ?, ?, ?, ?, ?)",
++            (stage_id, gate_id, kind, scope_type, scope_id, next_round, summary, ts,
++             target["target_path"], target["target_sha"], target["target_version"], target["target_snapshot_json"]),
+         )
+         rec_id = int(cur.lastrowid)
+     db.add_event(
+@@ -215,9 +223,42 @@
+     return _hydrate_gate_row(rows[0])
+ 
+ 
++def refresh_document_gates(db: Database) -> None:
++    """Invalidate old targets and open a new round within the caller's snapshot transaction."""
++    rows = db._query("SELECT g.* FROM gate_records g JOIN (SELECT gate_id,scope_type,scope_id,MAX(round) AS r "
++                     "FROM gate_records GROUP BY gate_id,scope_type,scope_id) latest ON g.gate_id=latest.gate_id "
++                     "AND g.scope_type=latest.scope_type AND g.scope_id=latest.scope_id AND g.round=latest.r")
++    for row in rows:
++        if row["gate_id"] not in DOCUMENT_GATES:
++            continue
++        current = document_target(db, row["gate_id"], row["scope_id"])
++        if row["target_sha"] != current["target_sha"]:
++            ensure_gate_record(db, stage_id=row["stage_id"], gate_id=row["gate_id"], kind=row["kind"],
++                               scope_type=row["scope_type"], scope_id=row["scope_id"], summary="文档已有新修订，请重新审阅")
++
++
+ def is_gate_passed(db: Database, gate_id: str, scope_type: str, scope_id: str) -> bool:
+     rec = latest_gate_record(db, gate_id, scope_type, scope_id)
+     return bool(rec and rec["status"] in ("PASSED", "WAIVED"))
++
++
++def blocking_document_gates(db: Database, template: ProcessTemplate, milestone_id: str) -> list[str]:
++    blocked = []
++    for stage in template.stages:
++        if not stage.enabled:
++            continue
++        for gate in stage.gates:
++            if gate.blocking and gate.id in DOCUMENT_GATES:
++                scope_id = milestone_id if gate.scope == "milestone" else "project"
++                # Legacy blueprints did not require an ADD document. Preserve that contract
++                # only when no document approval has ever been opened or materialized.
++                if (gate.id == "architecture_approval" and not stage.required_artifacts
++                        and latest_gate_record(db, gate.id, gate.scope, scope_id) is None
++                        and not document_target(db, gate.id, scope_id)["target_sha"]):
++                    continue
++                if not is_gate_passed(db, gate.id, gate.scope, scope_id):
++                    blocked.append(gate.id)
++    return blocked
+ 
+ 
+ def is_stage_passed(
+@@ -248,13 +289,15 @@
+     actor: str = "owner",
+     comment: str = "",
+     expected_round: int | None = None,
++    expected_sha: str | None = None,
+     evidence: dict[str, Any] | None = None,
+     audit_project: str = "",
+     actor_ip: str = "127.0.0.1",
+ ) -> dict[str, Any]:
+     from autodev.governance.audit import enqueue_decision
+     with db.transaction():
+-        out = _decide_gate(db, record_id, decision, actor=actor, comment=comment, expected_round=expected_round, evidence=evidence)
++        out = _decide_gate(db, record_id, decision, actor=actor, comment=comment, expected_round=expected_round,
++                           expected_sha=expected_sha, evidence=evidence)
+         enqueue_decision(db, f"gate:{record_id}", actor=actor, actor_ip=actor_ip,
+                          project=audit_project or db.path.parent.parent.name, action="gate.decided",
+                          target=f"{out['gate_id']}#{record_id}", detail={"status": out["status"], "round": out["round"], "comment": comment})
+@@ -269,6 +312,7 @@
+     actor: str = "owner",
+     comment: str = "",
+     expected_round: int | None = None,
++    expected_sha: str | None = None,
+     evidence: dict[str, Any] | None = None,
+ ) -> dict[str, Any]:
+     norm = decision.strip().lower()
+@@ -283,6 +327,12 @@
+     if not rows:
+         raise KeyError(f"门禁记录不存在：{record_id}")
+     cur = _hydrate_gate_row(rows[0])
++
++    if expected_sha is not None and expected_sha != cur.get("target_sha", ""):
++        raise GateConflictError("审批内容版本已变更，请重新查看目标文档")
++    latest = latest_gate_record(db, cur["gate_id"], cur["scope_type"], cur["scope_id"])
++    if latest is None or latest["record_id"] != record_id or not target_is_current(db, cur):
++        raise GateConflictError("审批目标已变更或尚未归档，请重新查看当前版本")
+ 
+     if expected_round is not None and int(cur["round"]) != int(expected_round):
+         raise GateConflictError(f"门禁轮次已变更（当前第 {cur['round']} 轮，请求第 {expected_round} 轮）")
+@@ -348,7 +398,7 @@
+         latest_by_scope[(rec["gate_id"], rec["scope_type"], rec["scope_id"])] = rec
+ 
+     blocking_ids = {g.id for g in stage.gates if g.blocking}
+-    pending_recs = [r for r in latest_by_scope.values() if r["status"] == "PENDING" and r["gate_id"] in blocking_ids]
++    pending_recs = [r for r in latest_by_scope.values() if r["status"] in ("PENDING", "STALE") and r["gate_id"] in blocking_ids]
+     failed_recs = [r for r in latest_by_scope.values() if r["status"] == "FAILED" and r["gate_id"] in blocking_ids]
+ 
+     sid = stage.id
+--- /dev/null
++++ b/autodev/process/targets.py
+@@ -0,0 +1,66 @@
++"""Content targets for document approvals. No execution or model calls."""
++
++import hashlib
++import json
++
++
++DOCUMENT_GATES = {"srs_approval": "docs/SRS.md", "architecture_approval": "docs/ARCHITECTURE.md",
++                  "detailed_design_approval": "docs/design/"}
++
++
++def normalize_document(content: str) -> str:
++    return content.replace("\r\n", "\n").replace("\r", "\n").rstrip() + "\n"
++
++
++def document_sha(content: str) -> str:
++    return hashlib.sha256(normalize_document(content).encode("utf-8")).hexdigest()
++
++
++def document_target(db, gate_id: str, scope_id: str) -> dict:
++    prefix = DOCUMENT_GATES.get(gate_id, "")
++    if not prefix:
++        return {"target_path": "", "target_sha": "", "target_version": 0, "target_snapshot_json": "[]"}
++    rows = db._query("SELECT d.* FROM doc_versions d JOIN (SELECT path, MAX(version) AS v FROM doc_versions GROUP BY path) latest "
++                     "ON d.path=latest.path AND d.version=latest.v ORDER BY d.path")
++    if gate_id == "detailed_design_approval":
++        scoped = f"docs/design/{scope_id}/"
++        selected = [r for r in rows if r["path"].startswith((scoped, f".autodev/design/{scope_id}/"))]
++        if not selected:
++            selected = [r for r in rows if r["path"].startswith((prefix, ".autodev/design/")) and len(r["path"].split("/")) == 3]
++        prefix = scoped
++    else:
++        selected = [r for r in rows if r["path"] == prefix]
++    snapshots = [{"id": r["id"], "path": r["path"], "version": r["version"], "sha": r["content_sha"]} for r in selected]
++    raw = json.dumps(snapshots, ensure_ascii=False, sort_keys=True)
++    sha = (snapshots[0]["sha"] if len(snapshots) == 1 else hashlib.sha256(raw.encode()).hexdigest()) if snapshots else ""
++    return {"target_path": prefix, "target_sha": sha, "target_version": max((r["version"] for r in snapshots), default=0),
++            "target_snapshot_json": raw}
++
++
++def target_is_current(db, record: dict) -> bool:
++    if record["gate_id"] not in DOCUMENT_GATES:
++        return True
++    current = document_target(db, record["gate_id"], record["scope_id"])
++    if not record.get("target_sha") or record["target_sha"] != current["target_sha"]:
++        return False
++    root = db.path.parent.parent.resolve()
++    snapshots = json.loads(current["target_snapshot_json"])
++    if record["gate_id"] == "detailed_design_approval":
++        # docs_center exports its service at package import time; defer until runner is loaded.
++        from autodev.docs_center.paths import detailed_design_approval_paths
++        try:
++            actual_paths = {p.relative_to(root).as_posix() for p in detailed_design_approval_paths(root, record["scope_id"])}
++        except (OSError, ValueError):
++            return False
++        if actual_paths != {item["path"] for item in snapshots}:
++            return False
++    for item in snapshots:
++        path = (root / item["path"]).resolve()
++        if not path.is_relative_to(root) or not path.is_file():
++            return False
++        try:
++            if document_sha(path.read_text("utf-8")) != item["sha"]:
++                return False
++        except (OSError, UnicodeError):
++            return False
++    return True
+--- a/autodev/prompts.py
++++ b/autodev/prompts.py
+@@ -725,6 +725,7 @@
+ - `resolved_debates`：逐条说明如何裁决第 1 轮各方提出的分歧与问题（格式：`[争议点] → [最终裁决]`）。
+ - `open_risks`：剩余需在开发/测试期持续盯防的风险点。
+ - `contract_strategy`：公共契约如何定义、冻结、跨模块引用及版本演进策略。
++- `requirements` 与 `nfrs`：分别输出功能及非功能需求数组，每项包含 req_id、title、statement、priority、acceptance。编号稳定且唯一，验收判据须来自已确认要求，不得捏造；确无某类要求时输出空数组。
+ - `adrs`：2～6 条结构化架构决策记录（`adr_id` 如 `ADR-001`、`title`、`decision`、`rationale`、`affected_squads`）。
+ - `spec_markdown`：将写入仓库 `docs/PRD_SPEC.md` 的权威中文《产品与架构共识规格书》（语言清晰直白、避免晦涩行话；坚持规模匹配——小型项目保持轻量架构与命令行可跑通的自动化验收标准，将任何需人类真机试玩的事项明确标注为「交付后人工体验项」而非开发阻塞项）。
+ """
+--- a/autodev/scheduler.py
++++ b/autodev/scheduler.py
+@@ -345,9 +345,11 @@
+                 return
+ 
+         # H3：若流程模板开启详细设计阻塞门禁，未通过前仅允许 bootstrap / contract 任务先行执行
+-        from autodev.process.runner import ensure_gate_record, is_gate_passed, load_template
++        from autodev.process.runner import blocking_document_gates, ensure_gate_record, is_gate_passed, load_template
+ 
+         tpl = load_template(self.ws, self.settings)
++        if any(g != "detailed_design_approval" for g in blocking_document_gates(self.db, tpl, milestone_id)):
++            return
+         dd_stage = next((s for s in tpl.stages if s.id == "detailed_design" and s.enabled), None)
+         if dd_stage and any(g.id == "detailed_design_approval" and g.blocking for g in dd_stage.gates):
+             if not is_gate_passed(self.db, "detailed_design_approval", "milestone", milestone_id):
+--- a/autodev/server/proxy.py
++++ b/autodev/server/proxy.py
+@@ -12,7 +12,7 @@
+ 
+ from autodev.loopforge.client import create_async_http_client, use_environment_proxy
+ 
+-OVERLAY_VERSION = "20261125v20"
++OVERLAY_VERSION = "20261126p0v2"
+ 
+ HOP_BY_HOP_REQUEST_HEADERS = frozenset(
+     {
+--- a/autodev/server/routers/docs.py
++++ b/autodev/server/routers/docs.py
+@@ -12,6 +12,7 @@
+ 
+ from autodev.docs_center.exporter import markdown_to_docx_bytes
+ from autodev.docs_center.service import (
++    DocumentConflictError,
+     add_doc_comment,
+     diff_doc_versions,
+     generate_detailed_design,
+@@ -21,6 +22,7 @@
+     save_doc_version,
+     sync_standard_docs_from_artifacts,
+ )
++from autodev.docs_center.paths import detailed_design_doc_path
+ from autodev.engine import PlanningError
+ from autodev.server.deps import effective_actor, get_ctx
+ 
+@@ -31,6 +33,7 @@
+     content: str
+     note: str = ""
+     actor: str = "owner"
++    expected_sha: str | None = None
+ 
+ 
+ class DocCommentRequest(BaseModel):
+@@ -45,11 +48,23 @@
+ 
+ 
+ @router.get("/vernal-api/docs")
+-async def api_list_docs(request: Request, sync: bool = True) -> list[dict[str, Any]]:
+-    eng = get_ctx(request).active_slot(request).engine
+-    if sync:
+-        sync_standard_docs_from_artifacts(eng)
++async def api_list_docs(request: Request, sync: bool = False) -> list[dict[str, Any]]:
++    eng = get_ctx(request).active_slot(request).engine
+     return list_docs(eng)
++
++
++@router.post("/vernal-api/docs/sync")
++async def api_sync_docs(request: Request) -> dict[str, Any]:
++    eng = get_ctx(request).active_slot(request).engine
++    from autodev.governance import check_role_permission
++    try:
++        check_role_permission(eng.db, effective_actor(), ("admin", "architect", "developer"),
++                              project=eng.settings.loopforge_project_id or eng.ws.root.name)
++        return {"written": sync_standard_docs_from_artifacts(eng)}
++    except PermissionError as exc:
++        raise HTTPException(status_code=403, detail=str(exc)) from exc
++    except ValueError as exc:
++        raise HTTPException(status_code=422, detail=str(exc)) from exc
+ 
+ 
+ @router.post("/vernal-api/docs/design/generate")
+@@ -63,7 +78,7 @@
+     try:
+         for sq_id in targets:
+             await generate_detailed_design(eng, req.milestone_id, sq_id)
+-            generated.append(f"docs/design/{sq_id}.md")
++            generated.append(detailed_design_doc_path(req.milestone_id, sq_id))
+     except PlanningError as exc:
+         raise HTTPException(status_code=422, detail=str(exc)) from exc
+     return {"ok": True, "milestone_id": req.milestone_id, "generated": generated}
+@@ -78,7 +93,6 @@
+     classification: str = "内部公开",
+ ) -> Response:
+     eng = get_ctx(request).active_slot(request).engine
+-    sync_standard_docs_from_artifacts(eng)
+     all_docs = list_docs(eng)
+     wanted = {k.strip().upper() for k in kinds.split(",") if k.strip()}
+     matched = [d for d in all_docs if not wanted or d["kind"] in wanted]
+@@ -181,6 +195,8 @@
+     eng = get_ctx(request).active_slot(request).engine
+     actor = effective_actor(req.actor)
+     try:
+-        return save_doc_version(eng, doc_path, req.content, author=actor, note=req.note)
+-    except ValueError as exc:
+-        raise HTTPException(status_code=400, detail=str(exc)) from exc
++        return save_doc_version(eng, doc_path, req.content, author=actor, note=req.note, expected_sha=req.expected_sha)
++    except DocumentConflictError as exc:
++        raise HTTPException(status_code=409, detail=str(exc)) from exc
++    except ValueError as exc:
++        raise HTTPException(status_code=400, detail=str(exc)) from exc
+--- a/autodev/server/routers/process.py
++++ b/autodev/server/routers/process.py
+@@ -26,6 +26,7 @@
+     decision: str
+     comment: str = ""
+     expected_round: int | None = None
++    expected_sha: str | None = None
+     actor: str = "owner"
+     evidence: dict[str, Any] = Field(default_factory=dict)
+ 
+@@ -89,6 +90,7 @@
+             actor=actor,
+             comment=req.comment,
+             expected_round=req.expected_round,
++            expected_sha=req.expected_sha,
+             evidence=req.evidence,
+         )
+     except PermissionError as exc:
+--- a/autodev/server/routers/tasks.py
++++ b/autodev/server/routers/tasks.py
+@@ -158,7 +158,7 @@
+     eng = get_ctx(request).active_slot(request).engine
+     tasks = [t for t in eng.db.list_tasks() if t.loopforge_issue_id == issue_id]
+     return [{"task_id": t.task_id, "acceptance": t.acceptance_criteria,
+-             "design": resolve_design_refs_snippet(eng.ws.root, t.design_refs),
++             "design": resolve_design_refs_snippet(eng.ws.root, t.design_refs, milestone_id=t.milestone_id),
+              "reviews": [dict(r) for r in eng.db._query(
+                  "SELECT review_id,round,status FROM code_reviews WHERE scope_type='task' AND scope_id=? ORDER BY round DESC",
+                  (t.task_id,))]} for t in tasks]
+--- a/autodev/server/routers/trace.py
++++ b/autodev/server/routers/trace.py
+@@ -13,16 +13,23 @@
+ router = APIRouter()
+ 
+ 
++def _matrix(engine):
++    try:
++        return build_trace_matrix(engine)
++    except (ValueError, OSError) as exc:
++        raise HTTPException(status_code=422, detail=str(exc)) from exc
++
++
+ @router.get("/vernal-api/trace/matrix")
+ async def api_get_trace_matrix(request: Request) -> dict[str, Any]:
+     eng = get_ctx(request).active_slot(request).engine
+-    return build_trace_matrix(eng)
++    return _matrix(eng)
+ 
+ 
+ @router.get("/vernal-api/trace/export")
+ async def api_export_trace_matrix(request: Request, format: str = "csv") -> Response:
+     eng = get_ctx(request).active_slot(request).engine
+-    matrix = build_trace_matrix(eng)
++    matrix = _matrix(eng)
+     fmt = format.strip().lower()
+     if fmt == "csv":
+         csv_text = export_trace_matrix_csv(matrix)
+--- a/autodev/server/static/js/docs-center.js
++++ b/autodev/server/static/js/docs-center.js
+@@ -37,7 +37,7 @@
+           (d) =>
+             `<button type="button" class="review-file-btn ${d.path === _selectedPath ? "active" : ""}" data-doc-pick="${esc(d.path)}">
+               <span>[${esc(d.kind)}] ${esc(d.path.replace(/^docs\//, ""))}</span>
+-              <span class="muted">v${d.version}</span>
++              <span class="muted">v${d.version} · ${esc(({APPROVED: "已批准", STALE: "已变更待重审", DRAFT: "草稿"})[d.status] || d.status)}</span>
+             </button>`
+         )
+         .join("")
+@@ -118,7 +118,7 @@
+     try {
+       await api(`/vernal-api/docs/${_selectedPath}`, {
+         method: "PUT",
+-        body: JSON.stringify({ content, note, actor: actorName() }),
++        body: JSON.stringify({ content, note, actor: actorName(), expected_sha: detail.content_sha }),
+       });
+       _editing = false;
+       toast("已保存为新文档版本");
+--- a/autodev/server/static/js/governance.js
++++ b/autodev/server/static/js/governance.js
+@@ -1,10 +1,19 @@
+-import { $, actorName, api, esc, toast } from "./api.js";
++import { $, actorName, api, esc, projectQuerySuffix, toast } from "./api.js";
++
++function refreshTraceExportLinks(host) {
++  for (const link of host.querySelectorAll("[data-trace-export]")) {
++    link.href = `/vernal-api/trace/export?format=${link.dataset.traceExport}${projectQuerySuffix("&")}`;
++  }
++}
+ 
+ function ensureCouncilCodeIntelCard() {
+   const councilView = document.getElementById("view-council");
+   if (!councilView) return null;
+   let host = document.getElementById("codeintel-trace-host");
+-  if (host) return host;
++  if (host) {
++    refreshTraceExportLinks(host);
++    return host;
++  }
+   host = document.createElement("section");
+   host.id = "codeintel-trace-host";
+   host.className = "panel";
+@@ -17,8 +26,8 @@
+       </div>
+       <div class="inline-form" style="gap:8px">
+         <button type="button" class="btn btn-sm" id="btn-gen-wiki">生成代码百科与逆向架构</button>
+-        <a class="btn btn-sm" href="/vernal-api/trace/export?format=csv" target="_blank" rel="noopener">导出追溯 CSV</a>
+-        <a class="btn btn-sm" href="/vernal-api/trace/export?format=docx" target="_blank" rel="noopener">导出追溯 DOCX</a>
++        <a class="btn btn-sm" data-trace-export="csv" download>导出追溯 CSV</a>
++        <a class="btn btn-sm" data-trace-export="docx" download>导出追溯 DOCX</a>
+       </div>
+     </div>
+     <div class="inline-form" style="margin:10px 0;gap:8px">
+@@ -28,6 +37,7 @@
+     <div id="ask-codebase-result" class="muted" style="font-size:12px;margin-bottom:10px" hidden></div>
+     <div id="trace-matrix-box"></div>
+   `;
++  refreshTraceExportLinks(host);
+   councilView.appendChild(host);
+ 
+   $("btn-gen-wiki")?.addEventListener("click", async (ev) => {
+--- a/autodev/server/static/js/pipeline.js
++++ b/autodev/server/static/js/pipeline.js
+@@ -39,8 +39,13 @@
+     const pendingGates = [];
+     for (const s of stages) {
+       for (const g of s.gates || []) {
++        const latest = new Map();
+         for (const rec of g.records || []) {
+-          if (rec.status === "PENDING") {
++          const key = `${rec.scope_type}:${rec.scope_id}`;
++          if (!latest.has(key) || latest.get(key).round < rec.round) latest.set(key, rec);
++        }
++        for (const rec of latest.values()) {
++          if (["PENDING", "STALE"].includes(rec.status)) {
+             pendingGates.push({ stage: s, gate: g, rec });
+           }
+         }
+@@ -63,9 +68,10 @@
+           <span class="tag warn">当前阻塞门禁</span>
+           <strong>${esc(pendingGates[0].gate.name)}</strong>
+           <span class="muted" style="font-size:12px">(${esc(pendingGates[0].rec.scope_type)}:${esc(pendingGates[0].rec.scope_id)})</span>
++          <span class="muted">评审版本 v${pendingGates[0].rec.target_version || 0}${pendingGates[0].rec.status === "STALE" ? "，内容已变更，请先在文档中心归档或重新生成" : ""}</span>
+           <input id="quick-gate-comment" type="text" placeholder="签署评审意见（豁免必填）…" />
+-          <button type="button" class="btn btn-primary btn-sm" data-gate-decide="pass" data-gate-rec="${pendingGates[0].rec.record_id}" data-gate-round="${pendingGates[0].rec.round}">批准放行</button>
+-          <button type="button" class="btn btn-sm" data-gate-decide="waive" data-gate-rec="${pendingGates[0].rec.record_id}" data-gate-round="${pendingGates[0].rec.round}">记录豁免</button>
++          <button type="button" class="btn btn-primary btn-sm" ${pendingGates[0].rec.status === "STALE" ? "disabled" : ""} data-gate-decide="pass" data-gate-rec="${pendingGates[0].rec.record_id}" data-gate-round="${pendingGates[0].rec.round}" data-gate-sha="${esc(pendingGates[0].rec.target_sha || "")}">批准放行</button>
++          <button type="button" class="btn btn-sm" ${pendingGates[0].rec.status === "STALE" ? "disabled" : ""} data-gate-decide="waive" data-gate-rec="${pendingGates[0].rec.record_id}" data-gate-round="${pendingGates[0].rec.round}" data-gate-sha="${esc(pendingGates[0].rec.target_sha || "")}">记录豁免</button>
+         </div>`
+       : "";
+ 
+@@ -107,6 +113,7 @@
+               decision,
+               comment,
+               expected_round: expectedRound,
++              expected_sha: btn.dataset.gateSha,
+               actor: actorName(),
+             }),
+           });
+--- a/autodev/trace/scan.py
++++ b/autodev/trace/scan.py
+@@ -8,93 +8,91 @@
+ from typing import TYPE_CHECKING, Any
+ 
+ from autodev.artifacts import FileExchange
+-from autodev.models import TaskStatus
++from autodev.models import RequirementItem, TaskStatus
+ 
+ if TYPE_CHECKING:
+     from autodev.engine import Engine
+ 
+-_REQ_ID_RE = re.compile(r"\b((?:REQ|NFR)-[0-9]{3,})\b")
++_REQ_ID_RE = re.compile(r"(?<![\w:.-])((?:[A-Za-z0-9_][A-Za-z0-9_.-]*:)?(?:REQ|NFR)-[0-9]{3,})\b")
+ _PRIORITY_RE = re.compile(r"\b(P[0-3])\b", re.IGNORECASE)
+ _TEST_FN_RE = re.compile(r"^\s*(?:async\s+)?def\s+(test_[A-Za-z0-9_]+)|^\s*func\s+(Test[A-Za-z0-9_]+)|^\s*(?:it|test)\s*\(\s*['\"]([^'\"]+)")
+ 
+ 
+ def extract_requirements_from_sources(engine: "Engine") -> list[dict[str, Any]]:
+-    """从 `.autodev/prd_spec.json` 与 `docs/SRS.md` 提取并合并标准化需求条目（手工编辑 SRS 可覆盖更新）。"""
++    """Consume canonical requirement items; legacy names and standalone SRS remain readable."""
+     by_id: dict[str, dict[str, Any]] = {}
++
++    def add(item: dict[str, Any]) -> None:
++        rid = item["req_id"]
++        if rid in by_id:
++            raise ValueError(f"重复需求编号：{rid}；跨功能请使用 feature_id 隔离编号")
++        by_id[rid] = item
+ 
+     if engine.ws.prd_json_path.is_file():
+         try:
+             prd = json.loads(engine.ws.prd_json_path.read_text("utf-8"))
+-        except (OSError, json.JSONDecodeError):
+-            prd = {}
+-        for idx, item in enumerate(prd.get("functional_requirements") or [], 1):
+-            if not isinstance(item, dict):
+-                continue
+-            rid = str(item.get("req_id") or f"REQ-{idx:03d}").strip()
+-            by_id[rid] = {
+-                "req_id": rid,
+-                "title": str(item.get("title") or item.get("module") or rid).strip(),
+-                "priority": str(item.get("priority") or "P1").upper(),
+-                "acceptance": list(item.get("acceptance_criteria") or ([item["description"]] if item.get("description") else [])),
+-                "source_section": "prd_spec.json#functional",
+-            }
+-        for idx, item in enumerate(prd.get("non_functional_requirements") or [], 1):
+-            if isinstance(item, dict):
+-                rid = str(item.get("req_id") or f"NFR-{idx:03d}").strip()
+-                by_id[rid] = {
+-                    "req_id": rid,
+-                    "title": str(item.get("title") or item.get("category") or rid).strip(),
+-                    "priority": str(item.get("priority") or "P1").upper(),
+-                    "acceptance": [str(item.get("metric") or item.get("description") or "")],
+-                    "source_section": "prd_spec.json#nfr",
+-                }
++            if not isinstance(prd, dict):
++                raise ValueError("需求快照顶层必须是对象")
++            for key, legacy in (("requirements", "functional_requirements"), ("nfrs", "non_functional_requirements")):
++                items = prd[key] if key in prd else prd.get(legacy, [])
++                if not isinstance(items, list):
++                    raise ValueError(f"{key} 必须是数组")
++                for raw in items:
++                    if key in prd:
++                        req = RequirementItem.model_validate(raw)
++                    else:
++                        if not isinstance(raw, dict) or not raw.get("req_id"):
++                            raise ValueError("历史需求缺少稳定 req_id，必须显式迁移后再同步")
++                        req = RequirementItem(
++                            req_id=raw["req_id"], feature_id=raw.get("feature_id", ""),
++                            title=raw.get("title") or raw.get("module") or raw["req_id"],
++                            statement=raw.get("description") or raw.get("metric") or "",
++                            priority=raw.get("priority", "P1"),
++                            acceptance=raw.get("acceptance_criteria") or [raw.get("description") or raw.get("metric") or ""],
++                        )
++                    add({"req_id": req.identity, "title": req.title, "priority": req.priority,
++                         "acceptance": req.acceptance, "source_section": f"prd_spec.json#{key}"})
++        except (OSError, ValueError) as exc:
++            engine.db.add_event("trace.sync_failed", str(exc), actor="TraceService")
++            raise ValueError(f"需求快照解析失败：{exc}") from exc
++        # An explicitly empty canonical list retires old requirements; stale Markdown
++        # must not bring them back. Fall back only when the legacy source has no lists.
++        if any(key in prd for key in ("requirements", "nfrs", "functional_requirements", "non_functional_requirements")):
++            return list(by_id.values())
+ 
+-    # 解析 docs/SRS.md 中的 Markdown 表格行或标题（如 `| REQ-001 | P0 | 订单创建 | ... |` 或 `### REQ-001 (P0) 订单创建`）
+-    srs_path = engine.ws.root / "docs" / "SRS.md"
+-    srs_text = ""
+-    if srs_path.is_file():
+-        srs_text = srs_path.read_text("utf-8", errors="replace")
++    path = engine.ws.root / "docs" / "SRS.md"
++    if not path.is_file():
++        rows = engine.db._query("SELECT content_text FROM doc_versions WHERE path='docs/SRS.md' ORDER BY version DESC LIMIT 1")
++        if not rows and engine.db._query("SELECT 1 FROM requirements WHERE status='ACTIVE' LIMIT 1"):
++            raise ValueError("需求来源暂不可读，保留上次有效清单；请恢复来源后重新同步")
++        text = rows[0]["content_text"] if rows else ""
+     else:
+-        rows = engine.db._query("SELECT content_text FROM doc_versions WHERE path='docs/SRS.md' ORDER BY version DESC LIMIT 1")
+-        if rows:
+-            srs_text = str(rows[0]["content_text"] or "")
+-
+-    if srs_text:
+-        for line_no, raw_line in enumerate(srs_text.splitlines(), 1):
+-            m = _REQ_ID_RE.search(raw_line)
+-            if not m:
+-                continue
+-            rid = m.group(1)
+-            stripped = raw_line.strip()
+-            if stripped.startswith("|"):
+-                cells = [c.strip() for c in stripped.strip("|").split("|")]
+-                prio_match = _PRIORITY_RE.search(raw_line)
+-                prio = prio_match.group(1).upper() if prio_match else (by_id.get(rid, {}).get("priority") or "P1")
+-                non_meta = [c for c in cells if c and rid not in c and not _PRIORITY_RE.fullmatch(c)]
+-                title = non_meta[0] if non_meta else (by_id.get(rid, {}).get("title") or rid)
+-                acc = non_meta[1:] if len(non_meta) > 1 else (by_id.get(rid, {}).get("acceptance") or [])
+-                by_id[rid] = {
+-                    "req_id": rid,
+-                    "title": title[:200],
+-                    "priority": prio,
+-                    "acceptance": [a for a in acc if a],
+-                    "source_section": f"docs/SRS.md:L{line_no}",
+-                }
+-            elif stripped.startswith(("#", "-", "*")):
+-                prio_match = _PRIORITY_RE.search(raw_line)
+-                prio = prio_match.group(1).upper() if prio_match else (by_id.get(rid, {}).get("priority") or "P1")
+-                cleaned_title = re.sub(r"^[#*\-\s]+", "", stripped)
+-                cleaned_title = cleaned_title.replace(rid, "").strip(" ：:—-()[]")
+-                if rid not in by_id or cleaned_title:
+-                    by_id[rid] = {
+-                        "req_id": rid,
+-                        "title": (cleaned_title or by_id.get(rid, {}).get("title") or rid)[:200],
+-                        "priority": prio,
+-                        "acceptance": by_id.get(rid, {}).get("acceptance") or [],
+-                        "source_section": f"docs/SRS.md:L{line_no}",
+-                    }
+-
+-    return [by_id[k] for k in sorted(by_id.keys())]
++        text = path.read_text("utf-8")
++    current = None
++    for line_no, line in enumerate(text.splitlines(), 1):
++        stripped = line.strip()
++        match = _REQ_ID_RE.search(stripped)
++        cells = [c.strip() for c in stripped.strip("|").split("|")] if stripped.startswith("|") else []
++        definition = bool(match) and (bool(cells and cells[0] == match.group(1)) or
++                     bool(re.match(r"^[#*\-\s]+(?:[A-Za-z0-9_][A-Za-z0-9_.-]*:)?(?:REQ|NFR)-[0-9]{3,}", stripped)))
++        if definition:
++            rid = match.group(1)
++            prio = _PRIORITY_RE.search(stripped)
++            if cells:
++                values = [c for c in cells[1:] if c and not _PRIORITY_RE.fullmatch(c)]
++                title, acceptance = (values[0], values[1:]) if values else (rid, [])
++            else:
++                title = stripped[match.end():].strip(" *:：[]()")
++                title = re.sub(r"^P[0-3]\]?\s*", "", title).strip()
++                acceptance = []
++            current = {"req_id": rid, "title": title or rid, "priority": prio.group(1) if prio else "P1",
++                       "acceptance": acceptance, "source_section": f"docs/SRS.md:L{line_no}"}
++            add(current)
++        elif current and stripped.startswith("#"):
++            current = None
++        elif current and stripped.startswith("- ") and not stripped.startswith(("- **规范", "- **验收")):
++            current["acceptance"].append(stripped[2:])
++    return list(by_id.values())
+ 
+ 
+ def _is_test_path(rel_path: str) -> bool:
+@@ -162,8 +160,9 @@
+         if tasks:
+             try:
+                 snap.update(exchange.baseline([t.task_id for t in tasks]))
+-            except Exception:
+-                pass
++            except (OSError, ValueError, KeyError) as exc:
++                engine.db.add_event("trace.artifact_failed", f"候选基线读取失败：{exc}", actor="TraceService")
++                raise ValueError("候选基线无法读取，追溯校验已阻断") from exc
+         for ms in engine.db.list_milestones():
+             dkey = engine.db.meta_get(f"delivery:{ms.milestone_id}")
+             if dkey:
+@@ -173,8 +172,9 @@
+                         for k, v in ms_files.items():
+                             if isinstance(v, str):
+                                 snap[k] = v
+-                except Exception:
+-                    pass
++                except (OSError, ValueError, KeyError) as exc:
++                    engine.db.add_event("trace.artifact_failed", f"交付产物读取失败：{exc}", actor="TraceService")
++                    raise ValueError("交付产物无法读取，追溯校验已阻断") from exc
+         for rel, txt in sorted(snap.items()):
+             if rel not in seen_files and txt and _is_test_path(rel):
+                 _scan_single_test_content(rel, txt, out)
+--- a/autodev/trace/service.py
++++ b/autodev/trace/service.py
+@@ -12,6 +12,7 @@
+ from autodev.docs_center.exporter import markdown_to_docx_bytes
+ from autodev.models import TaskStatus
+ from autodev.trace.scan import extract_requirements_from_sources, scan_workspace_tests
++from autodev.docs_center.paths import iter_detailed_design_json_paths
+ 
+ if TYPE_CHECKING:
+     from autodev.engine import Engine
+@@ -22,12 +23,14 @@
+     extracted = extract_requirements_from_sources(engine)
+     ts = now_iso()
+     with engine.db.transaction():
++        # Parse and validate the complete source before retiring anything.
++        engine.db._exec("UPDATE requirements SET status='RETIRED', updated_at=? WHERE status='ACTIVE'", (ts,))
+         for req in extracted:
+             engine.db._exec(
+                 "INSERT INTO requirements(req_id, title, priority, acceptance_json, source_section, status, updated_at)"
+                 " VALUES(?, ?, ?, ?, ?, 'ACTIVE', ?)"
+                 " ON CONFLICT(req_id) DO UPDATE SET title=excluded.title, priority=excluded.priority,"
+-                " acceptance_json=excluded.acceptance_json, source_section=excluded.source_section, updated_at=excluded.updated_at",
++                " acceptance_json=excluded.acceptance_json, source_section=excluded.source_section, status='ACTIVE', updated_at=excluded.updated_at",
+                 (
+                     req["req_id"],
+                     req["title"],
+@@ -46,17 +49,22 @@
+     return out
+ 
+ 
+-def _collect_design_links(engine: "Engine") -> dict[str, list[str]]:
++def _collect_design_links(engine: "Engine", milestone_id: str | None = None) -> dict[str, list[str]]:
+     links: dict[str, list[str]] = {}
+     design_dir = engine.ws.state_dir / "design"
+     if not design_dir.is_dir():
+         return links
+-    for jf in sorted(design_dir.glob("*.json")):
++    for jf in iter_detailed_design_json_paths(engine.ws, milestone_id):
+         try:
+             spec = json.loads(jf.read_text("utf-8"))
+-        except (OSError, json.JSONDecodeError):
+-            continue
+-        mod = str(spec.get("module") or jf.stem)
++            if not isinstance(spec, dict):
++                raise ValueError("详设顶层必须是对象")
++        except (OSError, ValueError) as exc:
++            engine.db.add_event("trace.design_failed", f"{jf.relative_to(design_dir)}: {exc}", actor="TraceService")
++            raise ValueError(f"详设解析失败：{jf.name}") from exc
++        mod = str(spec.get("squad_id") or spec.get("module") or jf.stem)
++        if jf.parent != design_dir:
++            mod = f"{jf.parent.name}/{mod}"
+         for iface in spec.get("interfaces") or []:
+             if isinstance(iface, dict):
+                 iname = str(iface.get("name") or iface.get("id") or "interface")
+--- /dev/null
++++ b/docs/reviews/P0_LIVE_ACCEPTANCE.md
+@@ -0,0 +1,63 @@
++# P0 真实服务验收记录
++
++日期：2026-11-26。首轮接口操作约为北京时间 11:02 至 11:04；用户启动底座并登录后追加统一工作台页面验收。
++
++分支：`codex/standard-delivery-p0`。目标：用户启动的 `http://127.0.0.1:8788`，独立工作区 `workspaces/p0-review`。
++
++通过真实浏览器的 Swagger 操作表单提交 HTTP 请求，读取实际响应与数据库记录。本次没有使用模型调用，也没有启动调度任务。
++
++## 已通过的 12 项检查
++
++| 检查 | 实测结果 |
++| --- | --- |
++| 批准 SRS 初始版本 | HTTP 200，审批记录 1 变为 PASSED |
++| 批准 M1 详设 | HTTP 200，审批记录 3 变为 PASSED |
++| 批准 M2 详设 | HTTP 200，审批记录 4 变为 PASSED |
++| 修改已批准 SRS | 生成 v2；旧记录 STALE，decision_status 保留 PASSED；新建第 2 轮 PENDING |
++| 旧编辑页面重复保存 | 使用 v1 哈希提交时返回 HTTP 409，提示文档已被其他操作修改 |
++| 旧审批页面再次批准 | 旧记录 1 返回 HTTP 409，不能批准新内容 |
++| 移除需求后追溯同步 | 从 SRS 移除 REQ-001 后，矩阵从 2 条变 1 条，只剩 NFR-001 |
++| 恢复需求 | 恢复原文后，矩阵回到 2 条，REQ-001 与 NFR-001 均存在 |
++| 待审批期间再次修改 | 第 2 轮 PENDING 变为 STALE，decision_status 保留 PENDING；新建第 3 轮 |
++| 详设里程碑隔离 | M1 修改后显示 STALE；M2 继续 APPROVED |
++| 历史正文不被覆盖 | GET SRS 的 version=1 返回内容与测试前逐字一致，版本列表保留全部修订 |
++| 旧待审批轮次拒绝错批 | 旧记录 5 返回 HTTP 409 |
++
++## 测试后的状态
++
++SRS 与 M1 详设正文已通过正常版本保存恢复为测试前内容，没有删除历史。SRS 当前为 v4，M1 详设当前为 v3；两者最新审批保留 PENDING，等待负责人决定。M2 详设仍为 v1，保留本次测试的 PASSED 记录。架构文档没有修改，仍待审批。
++
++只读核对数据库：共 9 条审批记录；REQ-001、NFR-001 最终均为 ACTIVE。历史批准、待审批轮次及失效状态均保留。测试数据仅位于隔离评审工作区。
++
++## 统一工作台页面验收
++
++用户启动既有 Colima、MySQL、LoopForge 后，使用账户 zomer2001 完成登录。页面测试采用独立原生项目 `P0-UI-20261126`，标识为 `p0-ui-20261126`，目录为 `workspaces/p0-ui-review-20261126`。只复制四份夹具文档，通过正常接入界面创建绑定，自动立项评审保持关闭。
++
++为验证门禁按钮，先通过页面将测试项目流程设为 Standard，再调用项目自身的 `ensure_gate_record` 服务创建一条绑定现有 SRS v2 的待审批夹具。批准、后续修改与恢复均通过真实页面操作。该流程没有触发模型生成。
++
++| 检查 | 实测结果 |
++| --- | --- |
++| 登录与项目接入 | 当前用户可进入工作台；干净本地目录成功创建原生项目及研发工作区绑定 |
++| 文档中心 | 四份文档可读，版本与状态显示正确 |
++| 在线编辑 | SRS 保存为 v2，作者为 zomer2001，显示保存成功 |
++| 版本对比 | v1..v2 显示新增的界面验收段落 |
++| SRS Word 导出 | 下载有效 DOCX，解包核对包含 v2 新增正文 |
++| 当前版本审批 | 工作台明确显示评审版本 v2；点击批准放行成功，文档状态变为已批准 |
++| 批准后修改 | 保存 v3 后立即显示已变更待重审；工作台只显示当前 v3 请求 |
++| 追溯 CSV 与 DOCX | 初次复现无权访问错误；修复后两种文件均下载成功，并包含只有当前 UI 项目存在的 REQ-777 |
++| 恢复正文 | 正常保存为 v4，正文与测试前相同；历史版本与审批不删除 |
++| 历史决定保留 | 数据库记录 v2 的第 1 轮 STALE / PASSED，v3 的第 2 轮 STALE / PENDING，v4 的第 3 轮 PENDING |
++| 最终页面 | v4 待审批，需求矩阵恢复为 REQ-001、NFR-001；浏览器错误日志为空；Token 为 0 |
++
++## 页面发现的问题及处理
++
++1. 追溯下载链接没有项目参数，直接打开返回 `当前用户无权访问此项目`。已修复为携带当前项目标识，复用面板时同步更新链接，并使用下载属性。Node 回归验证项目切换、项目编号编码和作用域清空；真实 CSV/DOCX 内容验证当前项目专属 REQ-777 存在。
++2. 直接接入已有 `.autodev/config.yaml` 的 CLI 夹具会收到工作区已有登记提示，但该夹具尚无原生项目绑定。这是已有工作区的接入恢复限制，本批没有放宽重复登记保护。通过干净专用目录完成正常接入；已有孤立工作区的恢复绑定需要单独设计并验收。
++
++## 测试边界与交接
++
++前一轮完整 Python 回归为 230 项通过。页面修复后追加前端 Node 回归 2 项通过，并通过 2 项相关 Python 回归及语法检查。本次产品代码新增修复仅涉及追溯下载前端和静态缓存版本。
++
++保留 8788 评审服务及既有 LoopForge 服务运行，即可在工作台继续审查 `P0-UI-20261126`。UI 项目最终 SRS 为 v4、第 3 轮待审批，原接口夹具保持前文所列状态。测试数据没有写入实际业务项目。
++
++真实 Harness、模型和 Docker 沙箱执行任务尚未完成端到端验收。未开始 P1，未合并或推送。负责人审查本批后再进入下一阶段。
+--- /dev/null
++++ b/docs/reviews/P0_REVIEW.md
+@@ -0,0 +1,98 @@
++# P0 实现、自审与人工验收记录
++
++日期：2026-11-26。状态：已实现，等待负责人测试审查。P1 尚未开始。
++
++后续实测更新：用户启动服务并登录后，已完成 12 项真实接口验收，并补齐统一工作台的项目接入、在线编辑、版本对比、当前版本审批、改稿重审和导出验收。页面实测发现并修复追溯下载缺少当前项目标识的问题。详见同目录 `P0_LIVE_ACCEPTANCE.md`。
++
++## 交付位置与边界
++
++评审分支：`codex/standard-delivery-p0`。
++
++独立检出目录：`/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0`。
++
++原目录的 Git 元数据不可写，不能直接创建分支，因此在独立检出目录创建了新分支，并带入任务开始时已有的工作区源码。没有切换原目录分支，没有修改原目录已有源文件，没有合并、推送或提交混杂的既有改动。评审分支上的实现目前为未提交改动。
++
++任务开始时主目录已有大量未提交修改，直接查看相对 HEAD 的差异会混入此前工作。`P0_CHANGES.patch` 仅记录本批相对开始时源码快照的差异；`P0_BASELINE.json` 保存该快照文件的 SHA-256。不要把本批检出目录直接覆盖回原目录，应在验收后根据届时主目录状态合并。
++
++## 本批实现
++
++| 范围 | 实现结果 | 主要位置 |
++| --- | --- | --- |
++| 审批绑定内容 | 请求创建时冻结正文快照、内容哈希、版本和轮次；旧页不能批准新内容；新修订创建新轮次，历史决定与正文保留 | `autodev/process/runner.py`、`targets.py`、`autodev/db.py` |
++| 文档版本与并发编辑 | 复用 `doc_versions`；编辑页携带预期哈希，冲突返回 409；外部修改进入新快照；GET/导出不重新生成并覆盖文档 | `autodev/docs_center/service.py`、文档路由和前端 |
++| 圆桌到规格 | 圆桌输出结构化功能及非功能需求；写入前使用统一模型校验；ADR 独立保存；旧 ADR 冗余字段只读兼容；同步错误显式返回并记事件 | `autodev/council.py`、`models.py`、`prompts.py` |
++| 详设与追溯 | JSON 与 Markdown 按里程碑及研发组隔离；共享路径函数递归扫描；整组审批包含结构化原文、渲染文档和成员清单 | `autodev/docs_center/paths.py`、`autodev/trace/service.py` |
++| 需求生命周期 | 读取规范字段及验收条件；支持功能命名空间；重复编号拒绝；删除转 RETIRED，恢复转 ACTIVE；明确清空的规范清单不被旧 Markdown 复活 | `autodev/trace/scan.py`、`service.py` |
++| 运行拦截 | 共享调度入口及发布入口检查当前文档批准；本机与 LoopForge 路径共用检查；旧轻量项目只在没有架构文档要求、没有历史审批且没有目标快照时保留兼容 | `autodev/scheduler.py`、`engine.py` |
++| 界面 | 显示文档待重审状态、当前轮次与评审版本；提交批准携带哈希；过期请求禁用批准按钮；追溯下载绑定当前项目，切换项目时更新；递增前端缓存版本 | `docs-center.js`、`pipeline.js`、`governance.js`、`proxy.py` |
++
++方案书升级为 v1.1，修正了单一事实源的落地阶段、不可变快照、旧批准保留、变更影响范围、需求身份、任务与证据基线、最小编译器前置、两阶段黄金试点，以及人工验收与离线验收边界。Spec Kit 接管写源仍明确安排在 P1。
++
++## 自审修正
++
++1. 生成的规范文档原先没有进入既有 Git 归档流程，导致后续工作区检查认为存在未提交文件。现在只归档本次真正生成的文档，避免空列表意外扩大暂存范围。
++2. 新门禁曾错误阻塞没有架构文档义务的旧轻量项目。现在按既有流程定义判断兼容边界；已经绑定文档的门禁仍严格校验。
++3. 对外部直接新增详设成员、修改结构化详设但不改 Markdown 的情况补齐检查。新增、缺失或变更成员均不得沿用旧批准，其他里程碑不受影响。
++4. 补齐并发编辑、双数据库连接发起审批、文件替换失败回滚、数据库重开与旧页错批的验证。
++5. 独立启动暴露了包初始化顺序造成的循环导入，已修正并加入全新 Python 进程的导入回归测试。
++6. 规范需求数组明确清空时，旧 Markdown 不得重新提供已删除需求，已增加回归测试。
++7. 原追溯测试曾把完整快照标识填进补丁标识字段，已改为真实补丁产物，保留生产路径的显式错误行为。
++8. 实际页面导出的追溯下载地址缺少项目标识，已登录用户会收到无权访问提示。现在 CSV 与 DOCX 均携带当前项目，复用文档面板时也更新链接；新增 Node 回归检查覆盖项目切换、编号编码和清空作用域。
++
++原有测试中专门验证 CI 或候选审查的用例，显式关闭与用例无关的文档阶段。新版独立探针另外验证真实文档门禁，生产代码没有通过统一关闭门禁来获得通过结果。
++
++## 验证证据
++
++任务开始时的基线：210 项测试通过。
++
++最终完整回归：**230 项通过，1 条既有 Starlette 弃用警告**，用时 87.93 秒。较基线新增 20 项跨边界探针，详见同目录 `P0_TEST_RESULTS.txt`。P0 专项探针覆盖真实数据库、文档转换、审批、追溯、调度入口与发布入口。模型及网络边界使用测试替身，关键转换和数据库持久化没有被替换。
++
++页面补测后仅修改追溯下载前端与静态缓存版本。追加 Node 回归 2 项通过，其中 1 项为本批新增；追溯导出与页面注入相关 Python 回归 2 项通过。另已执行前端三份脚本的 Node 语法检查、启动脚本的 Bash 语法检查及 Git 差异空白检查。
++
++首次自测受到监听端口与 Docker 权限限制，随后由用户启动既有服务并完成登录，现已通过真实浏览器点击验收。真实模型、Runner 和 Docker 沙箱执行任务仍未测试，不能从文档与审批通过推断整个研发执行链路已经通过。
++
++## 负责人怎么测试
++
++在终端运行：
++
++```bash
++bash "/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0/scripts/start_p0_review.sh"
++```
++
++脚本使用独立的 `workspaces/p0-review`，首次生成 SRS、架构和 M1/M2 详设评审夹具，之后保留你的修改；不会调用模型，也不启动任务调度。默认端口 8788，使用原目录已安装的 Python 依赖。若移到其他电脑，使用 `VERNAL_REVIEW_PYTHON` 指向已安装本项目依赖的 Python。端口冲突时设置 `VERNAL_REVIEW_PORT`。
++
++接口验收入口：`http://127.0.0.1:8788/vernal-api/openapi-docs`。此入口可以直接验证预置的隔离评审工作区，不需要先创建原生项目。统一工作台入口为 `http://127.0.0.1:8788/`，依赖既有 LoopForge 服务，默认上游为 127.0.0.1:8090。浏览器工作台按原生项目切换作用域，预置的本地夹具并不会自动成为原生项目；测试真实工作台时请新建专用测试项目。
++
++已为页面验收创建并接入 `P0-UI-20261126`，工作区为 `workspaces/p0-ui-review-20261126`，项目标识为 `p0-ui-20261126`。当前页面停在该项目，SRS 已恢复原始正文并保存为 v4，第 3 轮审批待确认。可直接打开文档中心检查历史差异，然后在工作台批准 v4，再修改正文验证重审。没有启动模型任务。
++
++| 操作 | 预期结果 |
++| --- | --- |
++| GET `/vernal-api/docs`，GET `/vernal-api/gates` | 四份文档及对应审批请求可读；每个请求含冻结哈希、版本与快照引用 |
++| 用 SRS 请求的 record_id 调用 POST `/vernal-api/gates/{record_id}/decide`，提交 `decision=pass`、对应 expected_round 和 expected_sha | 当前版本获批；重新读取文档列表显示已批准 |
++| GET `/vernal-api/docs/docs/SRS.md`，取 content_sha；PUT 同一地址提交修改后的 content 和 expected_sha | 形成新版本；旧审批保留历史决定并失效，新请求等待批准 |
++| 使用此前保存的旧审批 record_id 和哈希再次批准 | HTTP 409，不会把旧请求改绑为新内容 |
++| 两次编辑使用相同的旧 expected_sha | 第一次成功，第二次 HTTP 409；历史版本仍可读取 |
++| 在 SRS 尚待审批时再次修改 | 产生新的审批轮次，旧待审批记录不能再决定 |
++| 分别批准 M1/M2 详设，再只修改或新增 M1 的详设文件 | M1 待重审，M2 继续有效；文档中心读取后归档新成员 |
++| GET `/vernal-api/trace/matrix`，在没有结构化源的夹具 SRS 中移除 REQ-001 后再次读取 | 当前需求清单不再包含 REQ-001，历史数据库记录为 RETIRED |
++| 停止并重新启动评审脚本 | 修改、版本及批准记录仍在，不自动重置夹具 |
++
++接口请求中的哈希、轮次与 record_id 必须使用实际返回值。默认夹具没有规划任务，所以调度和发布阻断请用专项测试验证，或在专用原生测试项目中完成规划后测试。
++
++复跑专项测试：
++
++```bash
++cd "/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/workspaces/standard-delivery-p0"
++"/Users/zomeryang/Documents/春天/个人科研/lattice-mesh/.venv/bin/python" -m pytest tests/test_anti_fragmentation_probes.py
++```
++
++## 尚未进入本批的能力
++
++1. Spec Kit 资产版本锁定、适配器、规格修订与澄清表、最小任务编译器在 P1 实施。本批没有提前废除旧规格生产入口。
++2. P0 中存在结构化规格时，需求追溯以结构化清单为准。直接编辑生成的 SRS 不会自动反写结构化清单；人工编辑源统一与 SRS 只读聚合由 P1 处理。
++3. 运行中受影响任务暂停、无关任务续跑、旧 Run 结果隔离、跨任务资源锁与完整工作包冻结属于后续批次。
++4. 现有追溯矩阵的推断验证状态与候选实测证据尚未全面统一。本批修复需求与详设关联，不把静态关联宣称为需求已经实测通过。
++5. 文档快照与文件投影跨数据库和文件系统，不能声称完整的跨存储原子事务。文件替换失败已验证回滚；其他异常导致投影漂移时门禁拒绝放行，历史正文可用于恢复。
++6. 外部结构化文件被删除后会阻断旧审批；本批没有提供文档删除修订工作流，正式删除与重建范围应在后续规格适配中明确。
++
++完成负责人验收并处理反馈后，再开展 P1。未获得本批验收结果前不继续叠加后续功能。
+--- /dev/null
++++ b/docs/reviews/P0_TEST_RESULTS.txt
+@@ -0,0 +1,28 @@
++P0 final regression, 2026-11-26
++Branch: codex/standard-delivery-p0
++Baseline: 210 passed
++New boundary probes: 20
++
++........................................................................ [ 31%]
++........................................................................ [ 62%]
++........................................................................ [ 93%]
++..............                                                           [100%]
++=============================== warnings summary ===============================
++../../.venv/lib/python3.14/site-packages/fastapi/testclient.py:1
++  /Users/zomeryang/Documents/春天/个人科研/lattice-mesh/.venv/lib/python3.14/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
++    from starlette.testclient import TestClient as TestClient  # noqa
++
++-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
++230 passed, 1 warning in 87.93s (0:01:27)
++
++Additional checks: node --check (2 JavaScript files), bash -n, git diff --check, git apply --check.
++Review fixture API smoke: health, docs (4), gates (4), trace matrix returned HTTP 200 in-process.
++Actual port binding was blocked by the execution environment; browser and live harness acceptance remain pending.
++Original snapshot: 222 existing source files unchanged.
++
++UI acceptance follow-up, 2026-11-26
++node --test tests/test_governance_exports.mjs tests/test_timeline_switch.mjs: 2 passed
++pytest tests/test_traceability.py tests/test_ui_branding_and_settings_api.py::test_proxy_injects_brand_script_into_embedded_assistant_frames: 2 passed
++node --check autodev/server/static/js/governance.js: passed
++Live UI: edit, diff, DOCX export, approval v2, invalidation v3, latest pending v4: passed
++Live trace CSV/DOCX: both contain current-project-only REQ-777 after project-scope fix
+--- /dev/null
++++ b/scripts/start_p0_review.sh
+@@ -0,0 +1,45 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++review_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++review_python="${VERNAL_REVIEW_PYTHON:-$review_root/.venv/bin/python}"
++if [[ ! -x "$review_python" && -x "$review_root/../../.venv/bin/python" ]]; then
++  review_python="$review_root/../../.venv/bin/python"
++fi
++if [[ ! -x "$review_python" ]]; then
++  echo '请通过 VERNAL_REVIEW_PYTHON 指定已安装项目依赖的 Python。' >&2
++  exit 1
++fi
++cd "$review_root"
++export PYTHONPATH="$review_root${PYTHONPATH:+:$PYTHONPATH}"
++export VERNAL_DISABLE_AUTO_RESUME=1
++
++"$review_python" - <<'PY'
++from pathlib import Path
++from autodev.engine import Engine, init_workspace
++from autodev.harnesses.mock import MockHarness
++from autodev.docs_center.service import save_doc_version
++from autodev.process.runner import ensure_gate_record, load_builtin_template, save_custom_template
++
++root = Path.cwd() / "workspaces/p0-review"
++if not (root / ".autodev/state.db").exists():
++    engine = Engine(init_workspace(root, name="P0 隔离评审", collaboration_mode="files"), harness=MockHarness())
++    try:
++        save_custom_template(engine.ws, load_builtin_template("standard").model_dump_json())
++        save_doc_version(engine, "SRS.md", "# P0 评审夹具\n\n| 编号 | 优先级 | 标题 | 验收 |\n| --- | --- | --- | --- |\n| REQ-001 | P0 | 保存回答 | 重启后可读取 |\n| NFR-001 | P1 | 响应时间 | 本地接口 P95 小于 200ms |\n")
++        save_doc_version(engine, "ARCHITECTURE.md", "# 评审夹具架构\n\n回答通过本地接口写入 SQLite。")
++        for scope in ("M1", "M2"):
++            save_doc_version(engine, f"design/{scope}/core.md", f"# {scope} 评审夹具详设\n\nREQ-001：保存后返回确认。")
++        for stage, gate, scope_type, scope_id in [
++            ("requirements", "srs_approval", "project", "project"),
++            ("architecture", "architecture_approval", "project", "project"),
++            ("detailed_design", "detailed_design_approval", "milestone", "M1"),
++            ("detailed_design", "detailed_design_approval", "milestone", "M2"),
++        ]:
++            ensure_gate_record(engine.db, stage_id=stage, gate_id=gate, kind="human_approval", scope_type=scope_type, scope_id=scope_id)
++    finally:
++        engine.db.close()
++print(f"评审工作区：{root}。再次启动会保留你的测试修改。")
++PY
++
++exec "$review_python" -m autodev.cli serve --host 127.0.0.1 --port "${VERNAL_REVIEW_PORT:-8788}" --dir "$review_root/workspaces/p0-review"
+--- /dev/null
++++ b/tests/test_anti_fragmentation_probes.py
+@@ -0,0 +1,307 @@
++"""P0 boundary probes use real persistence, document conversion, gates and trace readers."""
++
++import asyncio
++from concurrent.futures import ThreadPoolExecutor
++import json
++from pathlib import Path
++
++import httpx
++import pytest
++from fastapi.testclient import TestClient
++
++from autodev.council import synthesize_council
++from autodev.db import Database
++from autodev.docs_center.service import (
++    DocumentConflictError, get_doc, list_docs, save_doc_version, sync_standard_docs_from_artifacts,
++)
++from autodev.engine import Engine, init_workspace
++from autodev.harnesses.mock import MockHarness
++from autodev.models import ProductSpec, RequirementItem
++from autodev.process.runner import decide_gate, ensure_gate_record, is_gate_passed, latest_gate_record
++from autodev.process.runner import GateConflictError
++from autodev.process.runner import load_builtin_template, save_custom_template
++from autodev.server.app import create_app
++from autodev.trace.scan import extract_requirements_from_sources
++from autodev.trace.service import _collect_design_links, sync_requirements
++
++
++def test_application_imports_in_a_fresh_process():
++    import subprocess
++    import sys
++    result = subprocess.run([sys.executable, "-c", "from autodev.server.app import create_app; from autodev.cli import app"],
++                            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=20)
++    assert result.returncode == 0, result.stderr
++
++
++@pytest.fixture
++def eng(tmp_path):
++    engine = Engine(init_workspace(tmp_path / "project", name="P0", collaboration_mode="files"), harness=MockHarness())
++    yield engine
++    engine.db.close()
++
++
++def gate(eng, *, force=False, gate_id="srs_approval", scope_id="project"):
++    return ensure_gate_record(eng.db, stage_id="requirements", gate_id=gate_id, kind="human_approval",
++                              scope_type="project" if scope_id == "project" else "milestone", scope_id=scope_id,
++                              force_new_round=force)
++
++
++def test_pending_and_approved_document_revisions_cannot_be_reapproved(eng):
++    first = save_doc_version(eng, "SRS.md", "# v1")
++    pending = gate(eng)
++    save_doc_version(eng, "SRS.md", "# v2", expected_sha=first["content_sha"])
++    with pytest.raises(GateConflictError):
++        decide_gate(eng.db, pending["record_id"], "pass", expected_sha=first["content_sha"])
++    second = latest_gate_record(eng.db, "srs_approval", "project", "project")
++    assert second["round"] == 2 and second["target_sha"] != first["content_sha"]
++    decide_gate(eng.db, second["record_id"], "pass", expected_sha=second["target_sha"])
++    assert is_gate_passed(eng.db, "srs_approval", "project", "project")
++    save_doc_version(eng, "SRS.md", "# v3")
++    assert not is_gate_passed(eng.db, "srs_approval", "project", "project")
++    history = dict(eng.db._query("SELECT * FROM gate_records WHERE record_id=?", (second["record_id"],))[0])
++    assert history["status"] == "STALE" and history["decision_status"] == "PASSED"
++    assert list_docs(eng)[0]["status"] == "STALE"
++    assert get_doc(eng, "SRS.md", version=1)["content"] == "# v1\n"
++    snapshot = json.loads(history["target_snapshot_json"])[0]
++    assert eng.db._query("SELECT content_text FROM doc_versions WHERE id=?", (snapshot["id"],))[0][0] == "# v2\n"
++
++
++def test_force_new_pending_round_is_real_and_old_round_cannot_decide(eng):
++    save_doc_version(eng, "SRS.md", "# Spec")
++    old = gate(eng)
++    new = gate(eng, force=True)
++    assert new["round"] == old["round"] + 1
++    with pytest.raises(GateConflictError):
++        decide_gate(eng.db, old["record_id"], "pass")
++    assert gate(eng)["record_id"] == new["record_id"]
++
++
++def test_external_edits_and_missing_artifacts_fail_closed(eng):
++    missing = gate(eng)
++    with pytest.raises(GateConflictError):
++        decide_gate(eng.db, missing["record_id"], "pass")
++    save_doc_version(eng, "SRS.md", "# Original")
++    current = gate(eng)
++    decide_gate(eng.db, current["record_id"], "pass")
++    (eng.ws.root / "docs/SRS.md").write_text("# Changed outside the API", encoding="utf-8")
++    assert not is_gate_passed(eng.db, "srs_approval", "project", "project")
++    with pytest.raises(GateConflictError):
++        decide_gate(eng.db, current["record_id"], "pass")
++    doc = get_doc(eng, "SRS.md")
++    assert doc["version"] == 2
++    assert gate(eng)["target_sha"] == doc["content_sha"]
++
++
++def test_concurrent_editors_have_one_winner_and_recoverable_history(eng):
++    original = save_doc_version(eng, "SRS.md", "# Original")
++    def edit(n):
++        try:
++            save_doc_version(eng, "SRS.md", f"# Editor {n}", expected_sha=original["content_sha"])
++            return "saved"
++        except DocumentConflictError:
++            return "conflict"
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        results = list(pool.map(edit, (1, 2)))
++    assert sorted(results) == ["conflict", "saved"]
++    assert get_doc(eng, "SRS.md")["version"] == 2
++    assert get_doc(eng, "SRS.md", version=1)["content"] == "# Original\n"
++
++
++def test_http_revision_conflicts_and_reads_do_not_regenerate_srs(eng):
++    save_doc_version(eng, "SRS.md", "# Original")
++    rec = gate(eng)
++    transport = httpx.MockTransport(lambda req: httpx.Response(200, json={"ok": True}))
++    client = TestClient(create_app(eng, proxy_transport=transport))
++    old = client.get("/vernal-api/docs/docs/SRS.md").json()
++    saved = client.put("/vernal-api/docs/docs/SRS.md", json={"content": "# Human revision", "expected_sha": old["content_sha"]})
++    assert saved.status_code == 200
++    assert client.put("/vernal-api/docs/docs/SRS.md", json={"content": "# Stale editor", "expected_sha": old["content_sha"]}).status_code == 409
++    assert client.post(f"/vernal-api/gates/{rec['record_id']}/decide", json={"decision": "pass", "expected_sha": rec["target_sha"]}).status_code == 409
++    # A malformed source cannot overwrite a valid human revision on a GET or export.
++    eng.ws.prd_json_path.write_text("{broken", encoding="utf-8")
++    assert client.get("/vernal-api/docs").status_code == 200
++    assert client.get("/vernal-api/docs/export?kinds=SRS&format=md").text == "# Human revision\n"
++    assert client.post("/vernal-api/docs/sync").status_code == 422
++
++
++def test_council_schema_to_srs_to_requirements_and_nested_design(eng):
++    requirement = {"req_id": "REQ-001", "title": "保存回答", "statement": "提交后持久化回答", "priority": "P0", "acceptance": ["重启后仍可读取"]}
++    def director(*_):
++        return {"executive_summary": "澄清", "resolved_debates": [], "open_risks": [], "contract_strategy": "增量",
++                "adrs": [{"adr_id": "ADR-001", "title": "保存", "decision": "SQLite", "rationale": "离线", "affected_squads": ["core"]}],
++                "spec_markdown": "# 澄清", "requirements": [requirement], "nfrs": []}
++    eng.harness.role_handlers["director"] = director
++    asyncio.run(synthesize_council(eng))
++    ProductSpec.model_validate_json(eng.ws.prd_json_path.read_text())
++    assert "REQ-001" in get_doc(eng, "SRS.md")["content"]
++    assert sync_requirements(eng)[0]["acceptance"] == ["重启后仍可读取"]
++    design = eng.ws.state_dir / "design/M1/core.json"
++    design.parent.mkdir(parents=True)
++    design.write_text(json.dumps({"squad_id": "core", "interfaces": [{"name": "save", "req_ids": ["REQ-001"]}],
++                                 "test_cases": [{"tc_id": "TC-001", "req_ids": ["REQ-001"]}]}))
++    assert set(_collect_design_links(eng)["REQ-001"]) == {"M1/core#save", "M1/core#TC-001"}
++
++
++def test_requirement_removal_restoration_and_duplicate_rejection(eng):
++    text = "| REQ-001 | P0 | First | Saved |\n| REQ-002 | P1 | Second | Read |\n"
++    save_doc_version(eng, "SRS.md", text)
++    assert len(sync_requirements(eng)) == 2
++    save_doc_version(eng, "SRS.md", text.splitlines()[0])
++    assert [r["req_id"] for r in sync_requirements(eng)] == ["REQ-001"]
++    assert eng.db._query("SELECT status FROM requirements WHERE req_id='REQ-002'")[0][0] == "RETIRED"
++    save_doc_version(eng, "SRS.md", text)
++    assert len(sync_requirements(eng)) == 2
++    save_doc_version(eng, "SRS.md", text + "| REQ-001 | P0 | Collision | Other |")
++    with pytest.raises(ValueError, match="重复需求"):
++        sync_requirements(eng)
++    assert eng.db._query("SELECT COUNT(*) FROM requirements WHERE status='ACTIVE'")[0][0] == 2
++
++
++def test_feature_namespaces_preserve_both_requirements_and_nfr_acceptance(eng):
++    items = [RequirementItem(req_id="REQ-001", feature_id=f, title=f, statement="保存", acceptance=[f]) for f in ("login", "export")]
++    spec = ProductSpec(product_vision="demo", core_workflows=[], edge_cases=[], error_conventions=[], global_acceptance_redlines=[],
++                       spec_markdown="", requirements=items, nfrs=[RequirementItem(req_id="NFR-001", title="延迟", statement="延迟有界", acceptance=["P95 < 200ms"])])
++    raw = spec.model_dump(); raw["adrs"] = [{"title": "legacy preserved"}]
++    original = json.dumps(raw)
++    eng.ws.prd_json_path.write_text(original)
++    sync_standard_docs_from_artifacts(eng)
++    requirements = {r["req_id"]: r for r in extract_requirements_from_sources(eng)}
++    assert set(requirements) == {"login:REQ-001", "export:REQ-001", "NFR-001"}
++    assert requirements["NFR-001"]["acceptance"] == ["P95 < 200ms"]
++    assert eng.ws.prd_json_path.read_text() == original
++
++
++def test_explicitly_empty_canonical_requirements_retire_stale_markdown(eng):
++    save_doc_version(eng, "SRS.md", "| REQ-001 | P0 | Old requirement | Old acceptance |")
++    assert len(sync_requirements(eng)) == 1
++    spec = ProductSpec(product_vision="Removed", core_workflows=[], edge_cases=[], error_conventions=[],
++                       global_acceptance_redlines=[], spec_markdown="", requirements=[], nfrs=[])
++    eng.ws.prd_json_path.write_text(spec.model_dump_json())
++    assert sync_requirements(eng) == []
++    assert eng.db._query("SELECT status FROM requirements WHERE req_id='REQ-001'")[0][0] == "RETIRED"
++
++
++def test_milestone_design_approval_covers_all_members_and_isolated_scope(eng):
++    save_doc_version(eng, "design/M1/core.md", "# M1 core")
++    save_doc_version(eng, "design/M2/core.md", "# M2 core")
++    first = gate(eng, gate_id="detailed_design_approval", scope_id="M1")
++    second = gate(eng, gate_id="detailed_design_approval", scope_id="M2")
++    decide_gate(eng.db, first["record_id"], "pass")
++    decide_gate(eng.db, second["record_id"], "pass")
++    save_doc_version(eng, "design/M1/api.md", "# Another squad")
++    assert not is_gate_passed(eng.db, "detailed_design_approval", "milestone", "M1")
++    assert is_gate_passed(eng.db, "detailed_design_approval", "milestone", "M2")
++
++
++def test_database_reopen_preserves_snapshot_and_approval(eng):
++    save_doc_version(eng, "SRS.md", "# Stable")
++    rec = gate(eng)
++    decide_gate(eng.db, rec["record_id"], "pass")
++    other = Database(eng.ws.db_path)
++    try:
++        assert is_gate_passed(other, "srs_approval", "project", "project")
++        assert other._query("SELECT content_text FROM doc_versions")[0][0] == "# Stable\n"
++    finally:
++        other.close()
++
++
++@pytest.mark.parametrize("path,content", [("docs/design/M1/new.md", "# New member"),
++                                        (".autodev/design/M1/new.json", '{"interfaces": []}')])
++def test_unarchived_design_member_blocks_approval_until_reviewed(eng, path, content):
++    for scope in ("M1", "M2"):
++        save_doc_version(eng, f"design/{scope}/core.md", f"# {scope}")
++        rec = gate(eng, gate_id="detailed_design_approval", scope_id=scope)
++        decide_gate(eng.db, rec["record_id"], "pass")
++    new_file = eng.ws.root / path
++    new_file.parent.mkdir(parents=True, exist_ok=True)
++    new_file.write_text(content, encoding="utf-8")
++    assert not is_gate_passed(eng.db, "detailed_design_approval", "milestone", "M1")
++    assert is_gate_passed(eng.db, "detailed_design_approval", "milestone", "M2")
++    docs = list_docs(eng)
++    assert next(d for d in docs if d["path"] == "docs/design/M1/core.md")["status"] == "STALE"
++    assert next(d for d in docs if d["path"] == "docs/design/M2/core.md")["status"] == "APPROVED"
++    pending = latest_gate_record(eng.db, "detailed_design_approval", "milestone", "M1")
++    assert pending["status"] == "PENDING" and pending["round"] == 2
++    assert path in {item["path"] for item in json.loads(pending["target_snapshot_json"])}
++    decide_gate(eng.db, pending["record_id"], "pass")
++    assert is_gate_passed(eng.db, "detailed_design_approval", "milestone", "M1")
++
++
++@pytest.mark.parametrize("runtime", ["local", "loopforge"])
++def test_stale_spec_blocks_shared_scheduler_and_publication(eng, runtime):
++    from autodev.models import PlanTask, ProjectStatus
++    from autodev.engine import OpsError
++    from autodev.scheduler import Scheduler
++    from test_audit_fixes import _seed_plan
++    eng.settings.runtime_backend = runtime
++    tpl = load_builtin_template("standard")
++    tpl.review_policy = "off"
++    for stage in tpl.stages:
++        stage.gates = [g for g in stage.gates if g.id == "srs_approval"]
++    save_custom_template(eng.ws, json.dumps(tpl.model_dump()))
++    task = PlanTask(task_id="T-001", milestone_id="M1", module="core", role="coder", title="Implement", description="Implement",
++                    allowed_paths=["core/"], acceptance_criteria=["Works"], depends_on=[], doc_slice_ids=[], verify_cmds=["true"], priority=1)
++    eng.db.save_plan(_seed_plan([task]), max_retries=1)
++    eng.set_status(ProjectStatus.APPROVED)
++    save_doc_version(eng, "SRS.md", "# First")
++    rec = gate(eng)
++    decide_gate(eng.db, rec["record_id"], "pass")
++    save_doc_version(eng, "SRS.md", "# Changed")
++    scheduler = Scheduler(eng)
++    scheduler._dispatch_ready("M1")
++    assert not scheduler.running_tasks
++    assert not eng.harness.calls
++    with pytest.raises(OpsError, match="当前文档版本尚未批准"):
++        eng._reserve_publication("M1")
++
++
++def test_structured_design_drift_invalidates_rendered_document_approval(eng):
++    from autodev.docs_center.service import _save_snapshot
++    raw = eng.ws.state_dir / "design/M1/core.json"
++    _save_snapshot(eng, raw, '{"interfaces": []}', author="Architect", note="Design snapshot")
++    save_doc_version(eng, "design/M1/core.md", "# Rendered design")
++    rec = gate(eng, gate_id="detailed_design_approval", scope_id="M1")
++    decide_gate(eng.db, rec["record_id"], "pass")
++    raw.write_text('{"interfaces": ["changed"]}')
++    assert not is_gate_passed(eng.db, "detailed_design_approval", "milestone", "M1")
++    with pytest.raises(GateConflictError):
++        decide_gate(eng.db, rec["record_id"], "pass")
++
++
++def test_unchanged_generator_does_not_erase_human_revision(eng):
++    spec = ProductSpec(product_vision="Demo", core_workflows=[], edge_cases=[], error_conventions=[],
++                       global_acceptance_redlines=[], spec_markdown="# Draft")
++    eng.ws.prd_json_path.write_text(spec.model_dump_json())
++    sync_standard_docs_from_artifacts(eng)
++    save_doc_version(eng, "SRS.md", "# Human revision")
++    assert "docs/SRS.md" not in sync_standard_docs_from_artifacts(eng)
++    assert get_doc(eng, "SRS.md")["content"] == "# Human revision\n"
++
++
++def test_failed_file_write_rolls_back_snapshot_and_preserves_approval(eng, monkeypatch):
++    import autodev.docs_center.service as docs
++    save_doc_version(eng, "SRS.md", "# Stable")
++    rec = gate(eng)
++    decide_gate(eng.db, rec["record_id"], "pass")
++    def fail(*_):
++        raise OSError("disk write failed")
++    monkeypatch.setattr(docs.os, "replace", fail)
++    with pytest.raises(OSError):
++        save_doc_version(eng, "SRS.md", "# Must not be approved")
++    assert len(eng.db._query("SELECT id FROM doc_versions")) == 1
++    assert get_doc(eng, "SRS.md")["content"] == "# Stable\n"
++    assert is_gate_passed(eng.db, "srs_approval", "project", "project")
++
++
++def test_two_database_connections_create_one_pending_round(eng):
++    save_doc_version(eng, "SRS.md", "# Concurrent request")
++    def request(_):
++        db = Database(eng.ws.db_path)
++        try:
++            return ensure_gate_record(db, stage_id="requirements", gate_id="srs_approval", kind="human_approval",
++                                      scope_type="project", scope_id="project")["record_id"]
++        finally:
++            db.close()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        ids = list(pool.map(request, (1, 2)))
++    assert ids[0] == ids[1]
+--- a/tests/test_ci_pipeline.py
++++ b/tests/test_ci_pipeline.py
+@@ -125,8 +125,8 @@
+         tpl = load_builtin_template("standard")
+         tpl.review_policy = "off"
+         for s in tpl.stages:
+-            if s.id == "detailed_design":
+-                s.enabled = False
++            if s.id in {"requirements", "architecture", "detailed_design"}:
++                s.enabled = False  # These fixtures isolate CI and candidate review.
+             if s.id == "testing":
+                 s.gates = [g for g in s.gates if g.kind != "quality"]
+         save_custom_template(ws, json.dumps(tpl.model_dump(), ensure_ascii=False))
+@@ -201,8 +201,8 @@
+         tpl = load_builtin_template("standard")
+         tpl.review_policy = "off"
+         for s in tpl.stages:
+-            if s.id == "detailed_design":
+-                s.enabled = False
++            if s.id in {"requirements", "architecture", "detailed_design"}:
++                s.enabled = False  # These fixtures isolate CI and candidate review.
+             if s.id == "testing":
+                 s.gates = [g for g in s.gates if g.kind != "quality"]
+         save_custom_template(ws, json.dumps(tpl.model_dump(), ensure_ascii=False))
+--- a/tests/test_detailed_design.py
++++ b/tests/test_detailed_design.py
+@@ -12,7 +12,7 @@
+ 
+ from autodev.assets import load_builtin_skills
+ from autodev.docs_center.exporter import inspect_docx_structure, markdown_to_docx_bytes
+-from autodev.docs_center.service import generate_detailed_design, save_doc_version
++from autodev.docs_center.service import generate_detailed_design, save_doc_version, sync_standard_docs_from_artifacts
+ from autodev.docs_center.templates import render_detailed_design_markdown, render_srs_markdown
+ from autodev.docs_center.validator import validate_detailed_design
+ from autodev.engine import Engine, init_workspace
+@@ -245,12 +245,17 @@
+         )
+         eng.db.save_plan(plan, max_retries=2)
+         eng.set_status(ProjectStatus.APPROVED)
++        sync_standard_docs_from_artifacts(eng)
++        save_doc_version(eng, "ARCHITECTURE.md", "# Order architecture")
++        for stage, gid in (("requirements", "srs_approval"), ("architecture", "architecture_approval")):
++            rec = ensure_gate_record(eng.db, stage_id=stage, gate_id=gid, kind="human_approval", scope_type="project", scope_id="project")
++            decide_gate(eng.db, rec["record_id"], "pass")
+ 
+         # 1. 生成详细设计（第 1 轮校验拦截 -> 第 2 轮通过落盘）
+         dd = asyncio.run(generate_detailed_design(eng, "M1", "order"))
+         assert arch_calls == 2
+         assert dd.interfaces[0].name == "createOrder"
+-        assert (ws.root / "docs" / "design" / "order.md").is_file()
++        assert (ws.root / "docs" / "design" / "M1" / "order.md").is_file()
+ 
+         # 2. H3 门禁未通过前阻止 coder 派单；批准后放行并在 coder / reviewer 提示词注入 design_refs 片段
+         sched = Scheduler(eng)
+--- /dev/null
++++ b/tests/test_governance_exports.mjs
+@@ -0,0 +1,55 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { setActiveProjectId } from "../autodev/server/static/js/api.js";
++import { initGovernanceModule } from "../autodev/server/static/js/governance.js";
++
++test("trace downloads follow the current project when the existing panel is reused", async () => {
++  const elements = new Map();
++  const panel = {
++    appendChild(host) { elements.set(host.id, host); },
++  };
++  const matrix = {};
++  elements.set("view-council", panel);
++  elements.set("trace-matrix-box", matrix);
++  globalThis.CSS = { escape: String };
++  globalThis.document = {
++    getElementById: (id) => elements.get(id) || null,
++    querySelector: (selector) => elements.get(selector.slice(1)) || null,
++    createElement: () => ({
++      style: {},
++      set innerHTML(html) {
++        this.links = [...html.matchAll(/data-trace-export="([^"]+)"/g)]
++          .map((match) => ({ dataset: { traceExport: match[1] } }));
++      },
++      querySelectorAll() { return this.links; },
++    }),
++  };
++  globalThis.fetch = async () => ({ ok: true, json: async () => ({ rows: [] }) });
++  let hooks;
++  initGovernanceModule({ registerViewHooks: (value) => { hooks = value; } });
++  const open = async () => {
++    hooks.onCouncilOpen();
++    await new Promise((resolve) => setImmediate(resolve));
++  };
++  const assertProject = (host, project) => {
++    assert.equal(host.links.length, 2);
++    for (const link of host.links) {
++      const url = new URL(link.href, "http://localhost");
++      assert.equal(url.pathname, "/vernal-api/trace/export");
++      assert.equal(url.searchParams.get("format"), link.dataset.traceExport);
++      assert.equal(url.searchParams.get("project"), project);
++    }
++  };
++
++  setActiveProjectId("first");
++  await open();
++  const host = elements.get("codeintel-trace-host");
++  assertProject(host, "first");
++  setActiveProjectId("第二个 & project");
++  await open();
++  assert.equal(elements.get("codeintel-trace-host"), host);
++  assertProject(host, "第二个 & project");
++  setActiveProjectId("");
++  await open();
++  assertProject(host, null);
++});
+--- a/tests/test_process_gates.py
++++ b/tests/test_process_gates.py
+@@ -11,6 +11,7 @@
+ from fastapi.testclient import TestClient
+ 
+ from autodev.engine import Engine, OpsError, init_workspace
++from autodev.docs_center.service import save_doc_version
+ from autodev.harnesses.mock import MockHarness
+ from autodev.models import PlanMilestone, PlanModule, PlanTask, ProjectPlan, ProjectStatus, TaskStatus
+ from autodev.process.runner import decide_gate, ensure_gate_record, load_template, save_custom_template, stage_status
+@@ -60,6 +61,7 @@
+     eng = Engine(ws, harness=MockHarness())
+     try:
+         eng.settings.process_template = "standard"
++        save_doc_version(eng, "SRS.md", "# Reviewed specification")
+         rec = ensure_gate_record(
+             eng.db,
+             stage_id="requirements",
+@@ -156,6 +158,8 @@
+         )
+         eng.db.save_plan(plan, max_retries=2)
+         eng.set_status(ProjectStatus.PLANNED)
++        save_doc_version(eng, "SRS.md", "# Reviewed requirements")
++        save_doc_version(eng, "ARCHITECTURE.md", "# Reviewed architecture")
+         eng._sync_planning_gates()
+ 
+         # H1：SRS 门未通过时 approve_plan 拒绝
+@@ -186,6 +190,7 @@
+         assert views_wait["detailed_design"] == "WAITING_GATE"
+ 
+         # 批准 M1 详细设计门后，Scheduler 正常派单完成编码
++        save_doc_version(eng, "design/M1/core.md", "# Reviewed detailed design")
+         dd_rec = ensure_gate_record(
+             eng.db,
+             stage_id="detailed_design",
+--- a/tests/test_review_round2_fixes.py
++++ b/tests/test_review_round2_fixes.py
+@@ -130,8 +130,8 @@
+         tpl = load_builtin_template("standard")
+         tpl.review_policy = "milestone"
+         for s in tpl.stages:
+-            if s.id == "detailed_design":
+-                s.enabled = False
++            if s.id in {"requirements", "architecture", "detailed_design"}:
++                s.enabled = False  # These fixtures isolate CI and candidate review.
+             if s.id == "testing":
+                 s.gates = [g for g in s.gates if g.kind != "quality"]
+         save_custom_template(ws, json.dumps(tpl.model_dump(), ensure_ascii=False))
+@@ -462,8 +462,8 @@
+         tpl = load_builtin_template("standard")
+         tpl.review_policy = "off"
+         for s in tpl.stages:
+-            if s.id == "detailed_design":
+-                s.enabled = False
++            if s.id in {"requirements", "architecture", "detailed_design"}:
++                s.enabled = False  # These fixtures isolate CI and candidate review.
+             if s.id == "testing":
+                 s.gates = [g for g in s.gates if g.kind != "quality"]
+         save_custom_template(ws, json.dumps(tpl.model_dump(), ensure_ascii=False))
+--- a/tests/test_traceability.py
++++ b/tests/test_traceability.py
+@@ -55,6 +55,8 @@
+         tpl = load_builtin_template("feature")
+         tpl.review_policy = "off"
+         for s in tpl.stages:
++            if s.id in ("requirements", "architecture", "detailed_design"):
++                s.gates = []  # This test isolates trace coverage, not document approval.
+             if s.id == "integration_delivery":
+                 s.gates = [g for g in s.gates if g.kind != "ci"]
+                 s.gates.append(GateDef(id="req_trace_p0", name="P0 需求测试覆盖门禁", kind="trace_coverage", scope="milestone", blocking=True))
+@@ -99,7 +101,8 @@
+                 ),
+             }
+         )
+-        eng.db.update_task("T-001", status=TaskStatus.APPROVED, artifact_digest=key1)
++        patch1 = ex.patch(eng.db.get_task("T-001"), {}, ex.get(key1), [])
++        eng.db.update_task("T-001", status=TaskStatus.APPROVED, artifact_digest=patch1)
+         eng.db.meta_set("delivery:M1", key1)
+         eng.db.meta_set("candidate_ref:M1", key1)
+         eng.db.update_milestone("M1", status=MilestoneStatus.AWAITING_MERGE)
+@@ -142,7 +145,8 @@
+                 ),
+             }
+         )
+-        eng.db.update_task("T-001", status=TaskStatus.APPROVED, artifact_digest=key2)
++        patch2 = ex.patch(eng.db.get_task("T-001"), {}, ex.get(key2), [])
++        eng.db.update_task("T-001", status=TaskStatus.APPROVED, artifact_digest=patch2)
+         eng.db.meta_set("delivery:M1", key2)
+         eng.db.meta_set("candidate_ref:M1", key2)
+ 
+--- a/tests/test_unified_batch2_extensions.py
++++ b/tests/test_unified_batch2_extensions.py
+@@ -185,6 +185,11 @@
+     from autodev.review.service import list_reviews, decide_review
+     from autodev.engine import OpsError
+     eng = project(tmp_path)
++    from autodev.docs_center.service import save_doc_version
++    save_doc_version(eng, "ARCHITECTURE.md", "# Publication architecture")
++    architecture = ensure_gate_record(eng.db, stage_id="architecture", gate_id="architecture_approval",
++        kind="human_approval", scope_type="project", scope_id="project")
++    decide_gate(eng.db, architecture["record_id"], "pass")
+     eng.settings.review_policy = "milestone"
+     eng.settings.ci_provider = "webhook"
+     eng.settings.require_merge_approval = True

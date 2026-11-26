@@ -1,0 +1,353 @@
+{
+  "branch": "codex/standard-delivery-p1",
+  "baseline": "P0 source snapshot before P1 development",
+  "baseline_file_count": 232,
+  "baseline_unchanged": true,
+  "python_tests": 257,
+  "node_tests": 3,
+  "patch_sha256": "ce4edc3295ffbd6fd0effd931f2c311d74e2863e505112c3a22b9062ffda336b",
+  "files": [
+    {
+      "path": "autodev/assets/speckit/manifest.json",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "96b8f094590ef44fa9fb0e1103ee1258c6925749f875ec72db90f33a40ff0075"
+    },
+    {
+      "path": "autodev/assets/speckit/presets/vernal-core.json",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "69589a48a05a6e34f638cf26e6c7cad981e0e9c6dab33296b8fe32e79cf8ffa9"
+    },
+    {
+      "path": "autodev/assets/speckit/presets/vernal-lite.json",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "e91b9294a0248b494fc7e1b744c2b172f3768c69f997b448c128d20860a2e85d"
+    },
+    {
+      "path": "autodev/assets/speckit/upstream/v1.4.4/LICENSE",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "2510b446bc1f0cf9702453075d20cd88631e20e5642658edb7325d9c1eb534f7"
+    },
+    {
+      "path": "autodev/assets/speckit/upstream/v1.4.4/templates/checklist-template.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "c65b7f10aa9a965ea9c7f4e879d4ab0240665473731c5e9e638c4acb3ca9afc4"
+    },
+    {
+      "path": "autodev/assets/speckit/upstream/v1.4.4/templates/commands/analyze.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "bfd5a822d517f53d155e037535475bf94a6c6a7eeef801503b010832674ca686"
+    },
+    {
+      "path": "autodev/assets/speckit/upstream/v1.4.4/templates/commands/checklist.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "1192784f378fb977b408b72ca1bfb8fc55e129519f3f44bc5d0a7e152c480654"
+    },
+    {
+      "path": "autodev/assets/speckit/upstream/v1.4.4/templates/commands/clarify.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "5260d798c5671deb9ac7e59d6ffdb69b30c26fb28878d3cc25e30fb71cacc734"
+    },
+    {
+      "path": "autodev/assets/speckit/upstream/v1.4.4/templates/commands/constitution.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "a915ba6ae5fdbd499c143204eab3888b95a0ff0656e2c16b40282375acb5902c"
+    },
+    {
+      "path": "autodev/assets/speckit/upstream/v1.4.4/templates/commands/plan.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "206a0386d20b3eed4c087a4d9de247a3e7b2b59348bf3c801fc74f63ca2726a5"
+    },
+    {
+      "path": "autodev/assets/speckit/upstream/v1.4.4/templates/commands/specify.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "e3e7595ef13e1f05fd8dd72f794f1f46fe6074beb6abb0602c6ab036312c5a02"
+    },
+    {
+      "path": "autodev/assets/speckit/upstream/v1.4.4/templates/commands/tasks.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "01220df769d94449a70842dba91a16d824520b9f7bf483f597dd1a378b036866"
+    },
+    {
+      "path": "autodev/assets/speckit/upstream/v1.4.4/templates/constitution-template.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "ce7549540fa45543cca797a150201d868e64495fdff39dc38246fb17bd4024b3"
+    },
+    {
+      "path": "autodev/assets/speckit/upstream/v1.4.4/templates/plan-template.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "dfba43da2b2a207ff8c177a0fba03af074fd45e261696b4b64172041fad2e992"
+    },
+    {
+      "path": "autodev/assets/speckit/upstream/v1.4.4/templates/spec-template.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "3945437fc35cd30a5b2bf7beea680337c3516826d3efa5a6b92c4a7eca1ba28e"
+    },
+    {
+      "path": "autodev/assets/speckit/upstream/v1.4.4/templates/tasks-template.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "1e448e9153462e8c5b5a55231a54c756d870a82950d4dd9425a2bf5b7008a0d9"
+    },
+    {
+      "path": "autodev/context_bundle.py",
+      "kind": "modified",
+      "before_sha256": "3d0b1dae9da7cf090aec72af859e9d563b1e8d1148436bb326fcb157c732483b",
+      "after_sha256": "ce15f217e8ff7f14b53c2fa0e55a40d388266f1e319c7ba2629e123d9c99849b"
+    },
+    {
+      "path": "autodev/council.py",
+      "kind": "modified",
+      "before_sha256": "0c86e707970b7889cc1273819ac56f9042f29c25f65640496f7d88481975db16",
+      "after_sha256": "ae61adc9fb55a0775873f96f3adcc242f755fba3696f4efe0b7c3a9537f30143"
+    },
+    {
+      "path": "autodev/db.py",
+      "kind": "modified",
+      "before_sha256": "035d5ebb1df2d2de229d6866d495e87c2b97a334eb48f0b2adae8a708540598d",
+      "after_sha256": "b9f775660898736f7a9e11b38d15b822693d4de85150590af476475829d42b74"
+    },
+    {
+      "path": "autodev/docs_center/service.py",
+      "kind": "modified",
+      "before_sha256": "a831e2be7dc4eac34c0010fbcc8d74519c38446b881e71f1840c74547c31edfb",
+      "after_sha256": "fd037e4668524e53d2c0eb8f85fa8ef85a4c0c802d47db7c395cb3aa09c3f3b5"
+    },
+    {
+      "path": "autodev/engine.py",
+      "kind": "modified",
+      "before_sha256": "16a87a151dce229f090b385f713d1e613b03b33dbc98ba411bda4a2a6082a1be",
+      "after_sha256": "fff9c79637469e8e563b43acd387ff2134ba2d722ced8c371cb25da60bc09615"
+    },
+    {
+      "path": "autodev/harnesses/loopforge_harness.py",
+      "kind": "modified",
+      "before_sha256": "361c1cabaf83ad311739757ae9bf034d17128348e7247bef17d0a92cbbeed232",
+      "after_sha256": "dd7caf04be7b828a82bfa5dc85864b312e457e31b086596331d0fb6756921d3b"
+    },
+    {
+      "path": "autodev/loopforge/bootstrap.py",
+      "kind": "modified",
+      "before_sha256": "7d3025f98829bee7580aeef0a6017a3cd61b79af2a981c1ecff23f9470f7b24b",
+      "after_sha256": "886f00d94988ae958aeb606326d47a2eda1808d978b0556f9c56e0b87cbb21f1"
+    },
+    {
+      "path": "autodev/loopforge/bridge.py",
+      "kind": "modified",
+      "before_sha256": "ea0e7abc645f4f7fc29ab41d3a81b650387efb464ab1620b6a20c06ab3e32a4d",
+      "after_sha256": "1d89ef32cc2e4826701ec710c57f2f698260744a2ecf5bf781a0481fe6ca58b1"
+    },
+    {
+      "path": "autodev/loopforge/dispatch.py",
+      "kind": "modified",
+      "before_sha256": "cef15dade5641bee965ea62b7be4f6f57e1ee4a0c43fe1495e87d083a510e6f4",
+      "after_sha256": "b4bfe6436e4aebcd5ec2bf201796fbf5b09df81f4e47a107c872b6a834e29581"
+    },
+    {
+      "path": "autodev/loopforge/protocol.py",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "2eea98a6efcd70e8acf008f619660a8c5697c677c8621c6ab0d64f7cac216c6e"
+    },
+    {
+      "path": "autodev/models.py",
+      "kind": "modified",
+      "before_sha256": "5fa6cfcecb7acd499103241118b0cac967a0aacef2a3ef64b8d0f3c7dcf3fea9",
+      "after_sha256": "86c2105bbacb0d563b6b19669a2f8e22032881b28d80cdc74d0877cb302625b6"
+    },
+    {
+      "path": "autodev/process/runner.py",
+      "kind": "modified",
+      "before_sha256": "88267be11b27d1a61a2a356f8d4769e33c1d94f281e255f403b4212e46dc4958",
+      "after_sha256": "f0a6eeeffe9436418b543882926f14f3c95a71a68fbda172d55997065359afdd"
+    },
+    {
+      "path": "autodev/process/targets.py",
+      "kind": "modified",
+      "before_sha256": "9c78e9cfea32db48152ad40c443682aa918a650620f3c14270ceaebf1d11285f",
+      "after_sha256": "565d1f1b05628851b4069765b8c83f617639b45189ff318b3563f5bf521a8634"
+    },
+    {
+      "path": "autodev/prompts.py",
+      "kind": "modified",
+      "before_sha256": "b64608462db32960b3de9cbfd8fd9aeeeca19883f52273fd4d3314c677d11798",
+      "after_sha256": "c9152c38d667140d69f65d4d5085f4e9060a600aa44704c8c1f2c5837473ed66"
+    },
+    {
+      "path": "autodev/prompts_style.py",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "da09694bc2c8aa058315c8512943b70fd746f858ad7fb8437be695683b6073e3"
+    },
+    {
+      "path": "autodev/scheduler.py",
+      "kind": "modified",
+      "before_sha256": "b673626a704f4fafad95b7ede5be2d4f95d96010c7cc098a0708c573fb74947c",
+      "after_sha256": "3ac31afbaefcf73087bc9cb3019841a105a042ea436cd5e1393bd0ce048657ba"
+    },
+    {
+      "path": "autodev/server/app.py",
+      "kind": "modified",
+      "before_sha256": "6d04e43657a601e671e457ede6c1f7cb0fc0443fae8f553e2dc8b7ab4f6957e2",
+      "after_sha256": "799c11c908495f85e166372b6bc1d6b9480da8cdcfbceb62793c38bcf0783e37"
+    },
+    {
+      "path": "autodev/server/routers/planning.py",
+      "kind": "modified",
+      "before_sha256": "21e12bd49c9e5a3a05312e1c4a470ae51f98e352747eb699ffbc1d9ed43e39e0",
+      "after_sha256": "b9fcaf67fd54a8df7f3eb029c86fecbd65e186b59dc4e5c16949aad57e13fb22"
+    },
+    {
+      "path": "autodev/server/routers/speckit.py",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "10e85380303424f4fd44dc411bc72ee06007d038fc1cd09c87c7643044ad648f"
+    },
+    {
+      "path": "autodev/server/static/js/docs-center.js",
+      "kind": "modified",
+      "before_sha256": "353bd67605820ad9571955c6633e4aecd607d62ae94e66a8f8f3ee0413287aa4",
+      "after_sha256": "ff0f2a84535ebbc87583c14e3ed8b46e21080bc79086e98ce7d6ae2c97e59427"
+    },
+    {
+      "path": "autodev/server/static/js/drawer.js",
+      "kind": "modified",
+      "before_sha256": "df8b3aba69179b09a801037f62167058369bb96e8c8ca61c19100c5a3658fdb9",
+      "after_sha256": "dd85c1dc760281f0ac099627e30355f05751bb592d18d0436e38cdaba212e649"
+    },
+    {
+      "path": "autodev/server/static/js/main.js",
+      "kind": "modified",
+      "before_sha256": "b73fc0812f3416126032ef293b0717122a430175fd101b97f04337c04de96393",
+      "after_sha256": "198072aab8cf12b80699d5accef1e5f1cc20d43084a4bf82c710f0b0e2d8992f"
+    },
+    {
+      "path": "autodev/server/static/js/specifications.js",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "08f586b61b5f05219578157c18afb64dd5451b311fb6b640a00c712f032a55ad"
+    },
+    {
+      "path": "autodev/speckit/__init__.py",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "e069cf3a602b780d83a326e10b037813c145ff8a0d3ae322fab97bfad34a9c38"
+    },
+    {
+      "path": "autodev/speckit/adapter.py",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "03283571095e90d8723fa9f8bbb943d7a7331020ca94d1eb602f7d22cbf53db9"
+    },
+    {
+      "path": "autodev/speckit/assets.py",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "3314c7a7a6b1cbd70826838ed0970c96667c7615615f9ed69ff7fd520a63e238"
+    },
+    {
+      "path": "autodev/speckit/compiler.py",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "76f49d360d734bef1793f37184b7d4d168eb52c721071e63e3039b0cb6cf9e10"
+    },
+    {
+      "path": "autodev/speckit/parser.py",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "846133eda945714690cf63330dc82bbd9063a2c0d8e8c70a9d78b21ecb027e14"
+    },
+    {
+      "path": "autodev/speckit/paths.py",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "61162c0167388abf5a3f5a9b54906af00c92c2f8f3bf162369ab5c278324faf9"
+    },
+    {
+      "path": "autodev/speckit/service.py",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "d6a7133b2b550d1c521d6c96cc0b771d0c0e22cd3998f63ec3dff54082b163e7"
+    },
+    {
+      "path": "autodev/speckit/validate_output.cjs",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "a4066914e280bc57b6fedf548f109eba65b0b5eb7e337f148de0b4ac120492db"
+    },
+    {
+      "path": "autodev/speckit/validate_output.py",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "9b946e14388af8a57fdf146d5ea0a5ef9b24312498c42798152c829535e0100f"
+    },
+    {
+      "path": "autodev/steering.py",
+      "kind": "modified",
+      "before_sha256": "30d1a74dbdf1d554a885ed2896d7d208c48c93650eeb59c3a4dd92e1f08efcf5",
+      "after_sha256": "53bbeb1f43207388d1f74d51dcda8bae56ef6e88b80a0e0d69f5d5b8a0326cb1"
+    },
+    {
+      "path": "autodev/trace/scan.py",
+      "kind": "modified",
+      "before_sha256": "8cb1d1c0134bbcf9933b889bb4a66952351639b817b13a76da056d77648637f0",
+      "after_sha256": "4a6153d0a49642c154f07f6ee6b961c72ab4d02aa931029d8551016ba83e0d23"
+    },
+    {
+      "path": "docs/examples/P1_SAMPLE_SPEC.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "f44292eccc83df4731e1cfe29472e1ab07d401a5e33b8a39128f71676a32e499"
+    },
+    {
+      "path": "docs/reviews/P1_REVIEW.md",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "39803bd39ff1267f440e01112bb5e3c6e059283d3ad665dbaff1559b53b046d4"
+    },
+    {
+      "path": "docs/reviews/P1_TEST_RESULTS.txt",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "bcfed3797efe21689eb007ef2e55438f7d3e4468b9c10c01760e196288578734"
+    },
+    {
+      "path": "docs/reviews/P1_UI_TEST_RESULTS.txt",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "6cae3e9b97d05259c8594f297a27f57dc2122c17e9a1639c7e3ce312cef730f7"
+    },
+    {
+      "path": "scripts/start_p1_review.sh",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "5ff5d45179a76340bf4309b283a133a86aa0f2c4965ef517cb5faee95669a6a7"
+    },
+    {
+      "path": "tests/test_specifications_ui.mjs",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "d81ca5ae194936d56b94241462181df0d68b351c692f2418901549dad6cc5620"
+    },
+    {
+      "path": "tests/test_speckit.py",
+      "kind": "added",
+      "before_sha256": null,
+      "after_sha256": "90dd2fe3cbd6236d3cedb129fe4000d2391da56b6d5ccd73e5492af407fc59c9"
+    }
+  ]
+}

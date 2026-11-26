@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from autodev.engine import Engine, OpsError, init_workspace
+from autodev.docs_center.service import save_doc_version
 from autodev.harnesses.mock import MockHarness
 from autodev.models import PlanMilestone, PlanModule, PlanTask, ProjectPlan, ProjectStatus, TaskStatus
 from autodev.process.runner import decide_gate, ensure_gate_record, load_template, save_custom_template, stage_status
@@ -60,6 +61,7 @@ def test_gate_decide_idempotency_round_conflict_and_waive_validation(tmp_path: P
     eng = Engine(ws, harness=MockHarness())
     try:
         eng.settings.process_template = "standard"
+        save_doc_version(eng, "SRS.md", "# Reviewed specification")
         rec = ensure_gate_record(
             eng.db,
             stage_id="requirements",
@@ -156,6 +158,8 @@ def test_standard_template_srs_and_detailed_design_hooks_and_stage_derivation(tm
         )
         eng.db.save_plan(plan, max_retries=2)
         eng.set_status(ProjectStatus.PLANNED)
+        save_doc_version(eng, "SRS.md", "# Reviewed requirements")
+        save_doc_version(eng, "ARCHITECTURE.md", "# Reviewed architecture")
         eng._sync_planning_gates()
 
         # H1：SRS 门未通过时 approve_plan 拒绝
@@ -186,6 +190,7 @@ def test_standard_template_srs_and_detailed_design_hooks_and_stage_derivation(tm
         assert views_wait["detailed_design"] == "WAITING_GATE"
 
         # 批准 M1 详细设计门后，Scheduler 正常派单完成编码
+        save_doc_version(eng, "design/M1/core.md", "# Reviewed detailed design")
         dd_rec = ensure_gate_record(
             eng.db,
             stage_id="detailed_design",

@@ -7,17 +7,12 @@ from pathlib import Path
 
 from autodev.config import Settings
 from autodev.db import DocSlice, Task
+from autodev.prompts_style import COMMUNICATION_STYLE
 
 PLANNER_FULLTEXT_BUDGET = 60_000
 CONTRACT_BUDGET = 30_000
 SLICE_BUDGET = 18_000
-FILE_DELIVERY_STAGES = (
-    "文件交付模式下，编码和独立审查在本次任务工作区核对清单、代码及测试。"
-    "任务审查通过后，平台集成并验证交付文件。对于原地接管的本机项目，平台在里程碑合并时检查原目录冲突并写回。"
-    "将用户要求的原目录验收列在此次写回之后。"
-    "任务卡的通过条件应能在当前工位独立完成。记录实际使用的执行器和测试命令，"
-    "仅在用户明确指定时把某个命名沙箱列为必需环境。"
-)
+
 
 
 def _bullets(items: list[str]) -> str:
@@ -56,7 +51,7 @@ def build_planner_prompt(
     tools = _bullets([f"{k}: {v}" for k, v in toolchains.items()])
     protected = ", ".join(settings.protected_paths)
     extra_block = f"\n## 负责人补充要求\n\n{extra}\n" if extra.strip() else ""
-    return f"""你是资深软件架构师兼研发经理。你的任务：把输入资料拆解为一份可由多个编码智能体并行完成的研发计划。
+    return COMMUNICATION_STYLE + f"""你是资深软件架构师兼研发经理。你的任务：把输入资料拆解为一份可由多个编码智能体并行完成的研发计划。
 你处于只读模式，不要修改任何文件。最终只输出符合给定 JSON Schema 的 JSON。
 
 ## 资料切片索引
@@ -93,7 +88,7 @@ def build_planner_prompt(
    - 若 `verify_cmds` 运行 `unittest discover` / `pytest` / `node --test`，则本卡 `allowed_paths` 必须同时包含对应的测试文件（严禁在白名单不含测试文件的纯实现卡上跑 `unittest discover`，Python 3.12 找不到用例会返回退出码 5 导致死锁！）；
    - 若本卡确实不含测试文件，仅使用针对白名单文件的语法/导入自检命令（如 `python3 -c "import sorting"` 或 `node --check ...`）。
 7. **integration_cmd**：该里程碑全部任务合并后，在仓库根目录运行的跨模块回归命令（通常是运行全部测试）；没有可留空字符串。
-   {FILE_DELIVERY_STAGES}
+   每个任务都要明确入口、允许修改的范围和可独立核验的验收结果。
 8. **acceptance_criteria**：可被审查员逐条核对的具体验收条件。
 9. **doc_slice_ids**：每个任务关联 1~3 个最相关的切片 ID（必须来自上表）。
 10. **priority**：数字越小越优先，用于同批次排序。
@@ -209,7 +204,7 @@ def build_coder_prompt(
     from autodev.context_bundle import build_task_input_bundle
     bundle = build_task_input_bundle(ws_root, db, task, decisions=decisions, source_root=source_root)
 
-    return f"""你是多智能体研发团队中的专职工程工位，在独立工作目录完成原子任务。交付方式为 {settings.collaboration_mode}，当前目录包含本任务的输入版本。
+    return COMMUNICATION_STYLE + f"""你是多智能体研发团队中的专职工程工位，在独立工作目录完成原子任务。交付方式为 {settings.collaboration_mode}，当前目录包含本任务的输入版本。
 
 {_task_header(task)}
 ## 岗位职责说明
@@ -239,7 +234,7 @@ def build_coder_prompt(
 
 def build_fix_prompt(task: Task, feedback: str, attempt_no: int, steer_note: str | None) -> str:
     steer = f"\n## 人工指导意见\n\n{steer_note}\n" if steer_note else ""
-    return f"""上一轮工作没有通过调度器的独立检查。这是第 {attempt_no} 轮（最多 {task.max_retries} 轮，超过将熔断交人工处理）。
+    return COMMUNICATION_STYLE + f"""上一轮工作没有通过调度器的独立检查。这是第 {attempt_no} 轮（最多 {task.max_retries} 轮，超过将熔断交人工处理）。
 
 ## 失败原因
 
@@ -255,7 +250,7 @@ def build_fix_prompt(task: Task, feedback: str, attempt_no: int, steer_note: str
 
 def build_fallback_context(diffstat: str, feedback: str, steer_note: str | None) -> str:
     steer = f"\n人工指导意见：\n{steer_note}\n" if steer_note else ""
-    return f"""
+    return COMMUNICATION_STYLE + f"""
 
 ## 续作说明
 
@@ -291,7 +286,7 @@ def build_review_prompt(
     from autodev.context_bundle import build_candidate_review_bundle
     review_context = build_candidate_review_bundle(ws_root, task, diff, source_root=source_root)
 
-    return f"""你是独立代码审查员，处于只读模式。请判断任务分支上的改动是否**真正**满足验收标准。当前目录是该任务的工作树，可阅读任何文件。
+    return COMMUNICATION_STYLE + f"""你是独立代码审查员，处于只读模式。请判断任务分支上的改动是否**真正**满足验收标准。当前目录是该任务的工作树，可阅读任何文件。
 
 {_decisions_block(decisions)}## 任务 {task.task_id}：{task.title}（模块 {task.module}，角色 {task.role}）
 
@@ -381,7 +376,7 @@ def build_pm_prompt(slices: list[DocSlice], extra: str = "") -> str:
         else f"资料总长 {total} 字符，请按需用只读命令阅读 inputs/ 下的原始文档。"
     )
     extra_block = f"\n## 负责人补充指示\n\n{extra}\n" if extra.strip() else ""
-    return f"""你是【产品经理（PM / Spec Refiner）】，处于只读沙箱模式。
+    return COMMUNICATION_STYLE + f"""你是【产品经理（PM / Spec Refiner）】，处于只读沙箱模式。
 你的职责：阅读用户输入的系统架构草案，把未写清楚的**业务状态流转、输入校验边界、并发/幂等规则、全局错误码规范与各模块验收红线**补全，避免后续多个并行研发组各自猜测业务细节。
 
 ## 输入资料索引
@@ -421,7 +416,7 @@ def build_blueprint_prompt(
     tools = _bullets([f"{k}: {v}" for k, v in toolchains.items()])
     protected = ", ".join(settings.protected_paths)
     extra_block = f"\n## 负责人补充要求\n\n{extra}\n" if extra.strip() else ""
-    return f"""你是【研发总监 / 总架构师（Tech Director）】，处于只读模式。
+    return COMMUNICATION_STYLE + f"""你是【研发总监 / 总架构师（Tech Director）】，处于只读模式。
 你要把整个目标架构立项为**多研发组（Squads）协同 + 分里程碑滚动排期（Rolling-Wave）**的工程蓝图。
 
 ## 资料切片索引（含 PM 规格书 PRD-S01）
@@ -440,7 +435,7 @@ def build_blueprint_prompt(
 {extra_block}
 ## 立项蓝图设计规则（极其重要）
 
-{FILE_DELIVERY_STAGES}
+每个任务都要明确入口、允许修改的范围和可独立核验的验收结果。
 
 0. **按项目真实体量自适应分档（杀鸡绝不用牛刀！）**：
    - **精简敏捷档**（适用于网页小游戏、单体小工具、MVP 原型，总代码文件约 3～12 个）：
@@ -490,7 +485,7 @@ def build_wave_prompt(
     future_ms = [
         f"- `{m['milestone_id']}` {m['title']}：{m['goal']}" for m in all_milestones
     ]
-    return f"""你是【研发总监（Tech Director · 滚动排期）】，处于只读模式。
+    return COMMUNICATION_STYLE + f"""你是【研发总监（Tech Director · 滚动排期）】，处于只读模式。
 前序里程碑已合入 `main` 分支。现在请结合仓库中**已经真实存在的代码与冻结契约**，专门把当前里程碑 `{milestone_dict['milestone_id']}` 拆解为分派给各研发组的并行原子任务。
 
 ## 当前待展开里程碑：{milestone_dict['milestone_id']} · {milestone_dict['title']}
@@ -499,7 +494,7 @@ def build_wave_prompt(
 - 参战研发组：{', '.join(milestone_dict.get('target_squads') or []) or '按需指派'}
 - 关键交付物：{'; '.join(milestone_dict.get('key_deliverables') or []) or '见阶段目标'}
 - 阶段集成命令：`{milestone_dict.get('integration_cmd') or '（无）'}`
-- {FILE_DELIVERY_STAGES}
+- 每个任务都要明确入口、允许修改的范围和可独立核验的验收结果。
 
 ## 全局里程碑路线参考
 
@@ -546,7 +541,7 @@ def build_director_arbitration_prompt(
     task: Task, reason: str, contracts: str, diffstat: str, next_patch_id: str, settings: Settings
 ) -> str:
     protected = ", ".join(settings.protected_paths)
-    return f"""你是【研发总监（Tech Director · 异常仲裁官）】，处于只读模式。
+    return COMMUNICATION_STYLE + f"""你是【研发总监（Tech Director · 异常仲裁官）】，处于只读模式。
 下属工位在执行任务 `{task.task_id}` 时触发升级/连续失败阻塞。请诊断根因并做出仲裁决策：
 
 ## 阻塞任务信息
@@ -658,12 +653,12 @@ def build_council_opinion_prompt(
     if extra.strip() or prior_human_notes:
         items = ([extra.strip()] if extra.strip() else []) + list(prior_human_notes or [])
         notes_block = "\n## 负责人补充指示\n\n" + _bullets(items) + "\n"
-    return f"""你正在参加【多智能体架构评审圆桌（Architecture Council）· 第 1 轮独立提案】，担任角色：**{title}**（只读模式）。
+    return COMMUNICATION_STYLE + f"""你正在参加【多智能体架构评审圆桌（Architecture Council）· 第 1 轮独立提案】，担任角色：**{title}**（只读模式）。
 
 ## 你的评审职责
 
 {focus}
-{FILE_DELIVERY_STAGES}
+每个任务都要明确入口、允许修改的范围和可独立核验的验收结果。
 
 ## 输入资料索引
 
@@ -707,9 +702,9 @@ def build_council_consensus_prompt(
     all_human = ([extra.strip()] if extra.strip() else []) + list(human_notes or [])
     if all_human:
         human_block = "\n## 人类负责人最新插话 / 裁决要求（最高优先级，必须采纳）\n\n" + _bullets(all_human) + "\n"
-    return f"""你是【研发总监（Tech Director）】兼本场【多智能体架构评审圆桌 · 第 2 轮收敛拍板人】（只读模式）。
+    return COMMUNICATION_STYLE + f"""你是【研发总监（Tech Director）】兼本场【多智能体架构评审圆桌 · 第 2 轮收敛拍板人】（只读模式）。
 第 1 轮中，产品经理、契约架构师和 QA 总监已各自提交独立评审意见。请你逐一回应关键争议、消除分歧，形成权威的《架构决策纪要（ADR）》与统一产品技术规格书。
-{FILE_DELIVERY_STAGES}
+每个任务都要明确入口、允许修改的范围和可独立核验的验收结果。
 
 ## 第 1 轮各角色意见汇总
 
@@ -725,6 +720,7 @@ def build_council_consensus_prompt(
 - `resolved_debates`：逐条说明如何裁决第 1 轮各方提出的分歧与问题（格式：`[争议点] → [最终裁决]`）。
 - `open_risks`：剩余需在开发/测试期持续盯防的风险点。
 - `contract_strategy`：公共契约如何定义、冻结、跨模块引用及版本演进策略。
+- `requirements` 与 `nfrs`：分别输出功能及非功能需求数组，每项包含 req_id、title、statement、priority、acceptance。编号稳定且唯一，验收判据须来自已确认要求，不得捏造；确无某类要求时输出空数组。
 - `adrs`：2～6 条结构化架构决策记录（`adr_id` 如 `ADR-001`、`title`、`decision`、`rationale`、`affected_squads`）。
 - `spec_markdown`：将写入仓库 `docs/PRD_SPEC.md` 的权威中文《产品与架构共识规格书》（语言清晰直白、避免晦涩行话；坚持规模匹配——小型项目保持轻量架构与命令行可跑通的自动化验收标准，将任何需人类真机试玩的事项明确标注为「交付后人工体验项」而非开发阻塞项）。
 """

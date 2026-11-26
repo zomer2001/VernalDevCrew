@@ -1,0 +1,46 @@
+TAP version 13
+# Subtest: clarification UI preserves project and revision, offers no implicit answer and posts one round
+ok 1 - clarification UI preserves project and revision, offers no implicit answer and posts one round
+  ---
+  duration_ms: 2.65975
+  type: 'test'
+  ...
+# Subtest: zero unresolved questions leads directly to continuation and late responses never enter another project
+ok 2 - zero unresolved questions leads directly to continuation and late responses never enter another project
+  ---
+  duration_ms: 0.399875
+  type: 'test'
+  ...
+# Subtest: low risk defaults are collapsed and do not render a blocking question button
+ok 3 - low risk defaults are collapsed and do not render a blocking question button
+  ---
+  duration_ms: 0.22475
+  type: 'test'
+  ...
+# Subtest: empty answers stay editable and retry succeeds after the browser clears currentTarget
+ok 4 - empty answers stay editable and retry succeeds after the browser clears currentTarget
+  ---
+  duration_ms: 0.679875
+  type: 'test'
+  ...
+# Subtest: preflight restores its button after success or failure and prevents concurrent retries
+ok 5 - preflight restores its button after success or failure and prevents concurrent retries
+  ---
+  duration_ms: 0.329916
+  type: 'test'
+  ...
+# Subtest: specification panel drops stale project responses and binds edits to the displayed revision
+ok 6 - specification panel drops stale project responses and binds edits to the displayed revision
+  ---
+  duration_ms: 2.031333
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 100.918375

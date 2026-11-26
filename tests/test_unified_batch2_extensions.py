@@ -185,6 +185,11 @@ def test_signed_v2_publication_has_no_write_lock_and_preserves_v1(tmp_path,monke
     from autodev.review.service import list_reviews, decide_review
     from autodev.engine import OpsError
     eng = project(tmp_path)
+    from autodev.docs_center.service import save_doc_version
+    save_doc_version(eng, "ARCHITECTURE.md", "# Publication architecture")
+    architecture = ensure_gate_record(eng.db, stage_id="architecture", gate_id="architecture_approval",
+        kind="human_approval", scope_type="project", scope_id="project")
+    decide_gate(eng.db, architecture["record_id"], "pass")
     eng.settings.review_policy = "milestone"
     eng.settings.ci_provider = "webhook"
     eng.settings.require_merge_approval = True

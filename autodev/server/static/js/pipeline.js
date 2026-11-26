@@ -39,8 +39,13 @@ async function loadAndRenderPipeline(switchView, refresh) {
     const pendingGates = [];
     for (const s of stages) {
       for (const g of s.gates || []) {
+        const latest = new Map();
         for (const rec of g.records || []) {
-          if (rec.status === "PENDING") {
+          const key = `${rec.scope_type}:${rec.scope_id}`;
+          if (!latest.has(key) || latest.get(key).round < rec.round) latest.set(key, rec);
+        }
+        for (const rec of latest.values()) {
+          if (["PENDING", "STALE"].includes(rec.status)) {
             pendingGates.push({ stage: s, gate: g, rec });
           }
         }
@@ -63,9 +68,10 @@ async function loadAndRenderPipeline(switchView, refresh) {
           <span class="tag warn">当前阻塞门禁</span>
           <strong>${esc(pendingGates[0].gate.name)}</strong>
           <span class="muted" style="font-size:12px">(${esc(pendingGates[0].rec.scope_type)}:${esc(pendingGates[0].rec.scope_id)})</span>
+          <span class="muted">评审版本 v${pendingGates[0].rec.target_version || 0}${pendingGates[0].rec.status === "STALE" ? "，内容已变更，请先在文档中心归档或重新生成" : ""}</span>
           <input id="quick-gate-comment" type="text" placeholder="签署评审意见（豁免必填）…" />
-          <button type="button" class="btn btn-primary btn-sm" data-gate-decide="pass" data-gate-rec="${pendingGates[0].rec.record_id}" data-gate-round="${pendingGates[0].rec.round}">批准放行</button>
-          <button type="button" class="btn btn-sm" data-gate-decide="waive" data-gate-rec="${pendingGates[0].rec.record_id}" data-gate-round="${pendingGates[0].rec.round}">记录豁免</button>
+          <button type="button" class="btn btn-primary btn-sm" ${pendingGates[0].rec.status === "STALE" ? "disabled" : ""} data-gate-decide="pass" data-gate-rec="${pendingGates[0].rec.record_id}" data-gate-round="${pendingGates[0].rec.round}" data-gate-sha="${esc(pendingGates[0].rec.target_sha || "")}">批准放行</button>
+          <button type="button" class="btn btn-sm" ${pendingGates[0].rec.status === "STALE" ? "disabled" : ""} data-gate-decide="waive" data-gate-rec="${pendingGates[0].rec.record_id}" data-gate-round="${pendingGates[0].rec.round}" data-gate-sha="${esc(pendingGates[0].rec.target_sha || "")}">记录豁免</button>
         </div>`
       : "";
 
@@ -107,6 +113,7 @@ async function loadAndRenderPipeline(switchView, refresh) {
               decision,
               comment,
               expected_round: expectedRound,
+              expected_sha: btn.dataset.gateSha,
               actor: actorName(),
             }),
           });

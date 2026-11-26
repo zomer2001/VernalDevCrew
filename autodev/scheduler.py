@@ -122,6 +122,11 @@ class Scheduler:
                 raise OpsError("Git 交付需要绑定与本地 origin 对应的 LoopForge 仓库")
 
     async def run(self, watch: bool = False) -> ProjectStatus:
+        if self.db.meta_get("speckit.enabled") == "1":
+            from autodev.speckit.compiler import assert_package_current
+            for task in self.db.list_tasks():
+                if task.status not in (TaskStatus.MERGED,TaskStatus.CANCELLED):
+                    assert_package_current(self.db,task)
         self.check_runtime()
         if self.engine.status == ProjectStatus.PLANNED:
             raise OpsError("立项蓝图尚未批准，请先批准蓝图后再启动研发")
@@ -345,9 +350,11 @@ class Scheduler:
                 return
 
         # H3：若流程模板开启详细设计阻塞门禁，未通过前仅允许 bootstrap / contract 任务先行执行
-        from autodev.process.runner import ensure_gate_record, is_gate_passed, load_template
+        from autodev.process.runner import blocking_document_gates, ensure_gate_record, is_gate_passed, load_template
 
         tpl = load_template(self.ws, self.settings)
+        if any(g != "detailed_design_approval" for g in blocking_document_gates(self.db, tpl, milestone_id)):
+            return
         dd_stage = next((s for s in tpl.stages if s.id == "detailed_design" and s.enabled), None)
         if dd_stage and any(g.id == "detailed_design_approval" and g.blocking for g in dd_stage.gates):
             if not is_gate_passed(self.db, "detailed_design_approval", "milestone", milestone_id):

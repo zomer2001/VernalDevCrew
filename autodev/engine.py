@@ -271,7 +271,8 @@ class Engine:
             "root": str(self.ws.root),
             "status": self.status.value,
             "planning_mode": self.db.meta_get("planning_mode", self.settings.planning_mode),
-            "has_prd": self.ws.prd_json_path.exists(),
+            "has_prd": bool(self.db._query("SELECT 1 FROM spec_revisions WHERE source_kind='spec' LIMIT 1")) if self.db.meta_get("speckit.enabled")=="1" else self.ws.prd_json_path.exists(),
+            "specifications_enabled": self.db.meta_get("speckit.enabled")=="1",
             "council_count": len(self.db.list_council_messages()),
             "pending_gates_count": len(list_gate_records(self.db, status="PENDING")),
             "prd_vision": self.db.meta_get("prd_vision", ""),
@@ -378,6 +379,11 @@ class Engine:
 
     # ---------- 阶段二 A：产品经理（PM）规格补全 ----------
     async def run_pm_spec(self, extra_instructions: str = "", max_attempts: int = 2) -> ProductSpec:
+        from autodev.speckit.service import enabled, product_spec, current_specs
+        if enabled(self):
+            if not current_specs(self):
+                raise OpsError("请在功能规格面板完成需求整理，旧规格生成入口已停用")
+            return product_spec(self)
         slices = [s for s in self.db.list_slices() if s.slice_id != "PRD-S01"]
         if not slices:
             raise OpsError("还没有资料切片，请先运行 ingest")
@@ -440,6 +446,11 @@ class Engine:
                     self.db.meta_set("prd_vision", spec.product_vision)
                     self.set_status(ProjectStatus.SPECIFIED)
                     from autodev.process.runner import ensure_gate_record, load_template
+                    from autodev.docs_center.service import sync_standard_docs_from_artifacts
+
+                    generated_docs = sync_standard_docs_from_artifacts(self)
+                    if generated_docs:
+                        self.record_documents(generated_docs, "autodev: archive generated specification")
 
                     tpl = load_template(self.ws, self.settings)
                     req_stage = next((s for s in tpl.stages if s.id == "requirements" and s.enabled), None)
@@ -472,6 +483,8 @@ class Engine:
 
     # ---------- 阶段二 B：研发总监立项蓝图（分组 + 里程碑路线图 + 首轮任务） ----------
     async def plan_blueprint(self, extra_instructions: str = "", max_attempts: int = 3) -> ProjectBlueprint:
+        if self.db.meta_get("speckit.enabled") == "1":
+            raise OpsError("当前项目使用功能规格流程，请生成任务草案并通过编译预览发布")
         slices = self.db.list_slices()
         known = {s.slice_id for s in slices}
         ident = self._occupy_command_slot("director", "_planner", "正在划分研发组领地并制定全局里程碑路线图…")
@@ -535,6 +548,11 @@ class Engine:
 
     def _sync_planning_gates(self) -> None:
         from autodev.process.runner import decide_gate, ensure_gate_record, load_template
+        from autodev.docs_center.service import sync_standard_docs_from_artifacts
+
+        generated_docs = sync_standard_docs_from_artifacts(self)
+        if generated_docs:
+            self.record_documents(generated_docs, "autodev: archive generated planning documents")
 
         tpl = load_template(self.ws, self.settings)
         arch_stage = next((s for s in tpl.stages if s.id == "architecture" and s.enabled), None)
@@ -610,6 +628,8 @@ class Engine:
     async def plan(
         self, extra_instructions: str = "", max_attempts: int = 3, mode: str | None = None
     ) -> ProjectPlan | ProjectBlueprint:
+        if self.db.meta_get("speckit.enabled") == "1":
+            raise OpsError("当前项目使用功能规格流程，请从文档中心逐步生成并发布工作包")
         self._ensure_not_running()
         progressed = [
             t for t in self.db.list_tasks() if t.status not in (TaskStatus.BLOCKED, TaskStatus.READY)
@@ -714,6 +734,8 @@ class Engine:
 
     # ---------- 研发总监：滚动展开下一里程碑 ----------
     async def expand_milestone_wave(self, milestone_id: str, max_attempts: int = 3) -> MilestoneWavePlan:
+        if self.db.meta_get("speckit.enabled") == "1":
+            raise OpsError("规格项目请通过功能规格面板编译下一批工作包")
         ms = self.db.get_milestone(milestone_id)
         if ms is None:
             raise OpsError(f"里程碑不存在: {milestone_id}")
@@ -865,6 +887,10 @@ class Engine:
             if decision is None:
                 return None
 
+            if task.feature_id and decision.action == "PATCH_CONTRACT":
+                decision.action = "ESCALATE_HUMAN"
+                decision.diagnosis += "；冻结工作包不能自动追加契约任务，请负责人修订规格并评审后续实施批次。"
+
             new_arb = task.arbitration_count + 1
             if decision.action == "STEER_RETRY":
                 self.db.update_task(
@@ -989,6 +1015,8 @@ class Engine:
         if self.status not in (ProjectStatus.PLANNED, ProjectStatus.APPROVED):
             raise OpsError("只能在开始运行前调整排期")
         task = self._get_task(task_id)
+        if task.feature_id:
+            raise OpsError("已编译工作包的排期属于冻结内容，请通过功能规格重新编译")
         values: dict[str, Any] = {}
         if priority is not None:
             values["priority"] = priority
@@ -1134,8 +1162,11 @@ class Engine:
                     self.record_documents([rel_doc], f"autodev(qa): archive {rel_doc}")
 
     def _reserve_publication(self, milestone_id):
+        from autodev.speckit.compiler import assert_package_current
+        for task in self.db.list_tasks(milestone_id=milestone_id):
+            assert_package_current(self.db,task)
         from autodev.ci.service import ci_gate_enabled, list_ci_runs
-        from autodev.process.runner import is_gate_passed, load_template
+        from autodev.process.runner import blocking_document_gates, is_gate_passed, load_template
         from autodev.review.policy import effective_review_policy
         from autodev.review.service import current_milestone_candidate_ref, list_reviews
 
@@ -1160,6 +1191,9 @@ class Engine:
                 raise OpsError(f"{milestone_id} 当前候选尚未通过里程碑人工代码审查，禁止合入")
 
         tpl = load_template(self.ws, self.settings)
+        blocked = blocking_document_gates(self.db, tpl, milestone_id)
+        if blocked:
+            raise OpsError(f"当前文档版本尚未批准，禁止交付：{', '.join(blocked)}")
         if ci_gate_enabled(self):
             if not is_gate_passed(self.db, "milestone_ci", "milestone", milestone_id):
                 raise OpsError(f"{milestone_id} 尚未通过持续集成 (CI) 流水线门禁，禁止合入")

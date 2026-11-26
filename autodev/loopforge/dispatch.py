@@ -7,6 +7,19 @@ from autodev.db import now_iso
 from autodev.loopforge.client import LoopForgeError
 
 
+def bind_baseline(db, receipt, baseline):
+    import json
+    values = {k: baseline.get(k, "") for k in ("spec_sha", "contract_sha", "compiled_task_hash")}
+    values["asset_versions_json"] = json.dumps(baseline.get("asset_versions",{}),sort_keys=True,ensure_ascii=False)
+    with db.transaction():
+        current = dict(db._query("SELECT * FROM dispatch_records WHERE dispatch_id=?",(receipt["dispatch_id"],))[0])
+        if any(current[k] not in ("", "{}", values[k]) for k in values):
+            raise LoopForgeError("派单记录所绑定的规格版本不同，旧尝试不能复用",409)
+        db._exec("UPDATE dispatch_records SET spec_sha=?,contract_sha=?,compiled_task_hash=?,asset_versions_json=? WHERE dispatch_id=?",
+                 (*values.values(),receipt["dispatch_id"]))
+        receipt.update(values)
+
+
 def reserve(db, task_id, seq, attempt, pool, actor, issue_id="", run_id="", *, command=""):
     with db.transaction():
         if command:
