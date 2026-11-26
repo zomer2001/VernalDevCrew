@@ -6,6 +6,10 @@ let project = "", selected = "", draft = "", intent = "feature", generation = 0,
 const drafts = new Map(), evidenceDrafts = new Map();
 let lastDiff=null;
 
+export function codepointLength(text) {
+  return Array.from(String(text ?? "")).length;
+}
+
 export function renderMissions(data, refresh) {
   if (!Array.isArray(data.missions)) return;
   const pid = getActiveProjectId(), ticket = ++generation;
@@ -90,7 +94,7 @@ export function renderMissions(data, refresh) {
       const answer=$("mission-answer-"+q.clarify_id).value;
       const supplement=$("mission-supplement-"+q.clarify_id).value;
       if(!answer.trim())throw new Error("请先回答："+q.question);
-      if(answer.length>10000||supplement.length>10000)throw new Error("回答和补充说明各不能超过 10000 字");
+      if(codepointLength(answer)>10000||codepointLength(supplement)>10000)throw new Error("回答和补充说明各不能超过 10000 字");
       return {clarify_id:q.clarify_id,answer,supplement};
     });
     const result=await api(`/vernal-api/missions/${encodeURIComponent(feature)}/answers`,{method:"POST",body:JSON.stringify({expected_rev_id:mission.spec_rev_id,answers})});

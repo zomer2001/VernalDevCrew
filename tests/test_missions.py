@@ -306,3 +306,35 @@ def test_mission_view_does_not_claim_ready_when_checklist_has_critical_or_missin
     v_missing = missions.view(project, missions.get(project, "001-save"))
     assert v_missing["state"] == "CHECKLIST_BLOCKED"
     assert any(b["code"] == "CHECKLIST_FINDINGS_MISSING" for b in v_missing["approval_blockers"])
+
+
+def test_r5_a09_unicode_codepoint_boundary_and_verbatim_confirmation_in_answer_batch(project, monkeypatch):
+    q = ClarificationItem(question_key="Q-01", category="scope", severity="BLOCKING", question="是否保留？", options=["保留", "不保留"])
+    first = {**assessed(), "scope_clear": False, "questions": [q.model_dump()]}
+    responses(project, monkeypatch, [first])
+    missions.save(project, "001-save", "回答保存边界测试", "feature", 0, actor="owner")
+    advance(project)
+    rev_id = service.latest(project, "001-save")["rev_id"]
+    clarify_id = service.list_clarifications(project, "001-save")[0]["clarify_id"]
+
+    async def unavailable(engine):
+        return {"ready": False, "checks": [], "verification": "未执行"}
+
+    monkeypatch.setattr(preflight, "inspect", unavailable)
+    emoji_5001 = "😀" * 5001
+    emoji_10001 = "😀" * 10001
+    with TestClient(create_app(project, proxy_transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})))) as client:
+        path = "/vernal-api/missions/001-save/answers"
+        # 10001 Unicode codepoints rejected (422)
+        too_long = client.post(path, json={"expected_rev_id": rev_id, "answers": [{"clarify_id": clarify_id, "answer": "保留", "supplement": emoji_10001}]})
+        assert too_long.status_code == 422
+        assert service.list_clarifications(project, "001-save")[0]["status"] == "OPEN"
+
+        # 5001 emojis (5001 codepoints <= 10000, despite 10002 UTF-16 code units) accepted and preserved verbatim
+        ok = client.post(path, json={"expected_rev_id": rev_id, "answers": [{"clarify_id": clarify_id, "answer": "保留", "supplement": emoji_5001}]})
+        assert ok.status_code == 200, ok.text
+        assert emoji_5001 in service.latest(project, "001-save")["content_text"]
+
+        # Stale expected_rev_id conflict detection preserved (409)
+        stale = client.post(path, json={"expected_rev_id": rev_id, "answers": [{"clarify_id": clarify_id, "answer": "保留", "supplement": "重复旧修订"}]})
+        assert stale.status_code == 409

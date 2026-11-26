@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setActiveProjectId, toast } from "../autodev/server/static/js/api.js";
-import { renderMissions } from "../autodev/server/static/js/missions.js";
+import { codepointLength, renderMissions } from "../autodev/server/static/js/missions.js";
 
 function dom() {
   const elements=new Map();
@@ -169,4 +169,30 @@ test("R7 config alignment renders explicit mismatch reason and posts explicit co
   assert.equal(posted.body.target_process,"quick-prototype");
   assert.equal(posted.body.expected_revision,2);
   assert.equal(refreshed,1);
+});
+
+test("R5 A09 Unicode codepoint length aligns JS and Python on emoji boundaries",async()=>{
+  const el=dom();setActiveProjectId("r5-emoji");
+  const emoji5001="😀".repeat(5001);
+  assert.equal(emoji5001.length,10002); // UTF-16 code units would exceed 10000
+  assert.equal(codepointLength(emoji5001),5001); // Unicode codepoints match Python len()
+  const emoji10001="😀".repeat(10001);
+  assert.equal(codepointLength(emoji10001),10001);
+
+  const data=state([{clarify_id:15,severity:"BLOCKING",status:"OPEN",question:"补充边界？",options:["保留"],rationale:"A09"}]);
+  renderMissions(data,async()=>{});
+  let submitted=null;
+  globalThis.fetch=async(url,opts)=>{submitted=JSON.parse(opts.body);return {ok:true,json:async()=>({saved:true,spec_rev_id:43,diff:"+ ok"})};};
+  el.get("mission-answer-15").value="保留";
+  el.get("mission-supplement-15").value=emoji5001;
+  const btn=el.get("mission-answers");
+  await btn.events.click({currentTarget:btn});
+  assert.ok(submitted && submitted.answers[0].supplement===emoji5001);
+
+  submitted=null;
+  el.get("mission-supplement-15").value=emoji10001;
+  await btn.events.click({currentTarget:btn});
+  assert.equal(submitted,null);
+  assert.equal(el.get("toast").textContent,"回答和补充说明各不能超过 10000 字");
+  clearTimeout(toast._t);
 });
