@@ -139,3 +139,34 @@ test("R4 quality review panel separates current and historical findings independ
   assert.match(html,/历史检查记录（1 版）/);
   assert.match(html,/CHK-2-01/);
 });
+
+test("R7 config alignment renders explicit mismatch reason and posts explicit conversion",async()=>{
+  const el=dom();setActiveProjectId("r7-proj");
+  const data=state();
+  data.missions[0].state="WAITING_APPROVAL";
+  data.missions[0].route={source_origin:"greenfield",clarity_level:"READY_LITE",process_template:"quick-prototype",available_preset:"vernal-lite"};
+  data.missions[0].assessment={risk:"low",rationale:"范围清晰"};
+  data.missions[0].config_alignment={
+    aligned:false,
+    recommended_preset:"vernal-lite",
+    recommended_process:"quick-prototype",
+    actual_preset:"vernal-core",
+    actual_process:"standard",
+    mismatch_reason:"初次评估存在待确认问题时已锁定 vernal-core/standard；回答后推荐 vernal-lite/quick-prototype。",
+    can_convert_to_recommended:true,
+  };
+  let refreshed=0;
+  renderMissions(data,async()=>{refreshed++;});
+  const html=el.get("missions-mount").innerHTML;
+  assert.match(html,/id="mission-config-alignment"/);
+  assert.match(html,/id="mission-convert-profile"/);
+  let posted=null;
+  globalThis.fetch=async(url,opts)=>{posted={url,body:JSON.parse(opts.body)};return {ok:true,json:async()=>({conversion:{}})};};
+  const btn=el.get("mission-convert-profile");
+  await btn.events.click({currentTarget:btn});
+  assert.equal(posted.url,"/vernal-api/missions/f1/convert-profile");
+  assert.equal(posted.body.target_preset,"vernal-lite");
+  assert.equal(posted.body.target_process,"quick-prototype");
+  assert.equal(posted.body.expected_revision,2);
+  assert.equal(refreshed,1);
+});

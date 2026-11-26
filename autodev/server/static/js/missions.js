@@ -48,7 +48,7 @@ export function renderMissions(data, refresh) {
     ${!mission?`<label for="mission-intent">任务类型</label><select id="mission-intent">${Object.entries(intents).map(([k,v])=>`<option value="${k}" ${k===intent?"selected":""}>${v}</option>`).join("")}</select><label for="mission-brief">这次要完成什么</label><textarea id="mission-brief" rows="7" maxlength="50000" placeholder="说明目标、首版范围和验收方式。已有文档可在建项时附带。">${esc(draft)}</textarea><p class="muted">项目来源和执行池沿用当前项目设置，保存后再检查执行条件。</p><button class="btn btn-primary" id="mission-save">保存并评估需求</button>`:
     `<div class="mission-status" role="status">${esc(labels[mission.state]||mission.state)}${mission.spec_rev_no?` · 规格第 ${mission.spec_rev_no} 版`:""}</div><p>${esc(mission.brief)}</p>
     ${showAssessment?`<p class="muted">${{greenfield:"全新项目",existing_local:"已有本机代码",existing_git:"已有 Git 仓库"}[mission.route.source_origin]} · ${mission.route.clarity_level==="READY_LITE"?"局部轻量交付":mission.route.clarity_level==="NEEDS_CLARIFICATION"?"有待确认的交付边界":"标准交付"} · 风险${{low:"低",medium:"中",high:"高"}[mission.assessment.risk]}</p><p>${esc(mission.assessment.rationale)}</p>${mission.route.limitation?`<p class="muted">${esc(mission.route.limitation)}</p>`:""}`:""}
-    ${showAssessment && mission.actual_process && mission.actual_process!==mission.route.process_template?`<p class="muted">本次评估推荐的流程与当前项目不同。项目继续保留已锁定的审批流程，建议不会自动覆盖既有设置。</p>`:""}
+    ${showAssessment && mission.config_alignment && !mission.config_alignment.aligned?`<div class="mission-config-mismatch" id="mission-config-alignment"><p class="muted">${esc(mission.config_alignment.mismatch_reason||"本次评估推荐配置与当前锁定配置不同。")}</p>${mission.config_alignment.can_convert_to_recommended?`<button class="btn btn-sm" id="mission-convert-profile" ${run?"disabled":""}>显式切换至推荐配置（${esc(mission.config_alignment.recommended_preset)} / ${esc(mission.config_alignment.recommended_process)}）</button>`:""}</div>`:(showAssessment && mission.actual_process && mission.actual_process!==mission.route.process_template?`<p class="muted">本次评估推荐的流程与当前项目不同。项目继续保留已锁定的审批流程，建议不会自动覆盖既有设置。</p>`:"")}
     ${mission.last_error||mission.blocker?`<p role="alert">${esc(mission.last_error||mission.blocker)}</p>`:""}
     ${blocking.map(field).join("")}${blocking.length?`<button class="btn btn-primary" id="mission-answers" ${run?"disabled":""}>确认回答并继续</button>`:""}
     ${defaults.length?`<details><summary>已采用 ${defaults.length} 项低风险默认值，可修改</summary>${defaults.map(field).join("")}</details>`:""}
@@ -101,6 +101,12 @@ export function renderMissions(data, refresh) {
   mount.querySelectorAll("[data-default-save]").forEach(btn=>btn.addEventListener("click",action(()=>submit(defaults.filter(q=>q.clarify_id===Number(btn.dataset.defaultSave))))));
   mount.querySelectorAll("[data-evidence-save]").forEach(btn=>btn.addEventListener("click",action(async()=>{await api(`/vernal-api/missions/${encodeURIComponent(feature)}/prerequisites`,{method:"POST",body:JSON.stringify({expected_revision:mission.revision,key:btn.dataset.evidenceSave,evidence:mount.querySelector(`[data-prerequisite="${btn.dataset.evidenceSave}"]`).value})});if(active())await refresh();})));
   $("mission-publish")?.addEventListener("click",action(async()=>{await api(`/vernal-api/specifications/${encodeURIComponent(feature)}/publish`,{method:"POST",body:JSON.stringify({expected_hashes:mission.packages.map(p=>p.compiled_task_hash)})});if(active())await refresh();}));
+  $("mission-convert-profile")?.addEventListener("click",action(async()=>{
+    const ca=mission.config_alignment;
+    if(!ca?.can_convert_to_recommended)return;
+    await api(`/vernal-api/missions/${encodeURIComponent(feature)}/convert-profile`,{method:"POST",body:JSON.stringify({expected_revision:mission.revision,target_preset:ca.recommended_preset,target_process:ca.recommended_process,reason:"负责人确认切换至当前推荐轻量配置"})});
+    if(active())await refresh();
+  }));
   $("mission-recover")?.addEventListener("click",action(async()=>{await api("/vernal-api/missions/recover",{method:"POST",body:"{}"});if(active())await refresh();}));
   $("mission-home")?.addEventListener("click",()=>root().querySelector('[data-view="overview"]')?.click());
 }

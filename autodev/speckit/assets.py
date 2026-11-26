@@ -7,6 +7,47 @@ import shutil
 import tempfile
 
 ASSET_ROOT = Path(__file__).parents[1] / "assets" / "speckit"
+PROMPT_ASSEMBLY_VERSION = "v2-concise-20261126"
+
+STEP_METHODOLOGY: dict[str, str] = {
+    "constitution": (
+        "方法要点：沉淀项目级不可违背原则（技术约束、兼容基线、测试红线与变更治理），"
+        "条文须可核验且简洁；不要在宪章重复列举具体功能 REQ 或虚构未经确认的 P0 业务承诺。"
+    ),
+    "specify": (
+        "方法要点：聚焦用户目标、场景、明确 Non-Goals 与可测试 REQ/NFR（EARS 句式+独立可观察验收）。"
+        "适用的宪章硬性原则（如兼容基线）须在本规格登记为 NFR；禁止占位符和未经用户确认的业务猜测。"
+    ),
+    "clarify": (
+        "方法要点：只针对影响交付承诺的关键歧义提出最多 3 个高杠杆问题（范围/数据/错误/验收），"
+        "给出有限选项与依据；已有答案严禁重复提问，无关键歧义返回空数组，不修改规格正文。"
+    ),
+    "checklist": (
+        "方法要点：执行规格质量审查（非程序测试），按完备性、清晰度、一致性、可测性、边界与异常、"
+        "以及宪章适用 NFR 是否已登记到规格逐项核对；可操作问题写入 findings（区分 CRITICAL/WARNING/INFO）。"
+    ),
+    "plan": (
+        "方法要点：基于已批准规格与当前质量发现制定最小可实施技术方案，包含需求映射、接口与数据、实施边界、验证"
+        "（有质量发现时必含「## 检查发现处理」表）。不改写已批准业务承诺，需变承诺的标明退回规格修订。"
+    ),
+    "tasks": (
+        "方法要点：按模块与验收边界将方案拆解为可执行微步骤，并通过 package_key 归并为自包含工作包。"
+        "覆盖全部 P0 REQ 与适用 P0 NFR，路径明确且跨工作包不重叠，验证命令可直接执行且不得预勾完成。"
+    ),
+    "analyze": (
+        "方法要点：只读交叉核验宪章、规格、当前质量发现、技术方案与任务草案的一致性。"
+        "逐条核对每条 CHK 质量发现是否在需求/接口/任务/验证中真正落实；遗漏 P0、矛盾或不可测承诺标记 CRITICAL。"
+    ),
+    "intake": (
+        "方法要点：独立判定目标/范围/验收清晰度、影响面与风险；不按字数或项目来源猜测。"
+        "仅追问影响交付承诺的未决事项（最多 3 题，可为 0 题），未知账号/硬件/环境依赖归入 prerequisites，"
+        "结合已有澄清回答输出或更新规范的 proposed_spec，保留既有需求编号与用户确认原文。"
+    ),
+}
+
+
+def step_methodology_summary(step: str) -> str:
+    return STEP_METHODOLOGY.get(step, "")
 
 
 def digest_json(value) -> str:
@@ -142,5 +183,7 @@ def step_assets(engine, step: str) -> dict:
     core = json.loads((root / "presets" / "vernal-core.json").read_text("utf-8"))
     return {"versions": locked, "upstream_command": (upstream / "commands" / f"{step}.md").read_text("utf-8"),
             "template": (upstream / f"{template}-template.md").read_text("utf-8"),
+            "methodology": step_methodology_summary(step),
+            "prompt_template_version": PROMPT_ASSEMBLY_VERSION,
             "instructions": core["instructions"] + "\n" + core["steps"][step]
                             + ("\n" + selected["instructions"] if selected != core else "")}

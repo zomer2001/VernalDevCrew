@@ -185,6 +185,11 @@ class Settings:
     coder_model: str = ""
     qa_model: str = ""
     reviewer_model: str = ""
+    reasoning_effort_policy: str = "adaptive"
+    pm_reasoning_effort: str = ""
+    director_reasoning_effort: str = ""
+    coder_reasoning_effort: str = ""
+    qa_reasoning_effort: str = ""
     codex_extra_args: list[str] = field(default_factory=lambda: ["-c", 'model_reasoning_effort="high"'])
     agent_network_access: bool = False
     bootstrap_network_access: bool = True
@@ -281,9 +286,43 @@ class Settings:
             raise ConfigError("无效的协作方式或执行底座")
         if settings.execution_pool not in ("auto", "public_docker", "local_runner"):
             raise ConfigError("无效的执行池")
+        if settings.reasoning_effort_policy not in ("adaptive", "high", "medium", "low"):
+            raise ConfigError("无效的推理强度策略")
         if settings.max_concurrency < 1 or settings.max_retries < 1:
             raise ConfigError("max_concurrency 与 max_retries 必须 >= 1")
         return settings
+
+    def effort_for(self, role: str, *, step: str = "", risk: str = "") -> str:
+        """Compute effective Codex reasoning effort by role, step, and risk without mutating user CLI configs."""
+        if self.harness_for(role) != "codex":
+            return ""
+        override = {
+            "pm": self.pm_reasoning_effort,
+            "architect": self.director_reasoning_effort,
+            "director": self.director_reasoning_effort,
+            "planner": self.director_reasoning_effort,
+            "bootstrap": self.coder_reasoning_effort,
+            "contract": self.coder_reasoning_effort,
+            "coder": self.coder_reasoning_effort,
+            "integrator": self.coder_reasoning_effort,
+            "qa_lead": self.qa_reasoning_effort,
+            "tester": self.qa_reasoning_effort,
+            "reviewer": self.qa_reasoning_effort,
+        }.get(role, "").strip().lower()
+        if override in ("low", "medium", "high"):
+            return override
+        policy = (self.reasoning_effort_policy or "adaptive").strip().lower()
+        if policy in ("low", "medium", "high"):
+            return policy
+        # adaptive: keep high for complex design/coding/independent review/high-risk;
+        # use medium for lightweight intake/clarify/checklist roles.
+        if (
+            risk == "high"
+            or role in ("director", "architect", "planner", "coder", "reviewer", "bootstrap", "contract", "integrator")
+            or step in ("plan", "tasks", "analyze", "constitution")
+        ):
+            return "high"
+        return "medium"
 
     def harness_for(self, role: str) -> str:
         specific = normalize_harness_name(

@@ -111,23 +111,54 @@ async def check_runners_online(client: LoopForgeClient, settings: Settings | Non
     return None
 
 
+_USAGE_KEYS = (
+    "inputTokens",
+    "input_tokens",
+    "cacheReadTokens",
+    "cachedTokens",
+    "cached_tokens",
+    "outputTokens",
+    "output_tokens",
+    "reasoningTokens",
+    "reasoning_tokens",
+)
+
+
+def _has_usage_fields(obj: Any) -> bool:
+    return isinstance(obj, dict) and any(obj.get(k) is not None for k in _USAGE_KEYS)
+
+
+def _add_usage_dict(usage: Usage, u: dict[str, Any]) -> None:
+    usage.input_tokens += int(u.get("inputTokens") or u.get("input_tokens") or 0)
+    usage.cached_tokens += int(u.get("cacheReadTokens") or u.get("cachedTokens") or u.get("cached_tokens") or 0)
+    usage.output_tokens += int(u.get("outputTokens") or u.get("output_tokens") or 0)
+    usage.reasoning_tokens += int(u.get("reasoningTokens") or u.get("reasoning_tokens") or 0)
+
+
 def extract_run_usage(run: dict[str, Any]) -> Usage:
-    """从 LoopForge Run 及各节点遥测字段中聚合 Token 用量。"""
-    usage = Usage()
-    sources: list[dict[str, Any]] = []
-    if isinstance(run.get("usage"), dict):
-        sources.append(run["usage"])
-    elif isinstance(run.get("tokenUsage"), dict):
-        sources.append(run["tokenUsage"])
+    """从 LoopForge Run 遥测提取 Token 用量：Run 级汇总优先，仅在缺失时回退节点求和，杜绝重复累计并区分未知与真实零值。"""
+    if not isinstance(run, dict):
+        return Usage(telemetry_known=False, source="unknown")
+    for top_key in ("usage", "tokenUsage"):
+        top = run.get(top_key)
+        if _has_usage_fields(top):
+            usage = Usage(telemetry_known=True, source="run")
+            _add_usage_dict(usage, top)
+            return usage
+    node_sources: list[dict[str, Any]] = []
     for node in (run.get("nodes") or {}).values():
-        if isinstance(node, dict) and isinstance(node.get("usage"), dict):
-            sources.append(node["usage"])
-    for u in sources:
-        usage.input_tokens += int(u.get("inputTokens") or u.get("input_tokens") or 0)
-        usage.cached_tokens += int(u.get("cacheReadTokens") or u.get("cachedTokens") or u.get("cached_tokens") or 0)
-        usage.output_tokens += int(u.get("outputTokens") or u.get("output_tokens") or 0)
-        usage.reasoning_tokens += int(u.get("reasoningTokens") or u.get("reasoning_tokens") or 0)
-    return usage
+        if not isinstance(node, dict):
+            continue
+        for nk in ("usage", "tokenUsage"):
+            if _has_usage_fields(node.get(nk)):
+                node_sources.append(node[nk])
+                break
+    if node_sources:
+        usage = Usage(telemetry_known=True, source="nodes_sum")
+        for u in node_sources:
+            _add_usage_dict(usage, u)
+        return usage
+    return Usage(telemetry_known=False, source="unknown")
 
 
 def extract_run_text(run: dict[str, Any]) -> str:
@@ -160,24 +191,94 @@ async def poll_loopforge_run(
     on_progress: Callable[[str, str, dict[str, Any]], None] | None = None,
     on_auto_passed: Callable[[str, str], None] | None = None,
     db: Database | None = None,
+    timing_out: dict[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any], str]:
-    """统一轮询 LoopForge Run 直到终态，按统一完成策略核对当前轮证据与幂等键。"""
+    """统一轮询 LoopForge Run 直到终态，按统一完成策略核对当前轮证据与幂等键，并记录单调阶段耗时。"""
     loop = asyncio.get_running_loop()
-    deadline = (loop.time() + timeout_sec) if timeout_sec else None
+    poll_start = loop.time()
+    deadline = (poll_start + timeout_sec) if timeout_sec else None
     last_summary = ""
     ledger = CompletionLedger(db=db, run_id=run_id)
     latest_run: dict[str, Any] = {}
+    poll_count = 0
+    seen_node_states: dict[str, tuple[str, int, int]] = {}
+    transitions: list[dict[str, Any]] = []
+
+    def _finalize_timing(final_status: str) -> None:
+        if timing_out is None:
+            return
+        total_elapsed = round(loop.time() - poll_start, 4)
+        node_snapshots: dict[str, Any] = {}
+        unknown_intervals: list[dict[str, Any]] = []
+        raw_nodes = latest_run.get("nodes") or {}
+        for nid, nr in raw_nodes.items():
+            if not isinstance(nr, dict):
+                continue
+            started_at = str(nr.get("startedAt") or "")
+            finished_at = str(nr.get("finishedAt") or nr.get("completedAt") or "")
+            node_snapshots[nid] = {
+                "status": str(nr.get("status") or ""),
+                "attempt": int(nr.get("attempt") or 1),
+                "rework_count": int(nr.get("reworkCount") or nr.get("rework_count") or 0),
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_ms": nr.get("durationMs"),
+            }
+            if not started_at or not finished_at:
+                unknown_intervals.append({
+                    "node_id": nid,
+                    "reason": "upstream_timestamps_absent_or_incomplete",
+                })
+        if not transitions:
+            unknown_intervals.append({
+                "node_id": "",
+                "reason": "no_intermediate_node_transitions_observed",
+            })
+        timing_out.clear()
+        timing_out.update({
+            "run_id": run_id,
+            "final_status": final_status,
+            "poll_count": poll_count,
+            "poll_elapsed_sec": total_elapsed,
+            "run_created_at": str(latest_run.get("createdAt") or ""),
+            "run_started_at": str(latest_run.get("startedAt") or ""),
+            "run_finished_at": str(latest_run.get("finishedAt") or latest_run.get("completedAt") or ""),
+            "node_transitions": transitions,
+            "nodes": node_snapshots,
+            "unknown_intervals": unknown_intervals,
+        })
 
     while stop_event is None or not stop_event.is_set():
         if deadline is not None and loop.time() >= deadline:
+            _finalize_timing("timeout")
             return False, latest_run, f"LoopForge Run {run_id} 执行超时 ({int(timeout_sec or 0)}s)"
         try:
             run = await client.get_run(run_id)
         except LoopForgeError as exc:
+            _finalize_timing("poll_error")
             return False, latest_run, f"查询 LoopForge Run {run_id} 失败：{exc}"
+        poll_count += 1
         latest_run = run
         st = str(run.get("status") or "")
         nodes = run.get("nodes") or {}
+        now_rel = round(loop.time() - poll_start, 4)
+        for nid, nr in nodes.items():
+            if not isinstance(nr, dict):
+                continue
+            key = (
+                str(nr.get("status") or ""),
+                int(nr.get("attempt") or 1),
+                int(nr.get("reworkCount") or nr.get("rework_count") or 0),
+            )
+            if seen_node_states.get(nid) != key:
+                seen_node_states[nid] = key
+                transitions.append({
+                    "t_rel_sec": now_rel,
+                    "node_id": nid,
+                    "status": key[0],
+                    "attempt": key[1],
+                    "rework_count": key[2],
+                })
         wf_nodes = {
             str(n.get("id")): n
             for n in ((run.get("workflowSnapshot") or {}).get("nodes") or [])
@@ -200,6 +301,7 @@ async def poll_loopforge_run(
                 if decision.category == CompletionCategory.CALLBACK_PERMISSION_DENIED:
                     if on_progress:
                         on_progress(st, f"LoopForge [{st}] {decision.reason}", run)
+                    _finalize_timing("permission_denied")
                     return False, run, decision.reason
                 if decision.action == "wait":
                     if decision.category == CompletionCategory.ARTIFACT_INVALID and decision.reason:
@@ -260,7 +362,9 @@ async def poll_loopforge_run(
             for nid in reviews:
                 verdict, detail = await _review_verdict(client, run, nid)
                 if verdict != "# PASS":
+                    _finalize_timing("review_rejected")
                     return False, run, f"独立审查未通过：{detail}"
+            _finalize_timing("succeeded")
             return True, run, f"LoopForge Run {run_id} 已成功交付"
         if st in ("failed", "cancelled"):
             node_errs = [
@@ -269,9 +373,11 @@ async def poll_loopforge_run(
                 if isinstance(nr, dict) and nr.get("error")
             ]
             err = str(run.get("error") or ("; ".join(node_errs)) or f"LoopForge Run {run_id} 结束于 {st}")
+            _finalize_timing(st)
             return False, run, err
         await asyncio.sleep(poll_interval)
 
+    _finalize_timing("cancelled")
     return False, latest_run, "调度器收到停止信号，已暂停对账（LoopForge 远端任务仍保留现场）"
 
 

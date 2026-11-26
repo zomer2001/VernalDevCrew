@@ -20,12 +20,16 @@ class Usage:
     cached_tokens: int = 0
     output_tokens: int = 0
     reasoning_tokens: int = 0
+    telemetry_known: bool = True
+    source: str = ""
 
     def add(self, other: "Usage") -> None:
         self.input_tokens += other.input_tokens
         self.cached_tokens += other.cached_tokens
         self.output_tokens += other.output_tokens
         self.reasoning_tokens += other.reasoning_tokens
+        if not other.telemetry_known:
+            self.telemetry_known = False
 
 
 @dataclass
@@ -40,6 +44,7 @@ class AgentResult:
     log_dir: Path | None = None
     duration_sec: float = 0.0
     timed_out: bool = False
+    timing: dict[str, Any] = field(default_factory=dict)
 
 
 def extract_json(text: str) -> dict[str, Any] | None:

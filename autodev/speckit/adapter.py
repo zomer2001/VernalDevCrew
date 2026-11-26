@@ -99,7 +99,7 @@ async def run_step(engine, feature_id: str, step_name: str, preset_id: str = "ve
     executor = engine.settings.harness_for(role)
     if executor in ("dsh","deepseek","deepseek-harness") and not model:
         raise ValueError("DeepSeek 执行器需要明确配置模型，不能依赖默认模型推测")
-    signature = digest_json([feature_id,step_name,expected,fingerprint,assets["versions"],instructions])[:20]
+    signature = digest_json([feature_id,step_name,expected,fingerprint,assets["versions"],assets["prompt_template_version"],instructions])[:20]
     schema_path = engine.ws.state_dir / "schemas" / f"speckit_{step_name}_{feature_id}_{signature}.schema.json"
     schema_path.parent.mkdir(parents=True,exist_ok=True)
     schema = strict_json_schema(SpecStepResult)
@@ -126,15 +126,28 @@ async def run_step(engine, feature_id: str, step_name: str, preset_id: str = "ve
             "核实规格、方案、接口、任务和验证命令是否真正落实，不能仅凭方案写有「已处理」就放行；"
             "若仍存在影响业务承诺的未决项或未映射的适用 NFR，必须写入 findings。"
         )
-    # Read upstream protocol as reference, then constrain it to the platform-owned execution envelope.
+    # Deduplicate user slices against instructions and already-embedded context while preserving all unique materials.
+    seen_texts = {instructions.strip()}
+    user_slices: list[str] = []
+    for s in engine.db.list_slices():
+        if s.slice_id == "PRD-S01":
+            continue
+        cleaned = s.content.strip()
+        if not cleaned or cleaned in seen_texts:
+            continue
+        seen_texts.add(cleaned)
+        user_slices.append(f"[{s.slice_id}] {cleaned}")
+    # Platform-owned concise step methodology replaces 10-38KB raw upstream English CLI boilerplate,
+    # keeping all verified specs, clarifications, quality findings, and mandatory principles lossless.
     prompt = (f"本次任务：{STEP_NAMES[step_name]}。\n" + COMMUNICATION_STYLE + "\n"
-              + "以下上游指令仅作方法参考；其中分支、脚本、扩展、直接提问和步骤切换由平台处理，不执行这些控制操作。\n"
-              + assets["upstream_command"] + "\n上游文档结构参考：\n" + assets["template"]
-              + "\n本项目格式与范围约束（优先遵循）：\n" + assets["instructions"]
+              + assets["methodology"] + "\n"
+              + "平台已接管上游模板中的分支、脚本、扩展、交互提问与步骤切换，仅按下列项目格式约束和 `.vernal-schema.json` 输出结构化产物；"
+              + "下游确定性校验节点会自动执行完整 Schema 校验，不要搜索或安装 `ajv`/`jsonschema` 等外部包。\n"
+              + "本项目格式与范围约束（优先遵循）：\n" + assets["instructions"]
               + findings_guidance
               + "\n" + "\n".join(context)
-              + "\n用户输入资料：\n" + "\n".join(s.content for s in engine.db.list_slices() if s.slice_id != "PRD-S01")
-              + "\n本次补充：\n" + instructions
+              + (("\n用户输入资料：\n" + "\n".join(user_slices)) if user_slices else "")
+              + (("\n本次补充：\n" + instructions) if instructions.strip() else "")
               + f"\n仅产出当前步骤 {step_name} 的结果，不执行下一步骤。"
               + ("澄清步骤的 content 必须为空字符串，clarifications 至多三个问题。"
                  if step_name == "clarify" else
@@ -143,7 +156,8 @@ async def run_step(engine, feature_id: str, step_name: str, preset_id: str = "ve
     baseline = {"spec_sha":(latest(engine,feature_id) or {}).get("content_sha",""),
                 "checklist_sha": (qr or {}).get("checklist_sha", ""),
                 "checklist_findings_sha": (qr or {}).get("findings_sha", ""),
-                "contract_sha":contract_hash(engine), "compiled_task_hash":"", "asset_versions":assets["versions"]}
+                "contract_sha":contract_hash(engine), "compiled_task_hash":"",
+                "asset_versions":{**assets["versions"], "prompt_template_version": assets["prompt_template_version"]}}
     token = PLANNING_BASELINE.set(baseline)
     log_dir = engine.ws.runs_dir / "speckit" / feature_id / step_name / signature
     run_id = engine.db.start_run(f"_speckit_{feature_id}_{step_name}",1,"SPEC_KIT",engine.harness.name)

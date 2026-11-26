@@ -200,6 +200,12 @@ class PrerequisiteEvidence(ContinueRequest):
     evidence: str = Field(min_length=1,max_length=10000)
 
 
+class ConvertProfileRequest(ContinueRequest):
+    target_preset: Literal["vernal-core", "vernal-lite"]
+    target_process: Literal["standard", "quick-prototype", "feature", "bugfix"]
+    reason: str = Field(default="", max_length=500)
+
+
 def _idle(request):
     ctx=get_ctx(request);slot=ctx.active_slot(request)
     if ctx.is_planning(slot) or ctx.is_scheduler_running(slot):
@@ -285,6 +291,23 @@ def mission_prerequisite(feature: str,req: PrerequisiteEvidence,request: Request
         _idle(request)
         return missions.prerequisite_evidence(_engine(request,write=True),feature,req.key,req.evidence,req.expected_revision,actor=effective_actor())
     except (ValueError,OSError) as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/vernal-api/missions/{feature}/convert-profile")
+def mission_convert_profile(feature: str, req: ConvertProfileRequest, request: Request):
+    try:
+        _idle(request)
+        return missions.convert_profile(
+            _engine(request, write=True),
+            feature,
+            target_preset=req.target_preset,
+            target_process=req.target_process,
+            expected_revision=req.expected_revision,
+            actor=effective_actor(),
+            reason=req.reason,
+        )
+    except (ValueError, OSError) as exc:
         raise _error(exc) from exc
 
 

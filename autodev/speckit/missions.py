@@ -194,6 +194,137 @@ def assert_ready_for_approval(engine):
         raise service.SpecConflictError(readiness["blockers"][0]["message"])
 
 
+def config_alignment(engine, mission: dict) -> dict:
+    """Compare recommended vs actual locked preset & process template with an explicit mismatch reason."""
+    route = mission.get("route") or {}
+    recommended_preset = str(route.get("available_preset") or route.get("recommended_preset") or "")
+    recommended_process = str(route.get("process_template") or "")
+    actual_preset = str(mission.get("actual_preset") or "")
+    if service.enabled(engine):
+        try:
+            lock, _ = assets.load_assets(engine)
+            actual_preset = lock["preset_id"]
+        except (ValueError, OSError):
+            pass
+    actual_process = load_template(engine.ws, engine.settings).id
+    aligned = (
+        (not recommended_preset or actual_preset == recommended_preset)
+        and (not recommended_process or actual_process == recommended_process)
+    )
+    has_tasks = bool(engine.db.list_tasks())
+    is_custom_process = actual_process not in ("legacy", "standard", "quick-prototype", "feature", "bugfix")
+    mismatch_reason = ""
+    if not aligned:
+        if has_tasks:
+            mismatch_reason = (
+                f"当前评估推荐 {recommended_preset}/{recommended_process}，但项目已锁定 {actual_preset or '未启用'}/{actual_process} 且已有研发任务，不能原地转换配置。"
+            )
+        elif is_custom_process:
+            mismatch_reason = (
+                f"当前评估推荐 {recommended_preset}/{recommended_process}，但项目使用自定义流程模板（{actual_process}），系统不会自动降级自定义门禁。"
+            )
+        else:
+            mismatch_reason = (
+                f"初次评估存在待确认问题时已锁定 {actual_preset or '未启用'}/{actual_process}；回答澄清后当前推荐 {recommended_preset}/{recommended_process}，"
+                "为保留原有约束不会静默降级，如需切换请执行显式配置转换并保留审批记录。"
+            )
+    can_convert = (
+        not aligned
+        and bool(recommended_preset and recommended_process)
+        and service.enabled(engine)
+        and not has_tasks
+        and not is_custom_process
+        and not engine.db.meta_get("mission.lease")
+    )
+    return {
+        "aligned": aligned,
+        "recommended_preset": recommended_preset,
+        "recommended_process": recommended_process,
+        "actual_preset": actual_preset,
+        "actual_process": actual_process,
+        "mismatch_reason": mismatch_reason,
+        "can_convert_to_recommended": can_convert,
+    }
+
+
+def convert_profile(
+    engine,
+    feature: str,
+    *,
+    target_preset: str,
+    target_process: str,
+    expected_revision: int,
+    actor: str,
+    reason: str = "",
+) -> dict:
+    """Explicitly convert preset and built-in process template when no tasks have been published."""
+    feature_spec_dir(feature)
+    if target_preset not in ("vernal-core", "vernal-lite"):
+        raise ValueError("仅支持转换为 vernal-core 或 vernal-lite 预设")
+    if target_process not in ("standard", "quick-prototype", "feature", "bugfix"):
+        raise ValueError("仅支持转换为内置流程模板（standard/quick-prototype/feature/bugfix）")
+    with engine.db.transaction():
+        assert_idle(engine)
+        if engine.db.list_tasks():
+            raise service.SpecConflictError("已有已发布研发任务，不能转换项目预设或流程模板")
+        mission = get(engine, feature)
+        if not mission or mission["revision"] != expected_revision:
+            raise service.SpecConflictError("需求目标修订已变化，请刷新后再转换配置")
+        if not service.enabled(engine):
+            raise ValueError("请先启用功能规格流程")
+        current_tpl = load_template(engine.ws, engine.settings)
+        if current_tpl.id not in ("legacy", "standard", "quick-prototype", "feature", "bugfix"):
+            raise service.SpecConflictError(f"当前项目使用自定义流程模板（{current_tpl.id}），拒绝自动或批量降级")
+    prev_lock, _ = assets.load_assets(engine)
+    prev_process = current_tpl.id
+    upgrade_res = assets.upgrade_assets(
+        engine,
+        target_preset,
+        actor=actor,
+        reason=reason or f"显式配置转换：{prev_lock['preset_id']}/{prev_process} -> {target_preset}/{target_process}",
+    )
+    new_tpl = load_builtin_template(target_process)
+    save_custom_template(engine.ws, new_tpl.model_dump_json())
+    engine.settings.process_template = new_tpl.id
+    # Always preserve blocking human srs_approval gate even in quick-prototype.
+    service.ensure_specification_gate(engine)
+    with engine.db.transaction():
+        invalidated_kinds = ["plan", "tasks", "analyze"]
+        if upgrade_res["changed"]:
+            invalidated_kinds.insert(0, "checklist")
+        placeholders = ",".join("?" for _ in invalidated_kinds)
+        engine.db._exec(
+            f"UPDATE spec_revisions SET status='STALE' WHERE feature_id=? AND source_kind IN ({placeholders})",
+            (feature, *invalidated_kinds),
+        )
+        mission = get(engine, feature)
+        history = list(mission.get("profile_history") or [])
+        entry = {
+            "from": {"preset": prev_lock["preset_id"], "preset_version": prev_lock["preset_version"], "process": prev_process},
+            "to": {"preset": upgrade_res["current"]["preset_id"], "preset_version": upgrade_res["current"]["preset_version"], "process": new_tpl.id},
+            "invalidated": invalidated_kinds,
+            "actor": actor,
+            "reason": reason.strip(),
+            "at": now_iso(),
+        }
+        history.append(entry)
+        mission.update(
+            revision=mission["revision"] + 1,
+            actual_preset=upgrade_res["current"]["preset_id"],
+            actual_process=new_tpl.id,
+            profile_history=history,
+            updated_at=now_iso(),
+        )
+        _store(engine, mission)
+        engine.db.add_event(
+            "mission.profile_converted",
+            f"项目配置已显式转换：{prev_lock['preset_id']}/{prev_process} -> {target_preset}/{new_tpl.id}（已保留原规格、澄清回答与规格审批门禁）",
+            actor=actor,
+            payload=entry,
+        )
+    return {"mission": view(engine, mission), "conversion": entry}
+
+
 def view(engine, mission) -> dict:
     feature = mission["feature_id"]
     rev = service.latest(engine, feature)
@@ -203,6 +334,7 @@ def view(engine, mission) -> dict:
     readiness = approval_readiness(engine, feature_id=feature)
     result["approval_blockers"] = readiness["blockers"]
     result["quality_review"] = service.quality_review(engine, feature) if service.enabled(engine) else None
+    result["config_alignment"] = config_alignment(engine, mission)
     blocker_codes = {b["code"] for b in readiness["blockers"]}
     try:
         if any(q["status"] == "OPEN" and q["severity"] == "BLOCKING" for q in result["questions"]):

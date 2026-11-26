@@ -372,7 +372,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
         "description": "负责按架构蓝图、契约与目录领地独立完成子任务实现及自测",
         "executorId": coder_exec,
         "model": coder_model,
-        "effort": "high" if coder_exec == "codex" else "",
+        "effort": settings.effort_for("coder") if coder_exec == "codex" else "",
         "rules": rule_ids,
         "skills": [],
         "mcpServers": [],
@@ -402,7 +402,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
         "description": "独立复核代码改动是否满足验收标准、契约一致性与路径白名单",
         "executorId": qa_exec,
         "model": qa_model,
-        "effort": "high" if qa_exec == "codex" else "",
+        "effort": settings.effort_for("reviewer") if qa_exec == "codex" else "",
         "rules": rule_ids,
         "skills": [],
         "mcpServers": [],
@@ -480,7 +480,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
             "description": desc,
             "executorId": exec_id,
             "model": model_id,
-            "effort": "high" if exec_id == "codex" else "",
+            "effort": settings.effort_for(role_key) if exec_id == "codex" else "",
             "rules": [],
             "skills": _skills("spec-writing"),
             "mcpServers": [],
@@ -502,8 +502,8 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
             "prompt": (
                 "你是 Vernal 架构规划与圆桌评审专家（只读分析，不直接开发业务代码）。\n"
                 "请仔细阅读当前需求正文中的角色设定、背景资料、约束规则与 JSON Schema：\n"
-                "1. 若需求正文给出了上下文还原命令，请先在当前工作目录执行该命令还原 `PLAN_PROMPT.md`、`inputs/` 与 `.vernal-schema.json`，再完整阅读 `PLAN_PROMPT.md`。\n"
-                "2. 严格按要求的 JSON Schema 生成唯一的 JSON 对象，并以 UTF-8 纯 JSON（不要包含 Markdown 代码块围栏）写入当前目录的 `vernal-result.json`。\n"
+                "1. 若需求正文给出了上下文还原命令，请先在当前工作目录执行该命令还原 `PLAN_PROMPT.md`、`inputs/` 与 `.vernal-schema.json`，再完整阅读 `PLAN_PROMPT.md` 与 `.vernal-schema.json`。\n"
+                "2. 严格按 `.vernal-schema.json`（或需求正文中的 JSON Schema）生成唯一的 JSON 对象，并以 UTF-8 纯 JSON（不要包含 Markdown 代码块围栏）写入当前目录的 `vernal-result.json`。下游确定性脚本节点会自动执行完整 Schema 校验，请勿在系统中搜索或安装 `ajv`/`jsonschema` 等外部包。\n"
                 "3. 不要编写或提交无关的业务源码文件。\n"
                 "4. 结束回合前，若环境中存在且允许调用 `submit_gate_result` MCP 工具，调用一次 `submit_gate_result`（参数 `decision=\"pass\"`, `reason=\"已产出合法的 vernal-result.json\"`）；若工具被审批策略拒绝，确保 `vernal-result.json` 已落盘并如实说明受阻原因后正常退出。"
             ),
@@ -540,7 +540,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
             "description": f"原生并发进展评审专家（输出独立文件 {out_file}，互不阻塞）",
             "executorId": exec_id,
             "model": model_id,
-            "effort": "high" if exec_id == "codex" else "",
+            "effort": settings.effort_for(role_key) if exec_id == "codex" else "",
             "rules": [],
             "skills": [],
             "mcpServers": [],
@@ -586,7 +586,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
         "description": "汇总三方并发评审意见与人类反馈，产出可执行转向变更单 steering-plan.json",
         "executorId": dir_exec,
         "model": dir_model,
-        "effort": "high" if dir_exec == "codex" else "",
+        "effort": settings.effort_for("director") if dir_exec == "codex" else "",
         "rules": [],
         "skills": [],
         "mcpServers": [],

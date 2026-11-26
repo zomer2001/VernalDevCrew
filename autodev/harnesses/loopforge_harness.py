@@ -173,6 +173,7 @@ class LoopForgeHarness(Harness):
         self._assets_lock = asyncio.Lock()
         self._dispatch_lock = asyncio.Lock()
         self._assets_ready = False
+        self._last_rule_digest: str = ""
 
     def _client(self) -> LoopForgeClient:
         if self._custom_client is not None:
@@ -198,8 +199,23 @@ class LoopForgeHarness(Harness):
             if not self._assets_ready or self.settings.selected_pool == "public_docker":
                 await ensure_vernal_loopforge_assets(client, pid, self.settings)
                 self._assets_ready = True
-            from autodev.speckit.service import sync_rule
-            await sync_rule(self,client,pid)
+            from autodev.speckit.service import constitution_rule, enabled, sync_rule
+            if enabled(self):
+                rule_sig = hashlib.sha256(
+                    json.dumps(
+                        [
+                            pid,
+                            int(self.db.meta_get("decisions_rule_version") or 1),
+                            self.db.list_decisions(active_only=True),
+                            constitution_rule(self),
+                        ],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest()
+                if rule_sig != self._last_rule_digest:
+                    await sync_rule(self, client, pid)
+                    self._last_rule_digest = rule_sig
             return pid, plan_workflow_id(pid, role)
 
     def _build_issue_description(
@@ -210,18 +226,33 @@ class LoopForgeHarness(Harness):
         role: str,
     ) -> str:
         schema_text = schema_path.read_text("utf-8")
-        full_prompt = (
+        try:
+            schema_obj = json.loads(schema_text)
+            top_required = list(schema_obj.get("required") or [])
+        except ValueError:
+            top_required = []
+        inline_full_prompt = (
             f"{prompt}\n\n"
             f"## 严格输出格式（JSON Schema）\n\n"
             f"请将满足以下 JSON Schema 的唯一合法 JSON 对象（UTF-8 纯 JSON，不要包含 Markdown 围栏）"
             f"写入当前工作目录的 `vernal-result.json`：\n"
             f"```json\n{schema_text}\n```\n"
         )
+        # Externalized bundle already ships `.vernal-schema.json` alongside `PLAN_PROMPT.md`;
+        # avoid duplicating the entire multi-KB JSON Schema inside PLAN_PROMPT.md.
+        req_hint = f"（顶层必填字段：{', '.join(top_required)}）" if top_required else ""
+        external_prompt = (
+            f"{prompt}\n\n"
+            f"## 严格输出格式（JSON Schema）\n\n"
+            f"完整 JSON Schema 已同步到当前工作目录的 `.vernal-schema.json`{req_hint}。\n"
+            "请严格按照 `.vernal-schema.json` 生成唯一的合法 JSON 对象（UTF-8 纯 JSON，不要包含 Markdown 围栏），写入当前工作目录的 `vernal-result.json`。\n"
+            "下游确定性脚本节点会自动执行完整 Schema 与文档格式校验；不要在系统中搜索或安装 `ajv`/`jsonschema` 等外部校验包。\n"
+        )
 
         ctx_files = _collect_context_files(self.ws, self.db, self.settings)
         bundle_files = dict(ctx_files)
         bundle_files[".vernal-schema.json"] = schema_text
-        bundle_files["PLAN_PROMPT.md"] = full_prompt
+        bundle_files["PLAN_PROMPT.md"] = external_prompt
 
         bdir = self.ws.state_dir / "baselines"
         bdir.mkdir(parents=True, exist_ok=True)
@@ -233,7 +264,7 @@ class LoopForgeHarness(Harness):
         )
         inline_candidate = (
             f"## Vernal 架构规划任务（角色：`{role}`，阶段：`{stage_key}`）\n\n"
-            f"{full_prompt}\n"
+            f"{inline_full_prompt}\n"
             "完成后确保当前目录存在合法的 `vernal-result.json`，勿修改业务源码。\n"
         )
         if not need_extra_files and len(inline_candidate.encode("utf-8")) <= _INLINE_DESC_LIMIT:
@@ -366,6 +397,7 @@ class LoopForgeHarness(Harness):
                 duration_sec=time.monotonic() - started,
             )
 
+        t_resolve_start = time.monotonic()
         client = self._client()
         try:
             selected, dispatch_client = await public_pool.resolve(self.settings, client)
@@ -383,7 +415,9 @@ class LoopForgeHarness(Harness):
                 log_dir=log_dir,
                 duration_sec=time.monotonic() - started,
             )
+        t_resolve_sec = round(time.monotonic() - t_resolve_start, 4)
 
+        t_ready_start = time.monotonic()
         try:
             pid, wf_id = await self._ensure_ready(client, role)
             await public_pool.check_workflow_sandbox(self.settings, client, wf_id, selected)
@@ -398,10 +432,13 @@ class LoopForgeHarness(Harness):
                 log_dir=log_dir,
                 duration_sec=time.monotonic() - started,
             )
+        t_ready_sec = round(time.monotonic() - t_ready_start, 4)
 
+        t_dispatch_start = time.monotonic()
         description = self._build_issue_description(stage_key, prompt, schema_path, role)
+        schema_text = schema_path.read_text("utf-8")
         try:
-            signature = hashlib.sha256(json.dumps([prompt, schema_path.read_text("utf-8"), selected, wf_id]).encode()).hexdigest()
+            signature = hashlib.sha256(json.dumps([prompt, schema_text, selected, wf_id]).encode()).hexdigest()
             issue_id, run_id = await self._dispatch_plan(client, pid, stage_key, title, description, wf_id,
                                                          prior_candidate, signature)
         except LoopForgeError as exc:
@@ -414,9 +451,11 @@ class LoopForgeHarness(Harness):
                 log_dir=log_dir,
                 duration_sec=time.monotonic() - started,
             )
+        t_dispatch_sec = round(time.monotonic() - t_dispatch_start, 4)
 
         actual_executor = self.settings.harness_for(role)
         actual_model = self.settings.model_for(role) or "default"
+        actual_effort = self.settings.effort_for(role)
         (log_dir / "loopforge_run.json").write_text(
             json.dumps(
                 {
@@ -424,6 +463,7 @@ class LoopForgeHarness(Harness):
                     "role": role,
                     "executor": actual_executor,
                     "model": actual_model,
+                    "effort": actual_effort,
                     "workflow_id": wf_id,
                     "issue_id": issue_id,
                     "run_id": run_id,
@@ -435,7 +475,7 @@ class LoopForgeHarness(Harness):
         )
         self._activity(
             "command",
-            f"已派发到 LoopForge 规划 SOP（{role} · {actual_executor}/{actual_model} · Issue {issue_id} / Run {run_id[:12]}）",
+            f"已派发到 LoopForge 规划 SOP（{role} · {actual_executor}/{actual_model} · effort={actual_effort or 'default'} · Issue {issue_id} / Run {run_id[:12]}）",
             None,
         )
 
@@ -450,6 +490,8 @@ class LoopForgeHarness(Harness):
                 (final_state, now_iso(), run_id),
             )
 
+        poll_timing: dict[str, Any] = {}
+        t_poll_start = time.monotonic()
         try:
             ok, run, msg = await poll_loopforge_run(
                 client,
@@ -459,14 +501,54 @@ class LoopForgeHarness(Harness):
                 timeout_sec=float(self.settings.agent_timeout_sec),
                 on_progress=_on_progress,
                 db=self.db,
+                timing_out=poll_timing,
             )
         except (asyncio.CancelledError, Exception):
             _mark_plan_dispatch("NEEDS_CONFIRMATION")
             raise
-        duration = time.monotonic() - started
-        usage = extract_run_usage(run) if run else Usage()
+        t_poll_sec = round(time.monotonic() - t_poll_start, 4)
+        usage = extract_run_usage(run) if run else Usage(telemetry_known=False, source="unknown")
+
+        def _write_timing(final_ok: bool, t_artifact_sec: float) -> dict[str, Any]:
+            bundle_path = self.ws.state_dir / "baselines" / f"plan-{stage_key}.json"
+            bundle_bytes = bundle_path.stat().st_size if bundle_path.is_file() else 0
+            rec = {
+                "stage_key": stage_key,
+                "project_id": pid,
+                "issue_id": issue_id,
+                "run_id": run_id,
+                "role": role,
+                "executor": actual_executor,
+                "model": actual_model,
+                "effort": actual_effort,
+                "ok": final_ok,
+                "prompt_bytes": len(prompt.encode("utf-8")),
+                "schema_bytes": len(schema_text.encode("utf-8")),
+                "bundle_bytes": bundle_bytes,
+                "phases_sec": {
+                    "resolve_pool": t_resolve_sec,
+                    "ensure_ready": t_ready_sec,
+                    "dispatch": t_dispatch_sec,
+                    "poll_run": t_poll_sec,
+                    "artifact_fetch": t_artifact_sec,
+                    "total": round(time.monotonic() - started, 4),
+                },
+                "usage": {
+                    "input_tokens": usage.input_tokens,
+                    "cached_tokens": usage.cached_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "reasoning_tokens": usage.reasoning_tokens,
+                    "telemetry_known": usage.telemetry_known,
+                    "source": usage.source,
+                },
+                "poll_timing": poll_timing,
+            }
+            (log_dir / "timing.json").write_text(json.dumps(rec, ensure_ascii=False, indent=2), "utf-8")
+            return rec
 
         if not ok:
+            timing = _write_timing(False, 0.0)
+            duration = time.monotonic() - started
             terminal = run and run.get("status") in ("failed", "cancelled", "succeeded")
             _mark_plan_dispatch("FAILED" if terminal else "NEEDS_CONFIRMATION")
             return AgentResult(
@@ -479,17 +561,22 @@ class LoopForgeHarness(Harness):
                 log_dir=log_dir,
                 duration_sec=duration,
                 timed_out="超时" in msg,
+                timing=timing,
             )
 
+        t_art_start = time.monotonic()
         raw_text = ""
         try:
             raw_text = await client.named_artifact(run, "vernal-result.json")
         except LoopForgeError:
             raw_text = extract_run_text(run)
+        t_art_sec = round(time.monotonic() - t_art_start, 4)
 
         (log_dir / "final_message.txt").write_text(raw_text, "utf-8")
         structured = extract_json(raw_text)
         if structured is None:
+            timing = _write_timing(False, t_art_sec)
+            duration = time.monotonic() - started
             _mark_plan_dispatch("FAILED")
             return AgentResult(
                 False,
@@ -500,8 +587,11 @@ class LoopForgeHarness(Harness):
                 error=f"LoopForge Run {run_id} 未产出合法的 vernal-result.json",
                 log_dir=log_dir,
                 duration_sec=duration,
+                timing=timing,
             )
 
+        timing = _write_timing(True, t_art_sec)
+        duration = time.monotonic() - started
         _mark_plan_dispatch("FINISHED")
         return AgentResult(
             ok=True,
@@ -512,6 +602,7 @@ class LoopForgeHarness(Harness):
             usage=usage,
             log_dir=log_dir,
             duration_sec=duration,
+            timing=timing,
         )
 
     async def run_workspace_task(

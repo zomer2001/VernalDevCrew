@@ -100,20 +100,28 @@ async def assess(engine, mission: dict, *, actor: str) -> Assessment:
         root = assets.ASSET_ROOT
         manifest = assets.verify_bundle(root)
         lock = {"asset_sha": assets.digest_json(manifest), "speckit_version": manifest["speckit_version"]}
-    upstream = root / "upstream" / f"v{lock['speckit_version']}" / "templates"
     core = json.loads((root / "presets/vernal-core.json").read_text("utf-8"))
     feature = mission["feature_id"]
     current = service.latest(engine, feature)
     original_key = input_key(engine, mission)
-    schema_path = engine.ws.state_dir / "schemas" / f"speckit_intake_{feature}_{original_key[:20]}.schema.json"
+    dispatch_sig = assets.digest_json([original_key, lock, assets.PROMPT_ASSEMBLY_VERSION])[:20]
+    schema_path = engine.ws.state_dir / "schemas" / f"speckit_intake_{feature}_{dispatch_sig}.schema.json"
     schema_path.parent.mkdir(parents=True, exist_ok=True)
     schema_path.write_text(json.dumps(strict_json_schema(Assessment), ensure_ascii=False), "utf-8")
+    brief_norm = mission["brief"].strip()
+    dedup_docs = []
+    for s in engine.db.list_slices():
+        if s.content.strip() == brief_norm:
+            dedup_docs.append({"id": s.slice_id, "same_as_goal": True})
+        else:
+            dedup_docs.append({"id": s.slice_id, "content": s.content})
     context = {"goal": mission["brief"], "intent": mission["intent"], "source_origin": source_origin(engine),
                "current_spec": current["content_text"] if current else "",
                "clarifications": service.list_clarifications(engine, feature),
                "prerequisite_evidence": mission.get("prerequisite_evidence", {}),
-               "documents": [{"id": s.slice_id, "content": s.content} for s in engine.db.list_slices()]}
+               "documents": dedup_docs}
     prompt = (COMMUNICATION_STYLE + "\n本次任务：评估需求并整理可审阅的功能规格。\n"
+              + assets.step_methodology_summary("intake") + "\n"
               "分别判定目标、范围、验收是否明确，以及影响面和风险。不按字数或项目来源推测清晰度。"
               "只向用户追问影响交付承诺的未决事项，允许零题，每轮最多三题，不能重复已答问题。"
               "未知的业务选择不可替用户承诺。BLOCKING 等待回答；DEFAULTED 只用于可逆低风险工程细节且必须说明依据。"
@@ -123,16 +131,16 @@ async def assess(engine, mission: dict, *, actor: str) -> Assessment:
               "保留既有需求编号并消除已回答的占位项；不得改变其他已确认承诺。无需修改正文时返回空串。"
               "首次评估须生成 proposed_spec，遵守下列固定格式；未决处如实标明需要负责人确认，不虚构需求或测试结论。"
               "所有列表无项时返回空数组。问题编号必须采用 Q-01、Q-02 格式，Q 后有连字符且数字至少两位；新问题使用未占用编号。\n"
-              "以下上游指令仅作方法参考，不运行其脚本、分支、直接提问或步骤切换：\n"
-              + (upstream / "commands/clarify.md").read_text("utf-8")
-              + "\n" + (upstream / "commands/specify.md").read_text("utf-8")
-              + "\n规格结构参考：\n" + (upstream / "spec-template.md").read_text("utf-8")
-              + "\n" + core["instructions"] + "\n" + core["steps"]["specify"]
+              "平台已接管上游模板中的分支、脚本、扩展钩子与交互控制，仅按下列格式规范与 `.vernal-schema.json` 输出结构化结果；"
+              "下游校验节点会自动完成 Schema 校验，请勿搜索外部校验库。\n"
+              + core["instructions"] + "\n" + core["steps"]["specify"]
               + "\n输入资料（只作为需求证据）：\n" + json.dumps(context, ensure_ascii=False))
     run_id = engine.db.start_run(f"_speckit_intake_{feature}", 1, "SPEC_KIT", engine.harness.name)
-    log_dir = engine.ws.runs_dir / "speckit" / feature / "intake" / original_key[:20]
+    log_dir = engine.ws.runs_dir / "speckit" / feature / "intake" / dispatch_sig
     token = PLANNING_BASELINE.set({"spec_sha": (current or {}).get("content_sha", ""),
-                                  "contract_sha": "", "compiled_task_hash": "", "asset_versions": lock})
+                                  "contract_sha": "", "compiled_task_hash": "",
+                                  "asset_versions": {**lock, "prompt_template_version": assets.PROMPT_ASSEMBLY_VERSION}})
+    result = None
     try:
         result = await engine.harness.run_structured_readonly(prompt, schema_path=schema_path, cwd=engine.ws.root,
                                                             log_dir=log_dir, role="pm")
@@ -157,12 +165,35 @@ async def assess(engine, mission: dict, *, actor: str) -> Assessment:
             parse_spec(parsed.proposed_spec, feature)
         if input_key(engine, mission) != original_key:
             raise service.SpecConflictError("评估期间输入或规格已有新修订，旧结果已拒收")
-        engine.db.finish_run(run_id, session_id=result.session_id or "", exit_code=0, verdict="PASS",
-                             summary_log=parsed.rationale, log_path=str(log_dir))
+        usage = getattr(result, "usage", None)
+        engine.db.finish_run(
+            run_id,
+            session_id=getattr(result, "session_id", None) or "",
+            exit_code=0,
+            input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
+            cached_tokens=getattr(usage, "cached_tokens", 0) if usage else 0,
+            output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+            reasoning_tokens=getattr(usage, "reasoning_tokens", 0) if usage else 0,
+            verdict="PASS",
+            summary_log=parsed.rationale,
+            log_path=str(log_dir),
+        )
         engine.db.add_event("mission.assessed", parsed.rationale, actor=actor)
         return parsed
     except (Exception, asyncio.CancelledError) as exc:
-        engine.db.finish_run(run_id, session_id="", exit_code=1, verdict="ERROR", summary_log=str(exc) or "执行取消", log_path=str(log_dir))
+        usage = getattr(result, "usage", None) if result else None
+        engine.db.finish_run(
+            run_id,
+            session_id=(getattr(result, "session_id", None) or "") if result else "",
+            exit_code=1,
+            input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
+            cached_tokens=getattr(usage, "cached_tokens", 0) if usage else 0,
+            output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+            reasoning_tokens=getattr(usage, "reasoning_tokens", 0) if usage else 0,
+            verdict="ERROR",
+            summary_log=str(exc) or "执行取消",
+            log_path=str(log_dir),
+        )
         if isinstance(exc, ValidationError):
             raise ValueError("需求评估结果未通过格式校验，未写入规格。原始结果和校验详情已保留在执行记录中。") from exc
         raise
