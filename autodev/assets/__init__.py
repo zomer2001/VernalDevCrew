@@ -87,4 +87,13 @@ def builtin_mcp_templates() -> list[dict[str, Any]]:
             "url": "https://mcp.context7.com/mcp",
             "timeoutSec": 60,
         },
+        {
+            "id": "vernal-serena-mcp",
+            "name": "Serena 符号级代码导航 MCP",
+            "description": "开源 oraios/serena（MIT）：基于 LSP 提供跨文件符号定义跳转、引用查找与结构化重构（默认不强绑角色，按需挂载）",
+            "transport": "stdio",
+            "command": "serena-mcp-server",
+            "args": ["--context", "ide-assistant"],
+            "timeoutSec": 90,
+        },
     ]

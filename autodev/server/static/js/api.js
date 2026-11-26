@@ -1,5 +1,5 @@
 export const root = () => document.getElementById("vernalStage") || document;
-export const $ = id => root().querySelector("#" + CSS.escape(id));
+export const $ = (id) => root().querySelector("#" + CSS.escape(id));
 
 export const esc = (s) =>
   String(s ?? "")
@@ -20,10 +20,22 @@ export const ROLE_NAMES = {
   integrator: "网关装配 · Integrator",
   tester: "系统测试 · Tester",
   reviewer: "独立审查 · Reviewer",
-  human: "人类负责人",
+  human: "项目负责人",
 };
 
+let _loggedInUser = "";
+
+export function setLoggedInUser(login) {
+  _loggedInUser = String(login || "").trim();
+  const badge = $("actor-badge");
+  if (badge) {
+    badge.textContent = _loggedInUser || ($("actor-input")?.value.trim() || "owner");
+    badge.classList.toggle("hidden", !badge.textContent);
+  }
+}
+
 export function actorName() {
+  if (_loggedInUser) return _loggedInUser;
   return $("actor-input")?.value.trim() || "owner";
 }
 
@@ -71,7 +83,13 @@ export async function api(path, opts = {}) {
     headers: { ...baseHeaders, ...(opts.headers || {}) },
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+  if (pid !== getActiveProjectId()) throw new Error("项目已切换");
+  if (!res.ok) {
+    const detail = data.detail || data.error;
+    const error = new Error(typeof detail === "string" ? detail : (detail?.error || `HTTP ${res.status}`));
+    error.detail = detail;
+    throw error;
+  }
   return data;
 }
 

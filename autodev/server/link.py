@@ -159,6 +159,9 @@ def register_link(app, slot, find_slot, verify_user, verify_project, user_token,
     import asyncio
     from autodev.harnesses.link_worker import register_jobs
 
+    from autodev.public_pool import server_url
+    from autodev.loopforge.client import LoopForgeError
+
     def authorize(request, link_id):
         if not re.fullmatch("[a-f0-9]{32}", link_id):
             raise HTTPException(403, "连接凭据无效")
@@ -167,18 +170,69 @@ def register_link(app, slot, find_slot, verify_user, verify_project, user_token,
         header = request.headers.get("authorization", "")
         if not rows or not header.startswith("Bearer ") or not hmac.compare_digest(rows[0]["token_hash"], digest(header[7:].encode())):
             raise HTTPException(403, "连接凭据无效")
+        if rows[0]["revoked_at"] is not None or (rows[0]["expires_at"] or 0) <= time.time():
+            raise HTTPException(403, "设备已被撤销或已过期，请重新配对")
         db._exec("UPDATE host_links SET seen=? WHERE id=?", (time.time(), link_id))
         return dict(rows[0])
+
+    async def verify_device(request, link_id):
+        link = authorize(request, link_id)
+        if time.time() - link["verified_at"] < 60:
+            return
+        engine = slot().engine
+        try:
+            client = LoopForgeClient(server_url(), engine.settings.service_token())
+            if not client.token:
+                raise LoopForgeError("未配置部署服务身份")
+            projects = await client.list_projects()
+            if not link["owner_id"]:
+                users = await client._req("GET", "/api/users")
+                matches = [str(u["id"]) for u in users if u.get("id") and u.get("loginName") == link["owner"]]
+                if len(matches) == 1:
+                    link["owner_id"] = matches[0]
+                    engine.db._exec("UPDATE host_links SET owner_id=? WHERE id=?", (matches[0], link_id))
+        except LoopForgeError as exc:
+            raise HTTPException(503, "暂时无法复验设备成员资格") from exc
+        project = next((p for p in projects if p.get("id") == engine.settings.loopforge_project_id), {})
+        uid = link["owner_id"]
+        from autodev.server.deps import native_access
+        if not uid or not native_access({"id": uid}, project):
+            engine.db._exec("UPDATE host_links SET revoked_at=? WHERE id=?", (time.time(), link_id))
+            raise HTTPException(403, "设备所属用户已失去项目访问权")
+        engine.db._exec("UPDATE host_links SET verified_at=? WHERE id=?", (time.time(), link_id))
+
+    app.state.verify_device = verify_device
+
+    @app.delete("/vernal-api/link/{link_id}")
+    async def revoke(link_id: str, request: Request):
+        engine = slot().engine
+        cookie = request.headers.get("cookie", "")
+        user, projects = await app.state.ctx.access_scope(cookie)
+        pid = engine.settings.loopforge_project_id
+        if pid not in projects:
+            raise HTTPException(403, "无权访问项目")
+        rows = engine.db._query("SELECT owner FROM host_links WHERE id=?", (link_id,))
+        if not rows:
+            raise HTTPException(404, "设备不存在")
+        owner = await verify_user(cookie, server_url())
+        if owner != rows[0]["owner"] and not (user.get("isPlatformAdmin") is True or
+                user.get("id") and str(user["id"]) == str(projects[pid].get("ownerId"))):
+            raise HTTPException(403, "无权撤销此设备")
+        engine.db._exec("UPDATE host_links SET revoked_at=? WHERE id=?", (time.time(), link_id))
+        return {"revoked": True}
 
     @app.post("/vernal-api/link/create-code")
     async def create_code(request: Request, body: dict):
         engine = slot().engine
         pid = request.state.requested_project_id or engine.settings.loopforge_project_id or slot().project_key
-        lf = engine.settings.loopforge_url
+        lf = server_url()
         cookie = request.headers.get("cookie", "")
         owner = await verify_user(cookie, lf)
         await verify_project(cookie, lf, pid, strict=True)
-        target = find_slot(pid, create=True).engine
+        target_slot = find_slot(pid, create=True)
+        if target_slot is None:
+            raise HTTPException(409, "项目绑定尚未完成，请先恢复登记")
+        target = target_slot.engine
         if target.db.meta_get("source_mode") or target.db.list_milestones():
             raise HTTPException(409, "请在尚未导入项目的槽位生成配对码")
         runner_code = None
@@ -188,7 +242,9 @@ def register_link(app, slot, find_slot, verify_user, verify_project, user_token,
         code = pid + "." + secrets.token_urlsafe(18)
         expiry = time.time() + 600
         target.db._exec("DELETE FROM link_codes WHERE expires<=?", (time.time(),))
-        target.db._exec("INSERT INTO link_codes VALUES(?,?,?,?)", (digest(code.encode()), owner, expiry, runner_code))
+        user, _ = await app.state.ctx.access_scope(cookie)
+        target.db._exec("INSERT INTO link_codes(code_hash,owner,expires,runner_code,owner_id,verified_at) VALUES(?,?,?,?,?,?)",
+                        (digest(code.encode()), owner, expiry, runner_code, str(user.get("id") or ""), time.time()))
         return {"code": code, "expires_at": expiry, "project": pid}
 
     @app.post("/vernal-api/link/exchange")
@@ -211,7 +267,9 @@ def register_link(app, slot, find_slot, verify_user, verify_project, user_token,
             clis = [k for k in ("codex", "claude-code", "opencode", "dsh") if k in body.get("clis", [])]
             db._exec("INSERT INTO host_links(id,owner,token_hash,kind,platform,clis,seen,runner_code) VALUES(?,?,?,?,?,?,?,?)",
                      (link_id, owner, digest(token.encode()), kind, str(body.get("platform", ""))[:20], json.dumps(clis), time.time(), rows[0]["runner_code"]))
-            db._exec("UPDATE host_links SET codex_login=? WHERE id=?", (int(body.get("codex_login") is True), link_id))
+            db._exec("UPDATE host_links SET codex_login=?,owner_id=?,verified_at=?,expires_at=? WHERE id=?",
+                     (int(body.get("codex_login") is True), rows[0]["owner_id"], rows[0]["verified_at"],
+                      time.time() + 90 * 86400, link_id))
         return {"project": slot().project_key, "link_id": link_id, "link_token": token,
                 "native_runner": bool(rows[0]["runner_code"])}
 

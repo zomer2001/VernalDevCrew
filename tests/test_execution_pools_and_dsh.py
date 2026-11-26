@@ -39,36 +39,87 @@ def test_pool_routes_readiness_and_models(pool):
     assert s.model_for("director") == "planning"
     assert DeepSeekHarness(s, "/bin/dsh").build_cmd("task", role="coder")[-3:] == ["--model", "coding", "task"]
     s.harness = "opencode"
-    assert s.model_for("coder") == "deepseek/coding"
+    assert s.model_for("coder") == "coding"
+    assert s.model_for("director") == "planning"
     s.execution_pool = "local_runner"
     assert not merge_runner_runtimes({}, s, runners=[])[0]["codex"]["ready"]
 
 
 def test_pool_service_identity_and_ticket_only(pool, monkeypatch):
+    # Simulate real LoopForge 0.4.0 behavior: Bearer tokens hit /api/auth/current and get guest (id=0),
+    # while identity.json self-heals user_id via cookie login and confirms enrollment via /api/users.
+    monkeypatch.delenv("VERNAL_POOL_TOKEN", raising=False)
+    (pool / "identity.json").write_text(json.dumps({
+        "login": "vernalpool17",
+        "password": "pw-17",
+        "token": "public-account-token",
+    }))
     saved = {}
     routes = []
+    pool_user_role = {"platformRole": ""}
+
     def upstream(req):
-        token = req.headers.get("Authorization")
-        routes.append((req.url.path, token))
+        token = req.headers.get("Authorization") or ""
+        cookie = req.headers.get("Cookie") or ""
+        routes.append((req.url.path, token, cookie))
         if req.url.path == "/api/runners":
             return httpx.Response(200, json=[])
         if req.url.path == "/api/projects":
-            return httpx.Response(200, json=[{"id": "demo"}])
+            return httpx.Response(200, json=[{"id": "demo", "ownerId": 5, "members": [{"userId": 17, "role": "member"}]}])
+        if req.url.path == "/api/auth/password" and req.method == "POST":
+            body = json.loads(req.content)
+            assert body == {"login": "vernalpool17", "password": "pw-17"}
+            return httpx.Response(200, headers={"set-cookie": "session=pool17"}, json={"ok": True})
         if req.url.path == "/api/auth/current":
-            return httpx.Response(200, json={"user": {"id": 17 if token.endswith("public-account-token") else 5,
-                "agentCliCredentials": {k: {"apiKeyConfigured": True, "baseUrl": v["baseUrl"]} for k, v in saved.items()}}})
+            if "session=pool17" in cookie:
+                return httpx.Response(200, json={"user": {"id": 17, "loginName": "vernalpool17", "isGuest": False}})
+            # Real LoopForge 0.4.0: Bearer API tokens without cookie always return guest id=0.
+            return httpx.Response(200, json={"user": {"id": 0, "loginName": "guest", "isGuest": True}})
+        if req.url.path == "/api/users":
+            return httpx.Response(200, json=[
+                {"id": 5, "loginName": "owner5", "platformRole": "admin"},
+                {
+                    "id": 17,
+                    "loginName": "vernalpool17",
+                    "platformRole": pool_user_role["platformRole"],
+                    "agentCliCredentials": {
+                        k: {"apiKeyConfigured": True, "baseUrl": v["baseUrl"], "protocol": v.get("protocol", "chat"), "models": v.get("models", [])}
+                        for k, v in saved.items()
+                    },
+                },
+            ])
         if req.url.path == "/api/users/17/credentials":
             assert token == "Bearer public-account-token" and b"real-test-key" not in req.content
             saved.update(json.loads(req.content)["agentCliCredentials"])
-            return httpx.Response(200, json={})
+            return httpx.Response(200, json={"ok": True})
         assert False, req.url
     real = httpx.AsyncClient
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real(transport=httpx.MockTransport(upstream)))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real(**kwargs, transport=httpx.MockTransport(upstream)))
     s = Settings(loopforge_url="http://lf", loopforge_project_id="demo", runtime_backend="loopforge", harness="auto")
     owner = LoopForgeClient("http://lf", "personal")
     route, shared = asyncio.run(public_pool.resolve(s, owner))
     assert route == "public_docker" and shared.token == "public-account-token"
-    assert public_pool.valid_ticket("deepseek", saved["dsh"]["apiKey"])
+    assert shared.issue_user_id == 17
+    # Self-healed identity.json now persists user_id=17
+    assert public_pool.identity()["user_id"] == 17
+    assert saved["dsh"]["apiKey"] == public_pool.broker_key(17, "deepseek")
+    assert saved["opencode"]["apiKey"] == public_pool.broker_key(17, "deepseek")
+    assert saved["opencode"]["models"] == [{"id": "coding"}, {"id": "planning"}]
+    assert not public_pool.valid_ticket("deepseek", saved["dsh"]["apiKey"])
+    assert saved["dsh"]["baseUrl"].endswith("/pool-broker/17/deepseek")
+
+    # Admin platformRole must be rejected fail-closed
+    pool_user_role["platformRole"] = "admin"
+    with pytest.raises(LoopForgeError, match="独立的普通执行账号"):
+        asyncio.run(public_pool.resolve(s, owner))
+    pool_user_role["platformRole"] = ""
+
+    # Unbound external VERNAL_POOL_TOKEN without user_id must fail closed when /api/auth/current returns guest
+    monkeypatch.setenv("VERNAL_POOL_TOKEN", "mystery-token")
+    with pytest.raises(LoopForgeError, match="独立的普通执行账号"):
+        asyncio.run(public_pool.resolve(s, owner))
+    monkeypatch.delenv("VERNAL_POOL_TOKEN", raising=False)
+
     s.execution_pool = "local_runner"
     with pytest.raises(LoopForgeError, match="离线"):
         asyncio.run(public_pool.resolve(s, owner))
@@ -128,7 +179,7 @@ def test_service_bootstrap_after_first_human_login(tmp_path, monkeypatch):
             registered.append(json.loads(req.content))
             return httpx.Response(201)
         assert path == "/api/auth/tokens" and req.headers["cookie"] == "session=dedicated"
-        return httpx.Response(201, json={"token":"pool-secret"})
+        return httpx.Response(201, json={"token": "pool-secret", "metadata": {"userId": 29}})
     real = httpx.AsyncClient
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(**kw, transport=httpx.MockTransport(server)))
     client = LoopForgeClient("http://lf", "owner")
@@ -136,6 +187,7 @@ def test_service_bootstrap_after_first_human_login(tmp_path, monkeypatch):
         await asyncio.gather(public_pool.provision(client), public_pool.provision(client))
     asyncio.run(provision_twice())
     assert len(registered) == 1 and public_pool.service_token() == "pool-secret"
+    assert public_pool.identity().get("user_id") == 29
     assert "pool-secret" not in json.dumps(public_pool.status())
 
 
@@ -173,6 +225,9 @@ def test_two_project_members_use_their_own_execution_identity(tmp_path, monkeypa
     settings = Settings(runtime_backend="loopforge", loopforge_url="http://lf",
                         loopforge_project_id="demo", loopforge_token="owner-stable-key")
     eng = Engine(init_workspace(tmp_path / "workspace", collaboration_mode="files"), settings=settings)
+    from autodev.governance import upsert_member
+    for member in ("alice", "bob"):
+        upsert_member(eng.db, member, "architect", project="demo")
     calls = []
     async def cookie_user(self, cookie):
         return {"user": {"id": 1 if "alice" in cookie else 2, "login": "alice" if "alice" in cookie else "bob"}}
@@ -194,5 +249,7 @@ def test_two_project_members_use_their_own_execution_identity(tmp_path, monkeypa
         for who in ("alice", "bob", "alice"):
             client.cookies.set("session", who)
             assert client.post("/vernal-api/agent/config", json={"execution_pool":"local_runner"}).is_success
-    assert calls == [(t, t, "owner-stable-key") for t in ("owner-stable-key", "bob-personal-token", "owner-stable-key")]
+    signing = settings.project_signing_key()
+    assert len(bytes.fromhex(signing)) == 32 and signing != "owner-stable-key"
+    assert calls == [(f"session={who}", f"session={who}", signing) for who in ("alice", "bob", "alice")]
     eng.db.close()

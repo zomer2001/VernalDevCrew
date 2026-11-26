@@ -55,7 +55,9 @@ def test_loopforge_harness_dispatches_auto_passes_reuses_issue_and_parses_result
         p = req.url.path
         if public_engine:
             if p == "/api/dockerfiles":
-                assert json.loads(req.content)["content"].startswith("FROM autodev-runtime-sandbox")
+                recipe = json.loads(req.content)["content"].splitlines()
+                assert recipe[0].startswith("FROM autodev-runtime-sandbox")
+                assert recipe[1] == "ENTRYPOINT []"
                 return httpx.Response(200, json={"ok": True})
             if p == "/api/sandboxes" and req.method == "PUT":
                 registered_sandboxes.append(json.loads(req.content))
@@ -79,7 +81,7 @@ def test_loopforge_harness_dispatches_auto_passes_reuses_issue_and_parses_result
                 creds = {k: {"apiKeyConfigured": True, "baseUrl": v["baseUrl"]} for k, v in shared_credentials.items()}
                 return httpx.Response(200, json={"user": {"id": 32 if public_identity else 12, "agentCliCredentials": creds}})
             if p == "/api/issues/iss-plan-1" and req.method == "GET":
-                assert created_issues[0]["responsibleUserId"] == 32
+                assert created_issues[0]["assigneeUserId"] == 32
                 return httpx.Response(200, json={"issue": created_issues[0]})
             if p.startswith(("/api/issues", "/api/runs")):
                 assert public_identity
@@ -358,3 +360,36 @@ def test_reconcile_deadlocked_dispatch(tmp_path, run_statuses, expected_run, dis
             assert not eng.db.meta_get("plan_issue:demo:council_pm:pending_run")
     finally:
         eng.db.close()
+
+
+@pytest.mark.parametrize(("upstream_state", "expected"), [
+    ("failed", "FAILED"),
+    ("cancelled", "FAILED"),
+    ("running", "NEEDS_CONFIRMATION"),
+])
+def test_plan_receipt_after_unsuccessful_poll(tmp_path, monkeypatch, upstream_state, expected):
+    from unittest.mock import AsyncMock
+    from autodev.loopforge.dispatch import reserve
+
+    ws = init_workspace(tmp_path / "demo", collaboration_mode="files")
+    settings = Settings(loopforge_url="http://lf.test", loopforge_token="fixture", loopforge_project_id="demo")
+    engine = Engine(ws, settings=settings)
+    harness = LoopForgeHarness(settings, engine.db, ws)
+    run_id = "run-fixture"
+    try:
+        reserve(engine.db, "plan-demo", 1, 1, "local_runner", "fixture", run_id=run_id)
+        client = harness._client()
+        monkeypatch.setattr("autodev.public_pool.resolve", AsyncMock(return_value=("local_runner", client)))
+        monkeypatch.setattr(harness, "_ensure_ready", AsyncMock(return_value=("demo", "wf")))
+        monkeypatch.setattr(harness, "_dispatch_plan", AsyncMock(return_value=("issue", run_id)))
+        monkeypatch.setattr("autodev.harnesses.loopforge_harness.poll_loopforge_run",
+                            AsyncMock(return_value=(False, {"status": upstream_state}, "poll stopped")))
+        result = asyncio.run(harness.run_structured_readonly(
+            "plan", schema_path=engine.schemas["council_opinion"], cwd=ws.root,
+            log_dir=ws.runs_dir / "fixture", role="pm",
+        ))
+        assert not result.ok
+        row = engine.db._query("SELECT state FROM dispatch_records WHERE lf_run_id=?", (run_id,))[0]
+        assert row["state"] == expected
+    finally:
+        engine.db.close()

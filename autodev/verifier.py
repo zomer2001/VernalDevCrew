@@ -37,29 +37,36 @@ class GuardResult:
     def describe(self) -> str:
         lines = []
         if self.out_of_scope:
-            lines.append("以下文件超出允许修改的路径白名单，已被自动回滚：\n" + "\n".join(f"- {p}" for p in self.out_of_scope))
+            lines.append("以下文件超出允许修改的路径白名单：\n" + "\n".join(f"- {p}" for p in self.out_of_scope))
         if self.secrets:
-            lines.append("以下疑似密钥/敏感文件不允许提交，已被删除：\n" + "\n".join(f"- {p}" for p in self.secrets))
+            lines.append("以下疑似密钥/敏感文件不允许提交：\n" + "\n".join(f"- {p}" for p in self.secrets))
         if self.oversized:
-            lines.append(f"以下文件超过 {MAX_FILE_BYTES // 1024 // 1024}MB，已被删除：\n" + "\n".join(f"- {p}" for p in self.oversized))
+            lines.append(f"以下文件超过 {MAX_FILE_BYTES // 1024 // 1024}MB：\n" + "\n".join(f"- {p}" for p in self.oversized))
         return "\n\n".join(lines)
 
 
 def guard_worktree(cwd: Path, allowed_paths: list[str], protected_paths: list[str]) -> GuardResult:
     """检查工作区全部改动；越界、敏感、超大文件自动回滚。protected_paths 为该任务额外禁止的目录。"""
-    result = GuardResult(changed=gitops.changed_files(cwd))
+    result = guard_paths(cwd, gitops.changed_files(cwd), allowed_paths, protected_paths)
+    offenders = result.out_of_scope + result.secrets + result.oversized
+    if offenders:
+        gitops.revert_paths(cwd, offenders)
+    return result
+
+
+def guard_paths(cwd, changed, allowed_paths, protected_paths):
+    result = GuardResult(changed=changed)
     for p in result.changed:
         if any(rx.search(p) for rx in _SECRET_PATTERNS):
             result.secrets.append(p)
+        elif (cwd / p).is_symlink() or not (cwd / p).resolve().is_relative_to(cwd.resolve()):
+            result.out_of_scope.append(p)
         elif not path_allowed(p, allowed_paths) or path_allowed(p, protected_paths):
             result.out_of_scope.append(p)
         else:
             f = cwd / p
             if f.is_file() and f.stat().st_size > MAX_FILE_BYTES:
                 result.oversized.append(p)
-    offenders = result.out_of_scope + result.secrets + result.oversized
-    if offenders:
-        gitops.revert_paths(cwd, offenders)
     return result
 
 
@@ -80,8 +87,11 @@ def tail(text: str, n: int = TAIL_LINES) -> str:
 
 
 async def run_command(cmd: str, cwd: Path, timeout: int, env: dict[str, str] | None = None) -> CmdResult:
-    full_env = os.environ.copy()
-    full_env.update(env or {})
+    full_env = {**os.environ, **(env or {})}
+    for name in ("AGENTFLOW_TOKEN", "VERNAL_POOL_TOKEN", "VERNAL_RUNNER_BOOTSTRAP_SECRET",
+                 "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "AGENTFLOW_SESSION_SECRET",
+                 "LOOPFORGE_DB_PASSWORD", "LOOPFORGE_DB_ROOT_PASSWORD"):
+        full_env.pop(name, None)
     full_env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     started = time.monotonic()
     proc = await asyncio.create_subprocess_shell(
@@ -121,8 +131,11 @@ async def run_commands(
         if r.exit_code != 0:
             break
     if log_path:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(
-            "\n\n".join(f"$ {r.cmd}\n[exit {r.exit_code}, {r.duration_sec:.1f}s]\n{r.output}" for r in results), "utf-8"
-        )
+        write_command_log(log_path, results)
     return results
+
+
+def write_command_log(path: Path, results: list[CmdResult]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n\n".join(
+        f"$ {r.cmd}\n[exit {r.exit_code}, {r.duration_sec:.1f}s]\n{r.output}" for r in results), "utf-8")

@@ -2,7 +2,9 @@
 set -u
 cd "$(dirname "$0")"
 port="${1:-8787}"
+caller_ci="${VERNAL_ENABLE_CI:-}"
 [[ ! -f .env ]] || source .env
+[[ -z "$caller_ci" ]] || VERNAL_ENABLE_CI="$caller_ci"
 bad=0
 if docker info >/dev/null 2>&1; then
   echo "Docker 已连接"
@@ -12,7 +14,19 @@ if docker info >/dev/null 2>&1; then
     echo "$svc ${status:-未运行}"
     [[ "$status" == healthy || "$status" == running ]] || bad=1
   done
-  docker run --rm --network none --entrypoint sh "${VERNAL_SANDBOX_IMAGE:-autodev-runtime-sandbox:latest}" -ec 'dsh --version && opencode --version' || bad=1
+  if [[ "${VERNAL_ENABLE_CI:-0}" == "1" ]]; then
+    if [[ -s .runner/pool/act-runner-token ]]; then
+      echo "act-runner-token 已就绪"
+    else
+      echo "act-runner-token 缺失"
+      bad=1
+    fi
+    ci_id="$(docker compose --profile ci ps -q gitea-runner)"
+    ci_st="$(docker inspect -f '{{.State.Status}}' "$ci_id" 2>/dev/null)"
+    echo "gitea-runner ${ci_st:-未运行}"
+    [[ "$ci_st" == running ]] || bad=1
+  fi
+  docker run --rm --network none "${VERNAL_SANDBOX_IMAGE:-autodev-runtime-sandbox:latest}" sh -ec 'dsh --version && opencode --version && vernal-quality --help >/dev/null' || bad=1
 else echo "Docker 守护进程无法访问"; bad=1; fi
 url="http://127.0.0.1:$port/vernal-api"
 curl -fsS -m 4 "$url/runtime/public-pool?format=doctor" || bad=1

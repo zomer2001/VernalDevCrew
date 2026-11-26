@@ -1,0 +1,36 @@
+{
+  "web/index.html": {
+    "sha256": "7f5596d7d75351938e5a77b4212ce6b969c4c644a666a3def3b785b1e3e8b708",
+    "markers": [
+      "id=\"platformRail\"",
+      "<nav class=\"rail-nav\">",
+      "id=\"runsDetailSection\"",
+      "id=\"runDetail\"",
+      "id=\"issueDetailTabs\"",
+      "id=\"projectSwitcher\"",
+      "<main>"
+    ]
+  },
+  "web/app/issue-drawer.js": {
+    "sha256": "4cdca56a60dec96936ba8581b2109603d5d3ed34aca66ef9ba22735615e9d0f4",
+    "markers": [
+      "state.issueDetailData={issue,comments,run,task,requirement,deletionTask}"
+    ]
+  },
+  "web/app/runs.js": {
+    "sha256": "0aafb8ed117b7dae04a0555c8148b2a9bf007aca8080ab02ae35b2cf6effa84b",
+    "markers": [
+      "host.dataset.runId=r.id;"
+    ]
+  },
+  "docs/api/openapi.yaml": {
+    "sha256": "43a269dfeb8817df614486f93e0812e4626b3068f06dd852124395988eb86f1e",
+    "markers": [
+      "  /api/tasks:",
+      "  /api/tasks/{taskId}:",
+      "  /api/issues/{issueId}/runs:",
+      "description: Task created",
+      "required: [id, issueId, workflowId, status]"
+    ]
+  }
+}

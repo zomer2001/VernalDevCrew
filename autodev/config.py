@@ -103,7 +103,7 @@ codebuddy_bin = ""             # 留空自动探测腾讯 CodeBuddy CLI
 dsh_bin = ""                   # 留空自动探测 DeepSeek Harness (dsh) CLI
 claude_bin = ""                # 留空自动探测 Claude Code CLI
 
-model = "gpt-6.2-sol"          # 全局默认模型
+model = ""                     # 全局默认模型（留空自动跟随所选 CLI / 执行池默认模型）
 pm_model = ""                  # 各角色独立模型覆盖（留空沿用 model）
 director_model = ""
 planner_model = ""
@@ -129,6 +129,8 @@ require_merge_approval = false
 
 [runtime]
 execution_pool = "auto"
+native_executor_user_id = 0
+native_approver_user_id = 0
 collaboration_mode = "git"     # files（文件产物）或 git（版本库协作）
 runtime_backend = "loopforge"  # loopforge（基于 LoopForge SOP/沙箱运行，默认）| local（离线 worktree 调试）
 loopforge_url = "http://127.0.0.1:8090"
@@ -176,7 +178,7 @@ class Settings:
     codebuddy_bin: str = ""
     dsh_bin: str = ""
     claude_bin: str = ""
-    model: str = "gpt-6.2-sol"
+    model: str = ""
     pm_model: str = ""
     director_model: str = ""
     planner_model: str = ""
@@ -187,7 +189,7 @@ class Settings:
     agent_network_access: bool = False
     bootstrap_network_access: bool = True
     agent_timeout_sec: int = 1800
-    # scheduler
+    # scheduler & standardized pipeline
     planning_mode: str = "classic"
     enable_council: bool = False
     enable_pm_spec: bool = True
@@ -197,6 +199,21 @@ class Settings:
     verify_timeout_sec: int = 300
     require_plan_approval: bool = True
     require_merge_approval: bool = False
+    process_template: str = "legacy"
+    review_policy: str = "off"
+    review_risk_lines: int = 400
+    review_required_paths: list[str] = field(default_factory=list)
+    doc_profile: str = "default"
+    ci_provider: str = "none"
+    ci_url: str = ""
+    ci_git_remote: str = ""
+    ci_timeout_sec: int = 1800
+    ci_max_fix_rounds: int = 3
+    deploy_cmd: str = ""
+    data_classification: str = "public"
+    native_executor_user_id: int = 0
+    native_approver_user_id: int = 0
+    token_budget_limit: int = 0
     # runtime (LoopForge + Gitea)
     collaboration_mode: str = "git"
     selected_pool: str = field(default="", init=False, repr=False)
@@ -227,20 +244,29 @@ class Settings:
             data = tomllib.loads(path.read_text("utf-8"))
         except tomllib.TOMLDecodeError as exc:
             raise ConfigError(f"配置文件解析失败 {path}: {exc}") from exc
+        known = {f.name for f in fields(cls) if f.init}
+        managed_sections = {"agent", "scheduler", "runtime", "git", "ingest", "review", "docs", "ci"}
         flat: dict[str, object] = {}
         for key, value in data.items():
-            if key == "env":
-                flat["env"] = {str(k): str(v) for k, v in dict(value).items()}
-            elif isinstance(value, dict):
-                flat.update(value)
-            else:
+            if key == "env" and isinstance(value, dict):
+                flat["env"] = {str(k): str(v) for k, v in value.items()}
+            elif key in managed_sections and isinstance(value, dict):
+                for sk, sv in value.items():
+                    if sk in known and not isinstance(sv, dict):
+                        flat[sk] = sv
+            elif not isinstance(value, dict) and key in known:
                 flat[key] = value
-        known = {f.name for f in fields(cls) if f.init}
-        unknown = sorted(set(flat) - known)
-        if unknown:
-            raise ConfigError(f"未知配置项: {', '.join(unknown)}")
         for key, value in flat.items():
             setattr(settings, key, value)
+        from autodev.security import load_workspace_credentials
+        credentials = load_workspace_credentials(path.parent)
+        # Older releases persisted browser tokens under this name. Their origin
+        # cannot be established, so only the old HMAC verifier may read them.
+        settings.legacy_verification_token = settings.loopforge_token.strip() or credentials.get("loopforge_token", "")
+        settings.loopforge_token = credentials.get("loopforge_service_token", "")
+        settings.signing_secret = credentials.get("signing_secret", "")
+        settings.legacy_signing_fingerprint = credentials.get("legacy_signing_fingerprint", "")
+        settings.legacy_signing_until = float(credentials.get("legacy_signing_until", "0"))
         if os.environ.get("VERNAL_LOOPFORGE_URL", "").strip():
             settings.loopforge_url = os.environ["VERNAL_LOOPFORGE_URL"].strip()
         elif not Path("/.dockerenv").exists() and settings.loopforge_url.rstrip("/") == "http://loopforge:8080":
@@ -309,8 +335,6 @@ class Settings:
                 pool = public_pool.status()
                 reasoning = role in ("pm", "director", "architect", "planner", "qa_lead")
                 name = (pool["reasoning_model"] if reasoning else "") or pool["default_model"]
-                if h == "opencode" and name and "/" not in name:
-                    return ("deepseek/" if pool["deepseek_key_configured"] else "openai/") + name
                 return name
             if h == "dsh":
                 return "deepseek-reasoner" if role in ("pm", "director", "architect", "planner") else "deepseek-chat"
@@ -323,10 +347,35 @@ class Settings:
         session = EXECUTION_IDENTITY.get()
         if session and session[0] == self.loopforge_url.rstrip("/"):
             return session[1]
-        return self.project_signing_key()
+        return self.service_token()
+
+    signing_secret: str = field(default="", init=False, repr=False)
+    legacy_signing_until: float = field(default=0, init=False, repr=False)
+    legacy_signing_fingerprint: str = field(default="", init=False, repr=False)
+    legacy_verification_token: str = field(default="", init=False, repr=False)
 
     def project_signing_key(self) -> str:
-        return self.loopforge_token.strip() or os.environ.get("AGENTFLOW_TOKEN", "").strip()
+        return self.signing_secret
+
+    def verification_keys(self) -> tuple[str, ...]:
+        import time
+        keys = [self.signing_secret]
+        if self.legacy_signing_fingerprint and time.time() < self.legacy_signing_until:
+            import hashlib
+            previous = self.legacy_verification_token or self.service_token()
+            if hashlib.sha256(previous.encode()).hexdigest() == self.legacy_signing_fingerprint:
+                keys.append(previous)
+        return tuple(key for key in keys if key)
+
+    def service_token(self) -> str:
+        token = self.loopforge_token.strip() or os.environ.get("AGENTFLOW_TOKEN", "").strip()
+        if token:
+            return token
+        key = Path(os.environ.get("VERNAL_SERVICE_TOKEN_FILE") or
+                   Path(__file__).resolve().parents[1] / "deploy/loopforge/.runner/deployment.token")
+        if key.is_file() and not key.is_symlink() and key.stat().st_mode & 0o077 == 0:
+            return key.read_text().strip()
+        return ""
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,7 @@
 # Vernal 平台资产扩充与演进路线备忘录
 
+> **2026-11 更新**：标准化流水线能力补齐见 [CODEX_PIPELINE_PLATFORM_SPEC.md](CODEX_PIPELINE_PLATFORM_SPEC.md)，远景（入口交互、设计系统、前后端架构、开源借鉴）见 [ROADMAP_V2.md](ROADMAP_V2.md)。本文档保留为资产清单备忘。
+
 > 本文档整理了 Vernal 下一步可引入的 **GitHub 热门开源 Skill / MCP 插件**、**公网开源研发 SOP 复用方案**、**平台待完善能力清单（P0～P3）**，以及在麒麟系统上接入 **`CodeBuddy`** 与 **`DeepSeek Harness (dsh)`** 的具体适配位置，供后续按需自行扩展。
 
 ---

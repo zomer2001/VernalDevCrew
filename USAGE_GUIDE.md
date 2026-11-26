@@ -159,3 +159,17 @@ Git 项目上传当前 HEAD，每次交付写入新的归档分支。以 M1 为�
 普通目录的初始快照支持二进制文件，总量上限为 200 MiB。此后每次交付按上版快照写回，同一文件有人为修改时保留本机内容，交付方版本存入 `.vernal/conflicts/`，网页事件栏也会显示冲突。中断后在同一目录运行 `vernal link https://你的网关地址` 可继续同步。
 
 选择个人执行池时，Windows 可直接使用本机已登录的 Codex 或 Claude CLI。macOS 和 Linux 可在签发配对码时勾选绑定官方 Runner。只需收取交付时，在命令后加 `--no-worker`。
+
+---
+
+## 七、标准化研发流水线、人工审查与 CI 安全提示
+
+1. **切换工程流程模板**：在顶部导航进入 **「系统设置」**，可将「工程流程模板」从默认的 `legacy` 切换为 `standard`（标准七阶段全门禁）、`feature`、`bugfix` 或 `doc_reverse`，同时配置人工 Code Review 策略（推荐 `risk`）与文档规范体系（`default` 或 `gbt8567`）。
+2. **规范文档修订与 Word 导出**：在 **「架构与设计」** 页下方的「规范化研发文档中心」可在线修订 `SRS.md`、`ARCHITECTURE.md`、`docs/design/<模块>.md`，对比历史版本差异，或一键导出符合实验室归档要求的 `.docx` / `.zip` 文档包。
+3. **人工 Code Review 工作台**：当任务触发人工复核时，进入 **「审查与交付」** 页即可并排或统一查看代码 Diff（支持 `j` / `k` 快捷键切换文件），点击行号添加 `blocker / major / minor / nit` 评论；点击「要求修改」会自动将全部未解决评论编译为结构化返工单交由智能体修复。
+4. **启用 Gitea Actions CI Runner 及安全边界提示**：
+   - 执行 `./vernal.sh --enable-ci`（或在 `deploy/loopforge/.env` 设置 `VERNAL_ENABLE_CI=1`）时，安装脚本会幂等生成 `0600` 权限的 `deploy/loopforge/.runner/pool/act-runner-token` 并自动启动 `gitea-runner`，同时将无第三方依赖的 `vernal-quality` 打入 `autodev-runtime-sandbox` 镜像；执行 `VERNAL_ENABLE_CI=1 ./vernal.sh --pack` 可将包含 `gitea/act_runner` 在内的 6 个镜像打成断网离线包。
+   - **安全提示**：挂载 `docker.sock` 意味着 CI Runner 具备控制宿主机 Docker 守护进程的能力，**请仅在受信任的内网研发主机上启用 `gitea-runner`**，切勿向不可信公网直接暴露 Gitea 写权限。
+5. **受控持续部署（CD）边界**：`POST /vernal-api/deployments` 严禁从客户端请求体直接执行任意 shell 命令；部署命令仅从受控工作区模板（`.autodev/process.yaml` 的 `deliver.targets.<target>.deploy_cmd`）或 `.autodev/config.toml` 的 `deploy_cmd` 读取，并强制校验目标里程碑 `version_no` 已真实交付以及操作者（`actor`）权限。
+6. **存量代码库理解与需求双向追溯（WP-5 / WP-6）**：在 **「架构与设计」** 页可一键生成 `docs/wiki/` 模块百科与逆向 `docs/ARCHITECTURE.md` 初稿、向代码库只读提问（Personalized PageRank + 源码行引用），并查看/导出 `REQ -> 详细设计 -> 任务 -> 测试用例` 双向追溯矩阵（测试使用 `@pytest.mark.req("REQ-001")` 标记；开启 `trace_coverage` 门禁后未覆盖的 P0 需求将阻断合入）。
+7. **效能度量、防篡改审计与内网模型网关（WP-7）**：在 **「系统设置」** 页可查看 AI 一次通过率、平均返工轮次、CI 通过率与 Token 折算成本，验证 `workspaces/.vernal-platform.db` 的 SHA-256 防篡改审计哈希链，配置 `admin / architect / developer / reviewer / viewer` 角色与职责分离（禁止自改自审），并将涉密项目设为 `data_classification = "internal"` 以自动阻断向公网模型端点发起调用。

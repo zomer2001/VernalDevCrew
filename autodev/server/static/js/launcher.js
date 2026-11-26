@@ -4,7 +4,7 @@ const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv
 const TEXT_EXTS = new Set([
   ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".json", ".md", ".txt", ".html", ".css", ".scss",
   ".yml", ".yaml", ".toml", ".ini", ".cfg", ".sh", ".bash", ".zsh", ".go", ".rs", ".java", ".kt", ".c",
-  ".h", ".cpp", ".hpp", ".sql", ".xml", ".svg", ".env", ".gitignore", ".dockerfile", ".vue", ".svelte",
+  ".h", ".cpp", ".hpp", ".sql", ".xml", ".svg", ".env", ".gitignore", ".dockerfile", ".vue", ".svelte", ".proto",
 ]);
 
 function isTextFile(name) {
@@ -27,15 +27,66 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
   if (!panel) return { open: () => {}, close: () => {}, syncAutoOpen: () => {} };
 
   let activeMode = "scratch";
-  let localSubMode = "host"; // host | browser
+  let bindingProject = "";
+  const bindingFields = () => bindingProject ? { project_id: bindingProject, bind_existing: true } : {};
+  let localSubMode = "host";
   let currentHostPath = "";
   let selectedHostPath = "";
-  let dismissedProjects = new Set();
+  let selectedRoute = { pool: "public_docker", harness: "dsh" };
+  const dismissedProjects = new Set();
   let pendingScratchDocs = [];
   let pendingImportFiles = [];
 
+  function updateRouteSummary() {
+    const meta = $("launch-route-live-meta");
+    if (!meta) return;
+    const st = window.__vernalLastState || null;
+    const rs = st?.runner_summary || {};
+    const pub = rs.pools?.public_docker || {};
+    const localHosts = (rs.pools?.local_runner?.runner_names || rs.runner_names || []).filter(Boolean);
+    const pubModel = pub.default_model || "deepseek-flash";
+    if (selectedRoute.pool === "public_docker") {
+      const hName = selectedRoute.harness === "opencode" ? "OpenCode" : "DeepSeek Harness (dsh)";
+      meta.textContent = `生效机器：公用 Docker 沙箱 · 执行器：${hName} · 模型：${pubModel}（公用池额度）`;
+    } else if (selectedRoute.pool === "local_runner") {
+      meta.textContent = `生效机器：${localHosts.length ? localHosts.join("、") : "本机 Runner"} · 执行器：Codex（本机登录态）`;
+    } else {
+      meta.textContent = `智能自动：优先本机（${localHosts.join("、") || "检测中"}），离线时回退公用沙箱（${pubModel}）`;
+    }
+  }
+
+  function setRoute(pool, harness) {
+    selectedRoute = { pool: pool || "auto", harness: harness || "auto" };
+    $("launch-route-picker")?.querySelectorAll("[data-route-pool]").forEach((btn) => {
+      const on = btn.dataset.routePool === selectedRoute.pool && btn.dataset.routeHarness === selectedRoute.harness;
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-checked", on ? "true" : "false");
+    });
+    updateRouteSummary();
+  }
+
+  function setScratchCollab(val) {
+    const mode = val === "git" ? "git" : "files";
+    if ($("launch-scratch-collab")) $("launch-scratch-collab").value = mode;
+    $("launch-scratch-collab-seg")?.querySelectorAll("[data-collab-val]").forEach((btn) => {
+      const on = btn.dataset.collabVal === mode;
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-checked", on ? "true" : "false");
+    });
+  }
+
+  $("launch-route-picker")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-route-pool]");
+    if (btn) setRoute(btn.dataset.routePool, btn.dataset.routeHarness);
+  });
+  $("launch-scratch-collab-seg")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-collab-val]");
+    if (btn) setScratchCollab(btn.dataset.collabVal);
+  });
+
   function setMode(mode) {
     activeMode = mode;
+    clearLaunchError();
     panel.querySelectorAll("[data-launch-mode]").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.launchMode === mode);
     });
@@ -68,14 +119,16 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
   $("link-create-code")?.addEventListener("click", async () => {
     try {
       const pair = await api("/vernal-api/link/create-code", {
-        method: "POST", body: JSON.stringify({native_runner: !!runnerOption?.checked})
+        method: "POST",
+        body: JSON.stringify({ native_runner: !!runnerOption?.checked }),
       });
-      $("link-command").textContent = `python -m autodev.cli link "${location.origin}" --code ${pair.code} --dir "."`;
-    } catch (err) { toast(err.message); }
+      $("link-command").textContent = `vernal link "${location.origin}" --code ${pair.code} --dir "."`;
+    } catch (err) {
+      toast(err.message);
+    }
   });
 
   function setDisplayMode(kind) {
-    // kind: "modal"（浮层居中弹窗，点击「＋ 新建 / 接管项目」打开）| "hero"（空白项目居中引导卡）
     panel.classList.toggle("is-modal", kind === "modal");
     panel.classList.toggle("is-hero", kind === "hero");
     const stage = document.getElementById("vernalStage");
@@ -83,15 +136,17 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
   }
 
   function open(mode, kind = "modal") {
-    if ($("agent-config-form")) $("agent-config-form").hidden = true;
+    clearLaunchError();
     if ($("wish-form")) $("wish-form").hidden = true;
     panel.hidden = false;
     setDisplayMode(kind);
-    if (mode) setMode(mode);
-    else setMode(activeMode);
+    updateRouteSummary();
+    setMode(mode || activeMode);
   }
 
   function close(projectKey = "") {
+    bindingProject = "";
+    clearLaunchError();
     panel.hidden = true;
     panel.classList.remove("is-modal", "is-hero");
     const stage = document.getElementById("vernalStage");
@@ -103,21 +158,21 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
     const listEl = $("host-dir-list");
     const statusEl = $("host-dir-status");
     const pathInput = $("launch-local-path");
-    if (statusEl) statusEl.textContent = "正在扫描宿主机目录…";
+    if (statusEl) statusEl.textContent = "正在读取授权目录…";
     try {
       const q = targetPath ? `?path=${encodeURIComponent(targetPath)}` : "";
       const data = await api(`/vernal-api/host/dirs${q}`);
       if (!data.available) {
-        if (statusEl) statusEl.textContent = data.note || "宿主机目录未挂载，已自动切换为浏览器导入文件夹";
-        if (listEl) listEl.innerHTML = `<div class="muted" style="padding:12px">未检测到挂载目录，可切换到上方「浏览器导入文件夹」。</div>`;
+        if (statusEl) statusEl.textContent = data.note || "未挂载宿主机目录，请切换到「浏览器上传文件夹」";
+        if (listEl) listEl.innerHTML = `<div class="empty-hint">未检测到挂载目录，可切换到上方「浏览器上传文件夹」。</div>`;
         return;
       }
       currentHostPath = data.current;
       if (!selectedHostPath) selectedHostPath = data.current;
       if (pathInput && !pathInput._edited) pathInput.value = selectedHostPath;
-      const branchHint = data.current_is_git ? ` · Git 分支 ${data.current_git_branch || "HEAD"}` : "";
+      const branchHint = data.current_is_git ? ` · 分支 ${data.current_git_branch || "HEAD"}` : "";
       if (statusEl) {
-        statusEl.textContent = `当前浏览：${data.current}${branchHint}（已授权根目录：${data.display_root}；如需接管其他宿主机目录，请用 ./vernal.sh --mount ~/你的代码目录。超过 4 MiB 的源码自动使用 Git 分支交付）`;
+        statusEl.textContent = `当前路径：${data.current}${branchHint}（授权根目录：${data.display_root}）`;
       }
       const upBtn = $("btn-host-dir-up");
       if (upBtn) {
@@ -126,21 +181,22 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
       }
       if (!listEl) return;
       if (!data.entries.length) {
-        listEl.innerHTML = `<div class="muted" style="padding:10px">该目录下没有子文件夹，可直接点击「选定当前目录」原地接管。</div>`;
+        listEl.innerHTML = `<div class="empty-hint">无子目录，可点击上方「选定当前」直接接入该目录。</div>`;
         return;
       }
       listEl.innerHTML = data.entries
         .map((ent) => {
           const isSel = selectedHostPath === ent.path;
           const badges = [
-            ent.is_git ? `<span class="tag ok">Git${ent.git_branch ? " · " + esc(ent.git_branch) : ""}</span>` : "",
-            ent.has_autodev ? `<span class="tag">已接管</span>` : "",
+            ent.is_git ? `<span class="tag ok">Git${ent.git_branch ? " · " + esc(ent.git_branch) : ""}</span>` : `<span class="tag">目录</span>`,
+            ent.has_autodev ? `<span class="tag">已接入</span>` : "",
             ent.has_readme ? `<span class="tag">README</span>` : "",
-          ].filter(Boolean).join("");
+          ]
+            .filter(Boolean)
+            .join("");
           return `
             <div class="host-dir-row ${isSel ? "selected" : ""}" data-dir-path="${esc(ent.path)}" data-dir-name="${esc(ent.name)}" data-dir-branch="${esc(ent.git_branch || "")}">
               <div class="host-dir-main">
-                <span class="host-dir-icon">${ent.is_git ? "🌿" : "📁"}</span>
                 <strong class="host-dir-name">${esc(ent.name)}</strong>
                 <div class="host-dir-badges">${badges}</div>
               </div>
@@ -191,7 +247,7 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
     }
     const selHint = $("launch-local-selected-hint");
     if (selHint) {
-      selHint.textContent = `已选定：${fullPath}${branch ? "（Git 分支：" + branch + "）" : ""}`;
+      selHint.textContent = `已选定：${fullPath}${branch ? "（分支：" + branch + "）" : ""}`;
     }
     panel.querySelectorAll(".host-dir-row").forEach((r) => {
       r.classList.toggle("selected", r.dataset.dirPath === fullPath);
@@ -205,19 +261,19 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
       const st = await api("/vernal-api/runtime/status");
       const repos = st.repositories || [];
       if (!repos.length) {
-        // 尝试从 LoopForge 原生 API 直接读取已有仓库
-        const raw = await fetch("/api/repositories").then((r) => (r.ok ? r.json() : [])).catch(() => []);
+        const raw = await fetch("/api/repositories")
+          .then((r) => (r.ok ? r.json() : []))
+          .catch(() => []);
         populateRepoSelect(sel, Array.isArray(raw) ? raw : []);
       } else {
         populateRepoSelect(sel, repos);
       }
-    } catch {
-      // ignore when offline
-    }
+    } catch {}
   }
 
   function populateRepoSelect(sel, repos) {
-    sel.innerHTML = `<option value="">-- 可直接从 LoopForge / Gitea 已有仓库选取 --</option>` +
+    sel.innerHTML =
+      `<option value="">-- 从平台已登记仓库快速填充 --</option>` +
       repos
         .filter((r) => r && (r.cloneUrl || r.repoUrl || r.url))
         .map((r) => {
@@ -228,16 +284,53 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
         .join("");
   }
 
+  function clearLaunchError() {
+    panel.querySelectorAll("[data-launch-error], [data-resume-binding]").forEach((el) => el.remove());
+  }
+
+  function launchError(error, label, submit) {
+    const text = label + "：" + error.message;
+    toast(text);
+    clearLaunchError();
+    const foot = submit?.closest(".launcher-foot");
+    if (foot) {
+      const box = document.createElement("div");
+      box.className = "launcher-error";
+      box.dataset.launchError = "1";
+      box.setAttribute("role", "alert");
+      box.textContent = text;
+      foot.before(box);
+    }
+    const info = error.detail;
+    if (info?.bind_state !== "PENDING_UPSTREAM" || !info.project_id || !submit) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn btn-sm";
+    button.dataset.resumeBinding = info.project_id;
+    button.textContent = "重试绑定";
+    submit.after(button);
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        const res = await api("/vernal-api/project/resume", {
+          method: "POST", body: JSON.stringify({ project_id: info.project_id }),
+        });
+        await finishLaunch(res);
+      } catch (err) { launchError(err, "重试绑定失败", submit); }
+      finally { button.disabled = false; }
+    });
+  }
+
   async function finishLaunch(res) {
     setActiveProjectId(res.project_id);
     dismissedProjects.add(res.project_id);
     panel._manualOpen = false;
     close(res.project_id);
     toast(
-      `项目「${res.name}」已就绪`
-      + (res.branch && res.collaboration_mode === "git" ? `（Git · ${res.branch}）` : "")
-      + (res.delivery_branch_prefix ? ` · 交付分支 ${res.delivery_branch_prefix}<里程碑>` : "")
-      + (res.council_started ? " · 已自动启动架构圆桌" : "")
+      `项目「${res.name}」已就绪` +
+        (res.branch && res.collaboration_mode === "git" ? `（Git · ${res.branch}）` : "") +
+        (res.delivery_branch_prefix ? ` · 交付分支 ${res.delivery_branch_prefix}<里程碑>` : "") +
+        (res.council_started ? " · 已启动架构评审" : "")
     );
     if (typeof window.vernalSwitchProject === "function") {
       await window.vernalSwitchProject(res.project_id, res.name, { skipSelectApi: true });
@@ -247,14 +340,13 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
     if (res.needs_wish && $("wish-form")) {
       $("wish-form").hidden = false;
       $("wish-content")?.focus();
-      toast("空目录已接入，请填写第一条需求");
+      toast("空目录已接入，请录入初始需求规格");
     }
     if (res.council_started && onSwitchView) {
       onSwitchView("council");
     }
   }
 
-  // Tab switching
   panel.querySelectorAll("[data-launch-mode]").forEach((btn) => {
     btn.addEventListener("click", () => setMode(btn.dataset.launchMode));
   });
@@ -278,7 +370,6 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
     }
   });
 
-  // Host dir controls
   $("btn-host-dir-up")?.addEventListener("click", (e) => {
     const p = e.currentTarget.dataset.parentPath;
     if (p) loadHostDirs(p);
@@ -300,24 +391,23 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
     e.target._touched = true;
   });
 
-  // Scratch docs attachment
   $("launch-scratch-docs")?.addEventListener("change", async (e) => {
     pendingScratchDocs = [];
     const files = Array.from(e.target.files || []);
     for (const f of files.slice(0, 12)) {
-      if (f.size > 512 * 1024) continue;
+      if (f.size > 1024 * 1024) continue;
+      if (/\.(pdf|docx)$/i.test(f.name)) continue;
       const content = await f.text();
       pendingScratchDocs.push({ filename: f.name, content });
     }
     const hint = $("launch-scratch-docs-hint");
     if (hint) {
       hint.textContent = pendingScratchDocs.length
-        ? `已附带 ${pendingScratchDocs.length} 份文档：${pendingScratchDocs.map((d) => d.filename).join("、")}`
-        : "支持附带 .md / .txt 需求或架构文档";
+        ? `已附加 ${pendingScratchDocs.length} 份文档：${pendingScratchDocs.map((d) => d.filename).join("、")}`
+        : "支持附加 .md / .txt / .yaml / .proto 文本规格文档（PDF/DOCX 可放入工作区 inputs/ 摄入）";
     }
   });
 
-  // Browser folder upload (webkitdirectory fallback)
   $("launch-browser-folder")?.addEventListener("change", async (e) => {
     pendingImportFiles = [];
     const files = Array.from(e.target.files || []);
@@ -346,12 +436,11 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
     const hint = $("launch-browser-folder-hint");
     if (hint) {
       hint.textContent = pendingImportFiles.length
-        ? `已选中 ${pendingImportFiles.length} 个文本源码文件（已自动跳过 ${skipped} 个依赖/二进制文件）`
-        : "未读取到可导入的文本源码文件";
+        ? `已读取 ${pendingImportFiles.length} 个源码文件（跳过 ${skipped} 个依赖或二进制文件）`
+        : "未读取到有效文本源码文件";
     }
   });
 
-  // Existing LoopForge repo quick-fill
   $("launch-git-existing")?.addEventListener("change", (e) => {
     const opt = e.target.selectedOptions?.[0];
     if (!opt || !opt.value) return;
@@ -362,20 +451,27 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
     }
   });
 
-  // Submit: 1. From scratch
   $("form-launch-scratch")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const btn = $("btn-submit-scratch");
-    if (btn) btn.disabled = true;
+    const origTxt = btn?.textContent || "创建项目并开始";
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "正在初始化工作区与流水线…";
+    }
     try {
       const res = await api("/vernal-api/project/create", {
         method: "POST",
         body: JSON.stringify({
+          ...bindingFields(),
           mode: "scratch",
           name: $("launch-scratch-name").value.trim(),
           wish: $("launch-scratch-wish").value.trim(),
           docs: pendingScratchDocs,
           collaboration_mode: $("launch-scratch-collab")?.value || "files",
+          process_template: $("launch-scratch-template")?.value || "",
+          execution_pool: selectedRoute.pool,
+          harness: selectedRoute.harness,
           start_council: Boolean($("launch-scratch-autostart")?.checked),
           actor: actorName(),
         }),
@@ -383,43 +479,54 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
       pendingScratchDocs = [];
       await finishLaunch(res);
     } catch (err) {
-      toast(`创建项目失败：${err.message}`);
+      launchError(err, "创建项目失败", btn);
     } finally {
-      if (btn) btn.disabled = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = origTxt;
+      }
     }
   });
 
-  // Submit: 2a. Local host folder in-place takeover
   $("form-launch-local-host")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const localPath = ($("launch-local-path")?.value || selectedHostPath || "").trim();
     if (!localPath) {
-      toast("请先点选或填写本机项目目录");
+      toast("请先选择或填写本机项目目录");
       return;
     }
     const btn = $("btn-submit-local-host");
-    if (btn) btn.disabled = true;
+    const origTxt = btn?.textContent || "接入该目录";
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "正在扫描代码库并建立隔离副本…";
+    }
     try {
       const res = await api("/vernal-api/project/create", {
         method: "POST",
         body: JSON.stringify({
+          ...bindingFields(),
           mode: "local_folder",
           name: $("launch-local-name")?.value?.trim() || "",
           local_path: localPath,
           wish: $("launch-local-wish")?.value?.trim() || "",
+          execution_pool: selectedRoute.pool,
+          harness: selectedRoute.harness,
           start_council: Boolean($("launch-local-autostart")?.checked),
           actor: actorName(),
         }),
       });
       await finishLaunch(res);
     } catch (err) {
-      toast(`接入目录失败：${err.message}`);
+      launchError(err, "接入目录失败", btn);
     } finally {
-      if (btn) btn.disabled = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = origTxt;
+      }
     }
   });
 
-  // Submit: 2b. Browser folder upload fallback
   $("form-launch-local-browser")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (!pendingImportFiles.length) {
@@ -427,14 +534,21 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
       return;
     }
     const btn = $("btn-submit-local-browser");
-    if (btn) btn.disabled = true;
+    const origTxt = btn?.textContent || "导入文件夹并创建";
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = `正在上传 ${pendingImportFiles.length} 个源码文件…`;
+    }
     try {
       const res = await api("/vernal-api/project/import-folder", {
         method: "POST",
         body: JSON.stringify({
+          ...bindingFields(),
           name: $("launch-browser-name")?.value?.trim() || "导入项目",
           wish: $("launch-browser-wish")?.value?.trim() || "",
           files: pendingImportFiles,
+          execution_pool: selectedRoute.pool,
+          harness: selectedRoute.harness,
           start_council: Boolean($("launch-browser-autostart")?.checked),
           actor: actorName(),
         }),
@@ -442,13 +556,15 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
       pendingImportFiles = [];
       await finishLaunch(res);
     } catch (err) {
-      toast(`导入文件夹失败：${err.message}`);
+      launchError(err, "导入文件夹失败", btn);
     } finally {
-      if (btn) btn.disabled = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = origTxt;
+      }
     }
   });
 
-  // Submit: 3. Git repo + branch
   $("form-launch-git")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const gitUrl = $("launch-git-url")?.value?.trim() || "";
@@ -457,11 +573,16 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
       return;
     }
     const btn = $("btn-submit-git");
-    if (btn) btn.disabled = true;
+    const origTxt = btn?.textContent || "克隆并接入仓库";
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "正在克隆远端仓库并装配资产…";
+    }
     try {
       const res = await api("/vernal-api/project/create", {
         method: "POST",
         body: JSON.stringify({
+          ...bindingFields(),
           mode: "git_repo",
           name: $("launch-git-name")?.value?.trim() || "",
           git_url: gitUrl,
@@ -469,16 +590,21 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
           git_token: $("launch-git-token")?.value?.trim() || "",
           branch: $("launch-git-branch")?.value?.trim() || "",
           wish: $("launch-git-wish")?.value?.trim() || "",
+          execution_pool: selectedRoute.pool,
+          harness: selectedRoute.harness,
           start_council: Boolean($("launch-git-autostart")?.checked),
           actor: actorName(),
         }),
       });
       await finishLaunch(res);
     } catch (err) {
-      toast(`接入 Git 仓库失败：${err.message}`);
+      launchError(err, "接入 Git 仓库失败", btn);
     } finally {
       if ($("launch-git-token")) $("launch-git-token").value = "";
-      if (btn) btn.disabled = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = origTxt;
+      }
     }
   });
 
@@ -486,11 +612,12 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
     if (!state) return;
     const pkey = state.settings?.loopforge_project_id || state.name || "default";
     window.__vernalCurrentProjectKey = pkey;
+    const sliceCnt = state.slices ?? state.slices_count ?? 0;
     const isFreshEmpty =
       state.status === "CREATED" &&
       !(state.tasks || []).length &&
       !(state.council_count > 0) &&
-      !(state.slices_count > 0) &&
+      !(sliceCnt > 0) &&
       !state.planning;
     if (isFreshEmpty && !dismissedProjects.has(pkey)) {
       if (panel.hidden) open(activeMode, "hero");
@@ -500,7 +627,8 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
   }
 
   return {
-    open(mode) {
+    open(mode, projectId = "") {
+      bindingProject = projectId;
       panel._manualOpen = true;
       open(mode, "modal");
     },

@@ -53,6 +53,12 @@ def scope_selector(sel: str) -> str | None:
             parts.append(f"{SCOPE}, {SCOPE} *")
         elif s.startswith("body "):
             parts.append(f"{SCOPE} {s[5:]}")
+        elif s in ('html[data-theme="dark"]', 'html[data-theme="light"]'):
+            parts.append(f"{s} {SCOPE}")
+        elif s.startswith('html[data-theme="dark"] '):
+            parts.append(f'html[data-theme="dark"] {SCOPE} {s[len("html[data-theme=\"dark\"] "):]}')
+        elif s.startswith('html[data-theme="light"] '):
+            parts.append(f'html[data-theme="light"] {SCOPE} {s[len("html[data-theme=\"light\"] "):]}')
         else:
             parts.append(f"{SCOPE} {s}")
     return ", ".join(dict.fromkeys(parts)) if parts else None

@@ -21,10 +21,10 @@ def gateway(tmp_path, monkeypatch):
     engine.settings.loopforge_project_id = "demo"
 
     async def who(self, cookie):
-        return {"user": {"loginName": "alice"}}
+        return {"user": {"id": 1, "loginName": "alice"}}
 
     async def projects(self, cookie):
-        return [{"id": "demo"}]
+        return [{"id": "demo", "ownerId": 1}]
 
     monkeypatch.setattr(LoopForgeClient, "auth_current_with_cookie", who)
     monkeypatch.setattr(LoopForgeClient, "list_projects_with_cookie", projects)
@@ -171,6 +171,29 @@ if (args.includes('workspace-write')) {
         return fields
     monkeypatch.setattr(LoopForgeClient, "create_issue", create)
     monkeypatch.setattr(LoopForgeClient, "update_issue", update)
+    workflows, receipts = {}, {}
+    async def put(_self, workflow):
+        workflows[workflow["id"]] = workflow
+        return workflow
+    async def publish(_self, wid):
+        return workflows[wid]
+    async def dispatch(_self, issue, *, workflow_id):
+        return {"id":"task-"+workflow_id, "issueId":issue, "runId":workflow_id}
+    async def get_run(_self, rid):
+        import re
+        url = re.search(r"urlopen\('([^']+)'", workflows[rid]["nodes"][0]["script"]).group(1)
+        read = await client.get(url)
+        assert read.is_success, read.text
+        if not read.json().get("waiting"):
+            receipts[rid] = read.json()
+        return {"id":rid,"status":"succeeded" if rid in receipts else "running",
+                "executionContext":{"projectId":engine.settings.loopforge_project_id}}
+    async def artifact(_self, run, filename, *, node_id):
+        assert filename == "link-receipt.json" and node_id == "delegate"
+        return json.dumps(receipts[run["id"]])
+    for method, impl in (("put_workflow",put),("publish_workflow",publish),("dispatch_issue",dispatch),
+                         ("get_run",get_run),("named_artifact",artifact)):
+        monkeypatch.setattr(LoopForgeClient,method,impl)
 
     async def scenario():
         async with client:
@@ -193,7 +216,7 @@ if (args.includes('workspace-write')) {
             engine.settings.require_merge_approval = True
             engine.set_status(ProjectStatus.APPROVED)
             async def current_identity(self):
-                return {"user": {"loginName": "alice"}}
+                return {"user": {"id": 1, "loginName": "alice"}}
             monkeypatch.setattr(LoopForgeClient, "auth_current", current_identity)
             owner = {"Cookie": "session=example"}
             started = await client.post("/vernal-api/scheduler/start?watch=false", headers=owner)

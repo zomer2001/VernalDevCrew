@@ -1,10 +1,10 @@
 /* Vernal Precision Engineering Blueprint Overlay
- * 基于 LoopForge 原生前端无侵入改造：
- * 1. 全局设计令牌升级为「精密工程蓝图风」（Cobalt #1d4ed8 + Teal #0d9488 + 点阵图纸质感）
- * 2. 注入左侧 Vernal 品牌栏、三大多智能体架构模块入口与顶栏运行底座状态胶囊
- * 3. 完整保留 LoopForge 所有原生页面（AI 工作台 / 需求列表 / 待我确认 / 统计 / 设置 / 执行机器）
+ * 统一单壳层设计令牌与导航收敛：
+ * 1. 全局浅色/深色双主题设计令牌（Cobalt #1d4ed8 + Teal #0d9488）
+ * 2. 注入 Vernal 五大统一工程模块（流水线总控 / 架构与设计 / 研发看板 / 审查与交付 / 系统设置）
+ * 3. 项目扩展入口与原生导航并列显示
  */
-@import url("/vernal-static/vernal-stage.css?v=20261124v8");
+@import url("/vernal-static/vernal-stage.css?v=20261125v20");
 
 :root,
 html[data-theme="light"] {
@@ -34,18 +34,28 @@ html[data-theme="dark"] {
   --hui-accent: #60a5fa !important;
   --hui-accent-hover: #93c5fd !important;
   --hui-accent-soft: rgba(59, 130, 246, 0.18) !important;
+  --hui-canvas: #0b1120 !important;
+  --hui-soft: #111827 !important;
+  --hui-surface: #131c2e !important;
+  --hui-stage: #0f172a !important;
+  --hui-border: #1e293b !important;
+  --hui-border-soft: #172033 !important;
+  --hui-border-strong: #334155 !important;
+  --hui-text: #f1f5f9 !important;
+  --hui-secondary: #cbd5e1 !important;
+  --hui-muted: #94a3b8 !important;
   --blue: #60a5fa !important;
   --blue-dim: #3b82f6 !important;
   --blue-soft: rgba(96, 165, 250, 0.16) !important;
   --accent-gradient: linear-gradient(135deg, #2563eb 0%, #0d9488 100%) !important;
 }
 
-/* ---------- 登录页改造为 Vernal 工程蓝图风 ---------- */
+/* ---------- 登录页工程蓝图样式 ---------- */
 body.login-page {
   background-color: #f8fafc !important;
   background-image:
-    radial-gradient(rgba(148, 163, 184, 0.38) 1px, transparent 1px),
-    linear-gradient(180deg, rgba(239, 246, 255, 0.65) 0%, rgba(248, 250, 252, 0.9) 100%) !important;
+    radial-gradient(rgba(148, 163, 184, 0.36) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(239, 246, 255, 0.65) 0%, rgba(248, 250, 252, 0.92) 100%) !important;
   background-size: 20px 20px, 100% 100% !important;
 }
 html[data-theme="dark"] body.login-page {
@@ -63,13 +73,15 @@ body.login-page .login-card h1 {
   font-weight: 800;
 }
 
-/* ---------- 全局顶栏与左侧导航栏 Vernal 工程识别带 ---------- */
+/* 隐藏底层镜像右下角 LoopForge 版本角标，统一 Vernal 品牌 */
+.loopforge-build {
+  display: none !important;
+}
+
+/* ---------- 顶栏与左侧统一导航栏 ---------- */
 .shell-main > .topbar {
   position: relative;
-  background: linear-gradient(180deg, rgba(239, 246, 255, 0.42) 0%, var(--hui-surface, #fff) 100%) !important;
-}
-html[data-theme="dark"] .shell-main > .topbar {
-  background: var(--panel, #141417) !important;
+  background: var(--hui-surface, #ffffff) !important;
 }
 .shell-main > .topbar::before {
   content: "";
@@ -77,7 +89,7 @@ html[data-theme="dark"] .shell-main > .topbar {
   top: 0;
   left: 0;
   right: 0;
-  height: 2.5px;
+  height: 2px;
   background: linear-gradient(90deg, #1d4ed8 0%, #0284c7 52%, #0d9488 100%);
   pointer-events: none;
 }
@@ -86,25 +98,39 @@ html[data-theme="dark"] .shell-main > .topbar {
   border-right: 1px solid var(--hui-border, #e2e8f0) !important;
 }
 
-/* 左侧栏顶部 Vernal 品牌徽章（保留原符号样式，文字改为 Vernal） */
 .vernal-rail-brand {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 9px;
+  gap: 8px;
   width: 100%;
   padding: 10px 6px 8px;
   margin-bottom: 4px;
   border: 0;
-  border-bottom: 1px dashed var(--hui-border, #e2e8f0);
+  border-bottom: 1px solid var(--hui-border, #e2e8f0);
   background: transparent;
   color: var(--hui-text, #0f172a);
-  cursor: pointer;
+  cursor: default;
+  user-select: none;
+  pointer-events: none;
   font: inherit;
 }
 .vernal-rail-brand svg {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+}
+.vernal-brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 24px;
   height: 24px;
+  border-radius: 7px;
+  background: var(--accent-gradient, linear-gradient(135deg, #1d4ed8, #0d9488));
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
   flex-shrink: 0;
 }
 #platformRail {
@@ -115,40 +141,48 @@ html[data-theme="dark"] .shell-main > .topbar {
   flex-direction: column;
   gap: 3px;
 }
-.vernal-brand-name { font-size: 11px; line-height: 1.2; white-space: nowrap; }
-#platformRail .rail-nav .vernal-nav {
+.vernal-brand-name { font-size: 11px; line-height: 1.2; white-space: nowrap; font-weight: 700; }
+
+/* 左侧全部图标（含原生导航与底部按钮）统一显示图标 + 中文短名称 */
+#platformRail .rail-nav .rail-btn,
+#platformRail .rail-bottom .rail-btn {
   box-sizing: border-box;
-  display: flex;
-  flex-flow: column nowrap;
-  align-items: center;
-  justify-content: center;
+  display: flex !important;
+  flex-flow: column nowrap !important;
+  align-items: center !important;
+  justify-content: center !important;
   position: relative;
   align-self: stretch;
-  width: 100%;
+  width: 100% !important;
   min-width: 0;
-  height: auto;
+  height: auto !important;
   min-height: 46px;
   flex: 0 0 auto;
-  padding: 5px 2px;
-  gap: 3px;
+  padding: 6px 2px !important;
+  gap: 3px !important;
   margin: 0;
   white-space: nowrap;
   line-height: 1.2;
 }
-#platformRail .vernal-nav > svg { width: 18px; height: 18px; flex: none; }
-#platformRail .vernal-short-label { display: block; font-size: 11px; }
-#platformRail .vernal-full-label { display: none; }
+#platformRail .rail-btn > svg { width: 18px; height: 18px; flex: none; }
+#platformRail .vernal-short-label { display: block !important; font-size: 11px; line-height: 1.2; opacity: 1 !important; }
+#platformRail .vernal-full-label,
+#platformRail .rail-btn:not(.vernal-nav) .rail-label { display: none !important; }
 #platformRail .vernal-rail-badge:empty { display: none; }
+
 @container vernal-rail (min-width: 130px) {
-  #platformRail .vernal-rail-brand, #platformRail .rail-nav .vernal-nav {
-    flex-direction: row;
-    justify-content: flex-start;
-    padding-inline: 10px;
-    gap: 8px;
+  #platformRail .vernal-rail-brand,
+  #platformRail .rail-nav .rail-btn,
+  #platformRail .rail-bottom .rail-btn {
+    flex-direction: row !important;
+    justify-content: flex-start !important;
+    padding-inline: 10px !important;
+    gap: 8px !important;
   }
   #platformRail .vernal-brand-name { font-size: 14px; }
-  #platformRail .vernal-short-label { display: none; }
-  #platformRail .vernal-full-label { display: block; font-size: 13px; }
+  #platformRail .vernal-short-label { display: none !important; }
+  #platformRail .vernal-full-label,
+  #platformRail .rail-btn:not(.vernal-nav) .rail-label { display: block !important; font-size: 13px; }
   #platformRail .vernal-rail-badge { position: static; margin-inline-start: auto; }
 }
 
@@ -156,6 +190,7 @@ html[data-theme="dark"] .shell-main > .topbar {
   width: calc(100% - 16px);
   height: 1px;
   margin: 6px auto;
+  border: 0;
   background: var(--hui-border, #e2e8f0);
 }
 
@@ -165,7 +200,7 @@ html[data-theme="dark"] .shell-main > .topbar {
 .rail-btn.vernal-nav.active {
   background: var(--hui-accent-soft, #eff6ff) !important;
   color: var(--hui-accent, #1d4ed8) !important;
-  font-weight: 650 !important;
+  font-weight: 600 !important;
 }
 .rail-btn.vernal-nav.active::before {
   content: "";
@@ -177,26 +212,45 @@ html[data-theme="dark"] .shell-main > .topbar {
   border-radius: 3px;
   background: linear-gradient(180deg, #1d4ed8, #0d9488);
 }
+
 .vernal-rail-badge {
   position: absolute;
   top: 4px;
   right: 4px;
-  min-width: 15px;
-  height: 15px;
+  min-width: 16px;
+  height: 16px;
   padding: 0 4px;
   border-radius: 999px;
   background: #1d4ed8;
-  color: #fff;
-  font-size: 9.5px;
+  color: #ffffff;
+  font-size: 11px;
   font-weight: 700;
-  line-height: 15px;
+  line-height: 16px;
   text-align: center;
 }
-.vernal-rail-badge.hidden {
+.vernal-rail-badge.alert {
+  background: #e11d48;
+}
+.vernal-rail-badge.hidden,
+.vernal-tab-badge.hidden {
   display: none !important;
 }
+.vernal-tab-badge {
+  display: inline-block;
+  margin-left: 5px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #e11d48;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
 
-/* 顶栏 Vernal 状态与快捷许愿入口 */
+/* 顶栏运行底座健康胶囊 */
 .vernal-topbar-pill {
   display: inline-flex;
   align-items: center;
@@ -232,33 +286,20 @@ html[data-theme="dark"] .vernal-topbar-pill {
   color: #bfdbfe;
 }
 
-/* ---------- Vernal 视图宿主与 LoopForge 原生视图无缝切换 ---------- */
+/* ---------- Vernal 主舞台宿主 ---------- */
 #vernalStage {
   display: none;
   height: calc(100vh - 56px);
   height: calc(100dvh - 56px);
   overflow-y: auto;
-  background-color: #f8fafc;
-  background-image: radial-gradient(rgba(148, 163, 184, 0.28) 1px, transparent 1px);
+  background-color: var(--bg, #f8fafc);
+  background-image: radial-gradient(var(--grid-dot, rgba(148, 163, 184, 0.28)) 1px, transparent 1px);
   background-size: 22px 22px;
   padding: 0;
 }
 
-body.vernal-mode .shell-main > main > .view {
-  display: none !important;
-}
-body.vernal-mode #vernalStage {
-  display: block !important;
-}
-/* 切换到 Vernal 架构视图时收起二级会话侧栏以给 DAG 留出完整画布 */
-body.vernal-mode:not(.management-mode) .platform-sidebar {
-  display: none !important;
-}
-body.vernal-mode:not(.management-mode) .app-shell {
-  grid-template-columns: var(--rail-w, 56px) minmax(0, 1fr) !important;
-}
+#vernalStage.view.active { display: block; }
 
-/* #vernalStage 内部子页切换与顶栏工具条 */
 #vernalStage .v-subview {
   display: none;
 }
@@ -274,43 +315,46 @@ body.vernal-mode:not(.management-mode) .app-shell {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 12px 22px;
-  background: rgba(255, 255, 255, 0.92);
+  padding: 12px 24px;
+  background: var(--toolbar-bg, rgba(255, 255, 255, 0.92));
   backdrop-filter: blur(8px);
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--border, #e2e8f0);
 }
-#vernalStage .vernal-toolbar-left,
-#vernalStage .vernal-toolbar-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+html[data-theme="dark"] #vernalStage .vernal-toolbar {
+  --toolbar-bg: rgba(19, 28, 46, 0.92);
 }
+
 #vernalStage .vernal-subtabs {
   display: inline-flex;
   gap: 4px;
   padding: 3px;
-  background: #f1f5f9;
-  border: 1px solid #e2e8f0;
-  border-radius: 9px;
+  background: var(--surface-subtle, #f1f5f9);
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  max-width: 100%;
+  flex-wrap: wrap;
 }
 #vernalStage .v-tab-btn {
+  display: inline-flex;
+  align-items: center;
   border: 0;
   background: transparent;
-  color: #475569;
+  color: var(--text-secondary, #475569);
   padding: 5px 11px;
   border-radius: 6px;
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
 }
 #vernalStage .v-tab-btn.active {
-  background: #ffffff;
-  color: #1d4ed8;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  background: var(--surface, #ffffff);
+  color: var(--primary, #1d4ed8);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 }
+
 #vernalStage .vernal-body {
-  padding: 22px 28px 56px;
+  padding: 20px 24px 56px;
   max-width: 1480px;
   margin: 0 auto;
 }
@@ -321,45 +365,13 @@ body.vernal-mode:not(.management-mode) .app-shell {
   gap: 20px;
 }
 #vernalStage .card {
-  padding: 20px 22px;
+  padding: 18px 20px;
   border-radius: 12px;
-}
-#vernalStage .wish-composer {
-  margin-bottom: 18px;
 }
 #vernalStage .goal-bar:not(:empty) {
   margin-bottom: 16px;
-}
-#vernalStage .dag-canvas {
-  background-color: #ffffff;
-  background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
-  background-size: 18px 18px;
-  border: 1px solid #e2e8f0;
   border-radius: 10px;
-  min-height: 180px;
-  overflow-x: auto;
-  padding: 8px;
-}
-#vernalStage .wish-composer {
-  border-left: 3.5px solid #0d9488;
-  margin-bottom: 14px;
-}
-#vernalStage .wish-composer textarea {
-  width: 100%;
-  min-height: 78px;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  padding: 9px 11px;
-  font-size: 13px;
-  line-height: 1.55;
-  background: #f8fafc;
-  color: #0f172a;
-  resize: vertical;
-}
-#vernalStage .wish-composer textarea:focus {
-  outline: none;
-  border-color: #1d4ed8;
-  background: #ffffff;
+  border: 1px solid var(--border, #e2e8f0);
 }
 #vernalStage .drawer {
   z-index: 10020 !important;
@@ -382,16 +394,26 @@ body.vernal-mode:not(.management-mode) .app-shell {
   right: 24px !important;
   bottom: 24px !important;
 }
-
-#vernalStage .vernal-subtabs { max-width: 100%; flex-wrap: wrap; }
-#vernalStage .v-tab-btn { white-space: nowrap; }
-#vernalStage .vernal-toolbar > .topbar-right { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.hui-select-menu,
+.hui-select-popover,
+.hui-select-dropdown,
+.hui-select-panel,
+[class*="hui-select"][class*="menu"],
+[class*="hui-select"][class*="pop"] {
+  z-index: 10040 !important;
+}
+#vernalStage .vernal-toolbar > .topbar-right {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
 #vernalStage .event-card { min-width: 0; }
 #vernalStage .timeline-source { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 #vernalStage .timeline-source select { min-width: 0; max-width: 100%; }
 #vernalStage #history-status { margin: 6px 0 10px; }
 #vernalStage #history-older { align-self: flex-start; margin-top: 8px; }
-#vernalStage .ev-link { padding: 0; background: none; border: 0; font: inherit; color: var(--hui-accent); }
+#vernalStage .ev-link { padding: 0; background: none; border: 0; font: inherit; color: var(--primary, #1d4ed8); }
 #vernalStage .ev-head { flex-wrap: wrap; }
 #vernalStage .ev-head time { white-space: nowrap; }
 @media (max-width: 1120px) {

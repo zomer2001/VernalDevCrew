@@ -1,0 +1,31 @@
+rules:
+  - id: vernal.py.command-shell-injection
+    languages: [python]
+    severity: ERROR
+    message: "禁止在生产代码中使用 shell=True 执行动态命令，请改为列表参数调用"
+    pattern-either:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+      - pattern: os.system(...)
+
+  - id: vernal.py.unsafe-eval-exec
+    languages: [python]
+    severity: ERROR
+    message: "禁止直接调用 eval/exec 执行不受信任的字符串"
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+
+  - id: vernal.py.unsafe-deserialization
+    languages: [python]
+    severity: ERROR
+    message: "禁止使用不安全的反序列化方法（pickle.loads / yaml.load 无 SafeLoader）"
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+      - pattern: yaml.load($X)
+
+  - id: vernal.py.sql-string-concat
+    languages: [python]
+    severity: WARNING
+    message: "疑似使用 f-string 拼接 SQL 语句，请改用参数化占位符查询"
+    pattern: $CURSOR.execute(f"...", ...)

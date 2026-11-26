@@ -35,6 +35,7 @@ _STAGE_META: dict[tuple[str, str], tuple[str, str]] = {
     ("council_opinion", "architect"): ("council_architect", "[Vernal·圆桌] 契约架构师评审意见"),
     ("council_opinion", "qa_lead"): ("council_qa_lead", "[Vernal·圆桌] QA 总监评审意见"),
     ("council_consensus", "director"): ("council_director", "[Vernal·圆桌] 研发总监共识与 ADR"),
+    ("detailed_design", "architect"): ("detailed_design", "[Vernal·规划] 详细设计"),
     ("prd_spec", "pm"): ("pm_spec", "[Vernal·规划] 产品规格说明书"),
     ("project_blueprint", "director"): ("blueprint", "[Vernal·规划] 研发组与里程碑蓝图"),
     ("milestone_wave", "director"): ("wave_plan", "[Vernal·规划] 里程碑滚动拆单"),
@@ -60,7 +61,7 @@ async def _reconcile_run(client: LoopForgeClient, issue_id: str, run_id: str) ->
     issue = info.get("issue", info)
     if issue.get("id") != issue_id:
         raise LoopForgeError(f"无法核实工单 {issue_id} 的运行记录")
-    if client.issue_user_id is not None and str(issue.get("responsibleUserId")) != str(client.issue_user_id):
+    if client.issue_user_id is not None and str(issue.get("assigneeUserId", issue.get("responsibleUserId"))) != str(client.issue_user_id):
         raise LoopForgeError("无法核实公用工单责任人")
     try:
         run = await client.get_run(run_id)
@@ -151,17 +152,23 @@ class LoopForgeHarness(Harness):
         activity_cb: ActivityCallback | None = None,
         *,
         poll_interval: float = 2.0,
+        stop_event: asyncio.Event | None = None,
+        client: LoopForgeClient | None = None,
     ):
         super().__init__(activity_cb)
         self.settings = settings
         self.db = db
         self.ws = ws
+        self.stop_event = stop_event or asyncio.Event()
         self.poll_interval = poll_interval
+        self._custom_client = client
         self._assets_lock = asyncio.Lock()
         self._dispatch_lock = asyncio.Lock()
         self._assets_ready = False
 
     def _client(self) -> LoopForgeClient:
+        if self._custom_client is not None:
+            return self._custom_client
         return LoopForgeClient(self.settings.loopforge_url, self.settings.effective_loopforge_token())
 
     async def _ensure_ready(self, client: LoopForgeClient, role: str = "director") -> tuple[str, str]:
@@ -270,6 +277,13 @@ class LoopForgeHarness(Harness):
                     self.db.meta_set(pending_key, None)
                     return issue_id, prior_candidate
                 self.db.meta_set(pending_key, None)
+            from autodev.loopforge.dispatch import reserve, record, accept_task, observe_task
+            command = f"plan:{pid}:{stage_key}:{request_signature}"
+            receipt, fresh = reserve(self.db, command, 1, 1, self.settings.selected_pool,
+                                     "deployment-service", issue_id)
+            if not fresh:
+                run = await observe_task(self.db, receipt, client, timeout=self.settings.agent_timeout_sec)
+                return receipt["issue_id"], run
             if issue_id:
                 try:
                     await client.reopen_issue(issue_id)
@@ -290,6 +304,7 @@ class LoopForgeHarness(Harness):
                 if not issue_id:
                     raise LoopForgeError("创建规划工单未返回 ID")
                 self.db.meta_set(meta_key, issue_id)
+                record(self.db, receipt, "DISPATCHING", issue_id=issue_id)
             for attempt in range(3):
                 try:
                     dispatched = await client.dispatch_issue(issue_id, rerun=rerun)
@@ -300,21 +315,22 @@ class LoopForgeHarness(Harness):
                     self.db.meta_set(pending_key, json.dumps({"issue": issue_id, "request": request_signature, "run": candidate}))
                     if await _reconcile_run(client, issue_id, candidate):
                         self.db.meta_set(pending_key, None)
+                        record(self.db, receipt, "RUNNING", lf_run_id=candidate)
                         return issue_id, candidate
                     self.db.meta_set(pending_key, None)
                     if attempt == 2:
                         raise
                     await asyncio.sleep(0.25 * 2**attempt)
                     continue
-                run_id = str(dispatched.get("latestRunId") or dispatched.get("runId") or "")
-                if not run_id:
-                    raise LoopForgeError(f"派发规划需求 {issue_id} 未返回 Run ID")
+                run_id = await accept_task(self.db, receipt, client, dispatched, timeout=self.settings.agent_timeout_sec)
                 return issue_id, run_id
 
     async def run_structured_readonly(
         self, prompt: str, *, schema_path: Path, cwd: Path, log_dir: Path, role: str
     ) -> AgentResult:
         started = time.monotonic()
+        if self.stop_event.is_set():
+            raise asyncio.CancelledError
         log_dir.mkdir(parents=True, exist_ok=True)
         stage_key, title = _stage_key_and_title(schema_path, role)
         prompt_file = log_dir / "prompt.md"
@@ -325,7 +341,7 @@ class LoopForgeHarness(Harness):
         prompt_file.write_text(prompt, "utf-8")
 
         from autodev import public_pool
-        if not self.settings.loopforge_url.strip() or not self.settings.effective_loopforge_token():
+        if self._custom_client is None and (not self.settings.loopforge_url.strip() or not self.settings.effective_loopforge_token()):
             return AgentResult(
                 False,
                 -1,
@@ -356,6 +372,7 @@ class LoopForgeHarness(Harness):
 
         try:
             pid, wf_id = await self._ensure_ready(client, role)
+            await public_pool.check_workflow_sandbox(self.settings, client, wf_id, selected)
             client = dispatch_client
         except LoopForgeError as exc:
             return AgentResult(
@@ -411,17 +428,35 @@ class LoopForgeHarness(Harness):
         def _on_progress(_st: str, summary: str, _run: dict[str, Any]) -> None:
             self._activity("message", f"[{stage_key}] {summary}", None)
 
-        ok, run, msg = await poll_loopforge_run(
-            client,
-            run_id,
-            poll_interval=self.poll_interval,
-            timeout_sec=float(self.settings.agent_timeout_sec),
-            on_progress=_on_progress,
-        )
+        def _mark_plan_dispatch(final_state: str) -> None:
+            from autodev.db import now_iso
+            try:
+                self.db._exec(
+                    "UPDATE dispatch_records SET state=?, updated_at=? "
+                    "WHERE lf_run_id=? AND state IN ('DISPATCHING','QUEUED','RUNNING','NEEDS_CONFIRMATION')",
+                    (final_state, now_iso(), run_id),
+                )
+            except Exception:
+                pass
+
+        try:
+            ok, run, msg = await poll_loopforge_run(
+                client,
+                run_id,
+                poll_interval=self.poll_interval,
+                stop_event=self.stop_event,
+                timeout_sec=float(self.settings.agent_timeout_sec),
+                on_progress=_on_progress,
+            )
+        except (asyncio.CancelledError, Exception):
+            _mark_plan_dispatch("NEEDS_CONFIRMATION")
+            raise
         duration = time.monotonic() - started
         usage = extract_run_usage(run) if run else Usage()
 
         if not ok:
+            terminal = run and run.get("status") in ("failed", "cancelled", "succeeded")
+            _mark_plan_dispatch("FAILED" if terminal else "NEEDS_CONFIRMATION")
             return AgentResult(
                 False,
                 1,
@@ -443,6 +478,7 @@ class LoopForgeHarness(Harness):
         (log_dir / "final_message.txt").write_text(raw_text, "utf-8")
         structured = extract_json(raw_text)
         if structured is None:
+            _mark_plan_dispatch("FAILED")
             return AgentResult(
                 False,
                 1,
@@ -454,6 +490,7 @@ class LoopForgeHarness(Harness):
                 duration_sec=duration,
             )
 
+        _mark_plan_dispatch("FINISHED")
         return AgentResult(
             ok=True,
             exit_code=0,

@@ -1,0 +1,45 @@
+name: vernal-ci
+on:
+  push:
+    branches:
+      - "vernal/ci/**"
+jobs:
+  verify:
+    runs-on: vernal-sandbox
+    steps:
+      - name: checkout
+        run: |
+          set -eu
+          git clone --depth 1 --branch "${GITHUB_REF_NAME}" "${VERNAL_GIT_CLONE_URL:-http://x-access-token:${GITHUB_TOKEN}@gitea:3000/${GITHUB_REPOSITORY}.git}" src
+      - name: setup-node
+        run: |
+          set -eu
+          cd src
+          ${VERNAL_CI_SETUP:-true}
+      - name: test
+        run: |
+          set -eu
+          cd src
+          {{ test_cmds }}
+      - name: quality
+        run: |
+          set -eu
+          cd src
+          if command -v vernal-quality >/dev/null 2>&1; then
+            vernal-quality --stage milestone --out ../vernal-ci-result.json
+          elif python3 -c "import autodev.quality.cli" >/dev/null 2>&1; then
+            python3 -m autodev.quality.cli --stage milestone --out ../vernal-ci-result.json
+          else
+            printf '%s\n' '{"stage":"milestone","passed":false,"failed_step":"quality_cli_missing","reason":"Runner 环境缺少 vernal-quality / autodev.quality.cli","results":[]}' > ../vernal-ci-result.json
+            echo "ERROR: vernal quality CLI is missing in runner environment" >&2
+            exit 127
+          fi
+      - name: callback
+        if: always()
+        run: |
+          if [ -n "{{ callback_url }}" ]; then
+            if [ ! -f vernal-ci-result.json ]; then
+              printf '%s\n' '{"stage":"milestone","passed":false,"failed_step":"test","results":[]}' > vernal-ci-result.json
+            fi
+            curl -fsS -X POST -H "Content-Type: application/json" --data @vernal-ci-result.json "{{ callback_url }}" || true
+          fi

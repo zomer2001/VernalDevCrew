@@ -8,12 +8,38 @@ MODE="docker"
 BUILD_FLAG=""
 STOP_ONLY=0
 PACK=0
+ENABLE_CI_CLI=0
 VERNAL_OFFLINE=0
 PORT="${VERNAL_PORT:-8787}"
 BIND_HOST="${VERNAL_BIND:-127.0.0.1}"
 EXTRA_DEV_ARGS=()
 PROJECTS_DIR=""
 LAUNCHER_DIR="$ROOT/deploy/loopforge/.runner"
+
+case "${1:-}" in
+  --backup|--restore)
+    exec bash "$ROOT/deploy/loopforge/backup.sh" "$@" ;;
+  --service-identity)
+    umask 077
+    mkdir -p "$LAUNCHER_DIR"
+    service_path="$LAUNCHER_DIR/deployment.token"
+    [[ ! -L "$service_path" ]] || { echo "部署身份路径必须为普通文件" >&2; exit 2; }
+    if [[ -s "$service_path" ]]; then
+      chmod 600 "$service_path"
+      echo "部署服务身份已配置"
+      exit 0
+    fi
+    echo "请在 LoopForge 用独立服务账号登录，将其加入所需项目成员，在个人设置创建 API 令牌。"
+    read -rs -p "输入服务账号令牌（不回显） " service_token
+    echo
+    [[ -n "$service_token" ]] || exit 2
+    tmp_token="$(mktemp "$LAUNCHER_DIR/.deployment.XXXXXX")"
+    trap 'rm -f "$tmp_token"' EXIT
+    printf '%s' "$service_token" > "$tmp_token"
+    ln "$tmp_token" "$service_path" || [[ -s "$service_path" ]]
+    echo "部署服务身份已保存，请运行 ./vernal.sh 让网关加载令牌。"
+    exit 0 ;;
+esac
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -40,6 +66,11 @@ while [[ $# -gt 0 ]]; do
       PACK=1
       shift
       ;;
+    --enable-ci)
+      ENABLE_CI_CLI=1
+      export VERNAL_ENABLE_CI=1
+      shift
+      ;;
     --stop)
       STOP_ONLY=1
       shift
@@ -59,6 +90,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "${AGENTFLOW_TOKEN:-}" && ! -s "$LAUNCHER_DIR/deployment.token" ]]; then
+  echo "后台调度需要独立服务身份。管理员请运行 ./vernal.sh --service-identity，在提示下保存项目服务账号的令牌。"
+fi
 COMPOSE_FILE="$ROOT/deploy/loopforge/compose.yaml"
 STAMP_FILE="$ROOT/deploy/loopforge/.vernal-build.stamp"
 
@@ -90,7 +124,7 @@ fi
 if [[ "$STOP_ONLY" == "1" ]]; then
   echo "==> 正在停止 Vernal 与底层容器..."
   "$ROOT/deploy/loopforge/start-runner.sh" --stop
-  docker compose -f "$COMPOSE_FILE" --profile full stop || true
+  docker compose -f "$COMPOSE_FILE" --profile full --profile ci stop || true
   echo "==> 已停止全部服务（数据均已保留）"
   exit 0
 fi
@@ -150,6 +184,10 @@ if [[ ! -f deploy/loopforge/.env ]] || ! curl -fsS -m 2 http://127.0.0.1:8090/ap
 fi
 
 if [[ "$MODE" == "dev" ]]; then
+  if [[ "${VERNAL_ENABLE_CI:-0}" == "1" ]]; then
+    "$ROOT/deploy/loopforge/build-sandbox.sh" || echo "公用沙箱构建失败，请检查 Docker 状态" >&2
+    VERNAL_ENABLE_CI=1 "$ROOT/deploy/loopforge/ensure-gitea.sh"
+  fi
   if [[ "$personal" == 1 ]]; then VERNAL_PORT="$PORT" ./deploy/loopforge/start-runner.sh; fi
   echo "==> [开发模式] 启动本地 Vernal: http://${BIND_HOST}:${PORT}"
   exec "$ROOT/.venv/bin/python" -m autodev.cli serve --host "$BIND_HOST" --port "$PORT" ${EXTRA_DEV_ARGS[@]+"${EXTRA_DEV_ARGS[@]}"}
@@ -182,9 +220,23 @@ fi
 
 echo "==> 正在通过 Docker 启动 Vernal 统一平台（宿主机免装 Python）..."
 (
+  caller_ci="${VERNAL_ENABLE_CI:-}"
   set -a
   source "$ROOT/deploy/loopforge/.env"
   set +a
+  if [[ "$ENABLE_CI_CLI" == "1" ]]; then
+    export VERNAL_ENABLE_CI=1
+    if ! grep -q '^VERNAL_ENABLE_CI=' "$ROOT/deploy/loopforge/.env" 2>/dev/null; then
+      printf "VERNAL_ENABLE_CI='1'\n" >> "$ROOT/deploy/loopforge/.env"
+    else
+      tmp_env="$(mktemp "$LAUNCHER_DIR/env.XXXXXX")"
+      sed "s/^VERNAL_ENABLE_CI=.*/VERNAL_ENABLE_CI='1'/" "$ROOT/deploy/loopforge/.env" > "$tmp_env"
+      chmod 600 "$tmp_env"
+      mv "$tmp_env" "$ROOT/deploy/loopforge/.env"
+    fi
+  elif [[ -n "$caller_ci" ]]; then
+    export VERNAL_ENABLE_CI="$caller_ci"
+  fi
   export VERNAL_PORT="$PORT"
   export VERNAL_BIND="$BIND_HOST"
   public_host="$BIND_HOST"
@@ -204,6 +256,14 @@ echo "==> 正在通过 Docker 启动 Vernal 统一平台（宿主机免装 Pytho
   export VERNAL_HOST_PROJECTS_DIR="${PROJECTS_DIR:-${VERNAL_HOST_PROJECTS_DIR:-$ROOT/workspaces}}"
   "$ROOT/deploy/loopforge/build-sandbox.sh" || echo "公用沙箱构建失败，个人 Runner 仍可使用" >&2
   "$ROOT/deploy/loopforge/ensure-gitea.sh" || echo "Gitea 尚未就绪，请在体检中查看服务状态" >&2
+  # Read on the host so the gateway UID need not read the mode-0600 Mac file.
+  # Only the Vernal service consumes this Compose interpolation variable.
+  if [[ -z "${AGENTFLOW_TOKEN:-}" && -s "$LAUNCHER_DIR/deployment.token" ]]; then
+    [[ ! -L "$LAUNCHER_DIR/deployment.token" ]] || exit 2
+    chmod 600 "$LAUNCHER_DIR/deployment.token"
+    export AGENTFLOW_TOKEN
+    AGENTFLOW_TOKEN="$(cat "$LAUNCHER_DIR/deployment.token")"
+  fi
   if [[ -z "$BUILD_FLAG" ]]; then
     docker compose -f "$COMPOSE_FILE" --profile full up -d --no-build --pull never vernal
   elif [[ -n "$BUILD_FLAG" && -z "${VERNAL_PYTHON_IMAGE:-}" ]]; then
@@ -238,7 +298,7 @@ fi
 echo "==> 等待 Vernal 服务就绪..."
 GATEWAY_OK=0
 for _ in $(seq 1 40); do
-  if curl -fsS -m 2 "http://127.0.0.1:${PORT}/vernal-api/state" >/dev/null 2>&1; then
+  if curl -fsS -m 2 "http://127.0.0.1:${PORT}/vernal-api/health" >/dev/null 2>&1; then
     GATEWAY_OK=1
     break
   fi
