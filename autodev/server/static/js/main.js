@@ -548,14 +548,14 @@ function renderAll() {
   const sliceCount = state.slices ?? state.slices_count ?? 0;
   const uninitialized = state.workspace_initialized === false;
   const needsPlan = !uninitialized && ["CREATED", "INGESTED", "SPECIFIED"].includes(state.status);
-  const canPlanNow = needsPlan && !state.planning && (state.specifications_enabled || sliceCount > 0 || state.source_mode !== "scratch");
+  const canPlanNow = needsPlan && !state.planning && (state.specifications_enabled || state.mission_count || sliceCount > 0 || state.source_mode !== "scratch");
   const isPlanned = state.status === "PLANNED" && !state.planning && !state.scheduler_running;
   const canStart = !state.scheduler_running && ["APPROVED", "RUNNING", "STALLED"].includes(state.status);
 
   $("btn-launcher-toggle")?.classList.toggle("btn-primary", uninitialized);
   const btnPlan = $("btn-plan");
   if (btnPlan) {
-    btnPlan.textContent = state.specifications_enabled ? "继续功能规格" : (state.milestones || []).length > 0 ? "重新立项" : "开始立项评审";
+    btnPlan.textContent = (state.specifications_enabled || state.mission_count) ? "继续需求交付" : (state.milestones || []).length > 0 ? "重新立项" : "开始立项评审";
     btnPlan.classList.toggle("btn-primary", canPlanNow);
     btnPlan.classList.toggle("hidden", uninitialized || state.scheduler_running || isPlanned || state.status === "COMPLETED");
   }
@@ -631,7 +631,7 @@ $("btn-ingest")?.addEventListener("click", async () => {
 });
 
 async function triggerPlan(extra = "") {
-  if (state?.specifications_enabled) {
+  if (state?.specifications_enabled || state?.mission_count) {
     switchView("council");
     return;
   }

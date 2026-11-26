@@ -62,6 +62,8 @@ async def get_state(request: Request) -> dict[str, Any]:
     snap = eng.snapshot()
     snap["scheduler_running"] = ctx.is_scheduler_running(slot)
     snap["planning"] = ctx.is_planning(slot)
+    from autodev.speckit.missions import all_missions
+    snap["mission_count"] = len(all_missions(eng))
     snap["recent_events"] = eng.db.events_after(max(0, eng.db.last_event_id() - 120))
     snap["decisions"] = eng.db.list_decisions()
     snap["checkpoints"] = eng.db.list_checkpoints()

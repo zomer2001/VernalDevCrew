@@ -257,7 +257,7 @@ def add_clarifications(engine, feature_id: str, spec_rev_id: int, questions: lis
         engine.db.add_event("speckit.clarifications", f"已记录 {len(questions)} 个澄清问题", actor=actor)
 
 
-def answer_clarification(engine, clarify_id: int, answer: str, *, expected_rev_id: int, actor: str) -> dict:
+def answer_clarification(engine, clarify_id: int, answer: str, *, expected_rev_id: int, actor: str, supplement: str = "") -> dict:
     with engine.db.transaction():
         rows = engine.db._query("SELECT * FROM clarifications WHERE clarify_id=?", (clarify_id,))
         if not rows:
@@ -273,6 +273,8 @@ def answer_clarification(engine, clarify_id: int, answer: str, *, expected_rev_i
         heading = f"澄清 {q['question_key']} · {q['clarify_id']}"
         content = re.sub(r"^## " + re.escape(heading) + r"\n.*?(?=^## |\Z)","",rev["content_text"],flags=re.M|re.S)
         content += f"\n## {heading}\n\n问题：{q['question']}\n\n确认：{answer}\n"
+        if supplement.strip():
+            content += f"\n补充：{supplement.strip()}\n"
         new = publish_revision(engine,q["feature_id"],"spec",content,expected_rev_id=expected_rev_id,
                                author=actor,summary="记录负责人澄清回答")
         engine.db._exec("UPDATE clarifications SET status='ANSWERED',answer=?,answered_by=?,applied_rev_id=?,updated_at=? "
@@ -288,6 +290,40 @@ def product_spec(engine) -> ProductSpec:
                        global_acceptance_redlines=[v for s in specs for v in s.global_acceptance_redlines],
                        spec_markdown="\n".join(s.spec_markdown for s in specs),
                        requirements=[r for s in specs for r in s.requirements],nfrs=[r for s in specs for r in s.nfrs])
+
+
+def answer_batch(engine, feature: str, answers: list[dict], *, expected_rev_id: int, actor: str) -> dict:
+    """Validate the whole round before writing one authoritative revision."""
+    if not 1 <= len(answers) <= 3 or len({a["clarify_id"] for a in answers}) != len(answers):
+        raise ValueError("每轮应包含一至三个不同问题的回答")
+    with engine.db.transaction():
+        rev = latest(engine, feature)
+        if not rev or rev["rev_id"] != expected_rev_id:
+            raise SpecConflictError("当前规格已变化，请刷新后回答")
+        rows = {q["clarify_id"]: q for q in list_clarifications(engine, feature)}
+        content = rev["content_text"]
+        normalized = []
+        for item in answers:
+            q = rows.get(item["clarify_id"])
+            if not q:
+                raise ValueError("问题不属于当前功能")
+            if q["status"] not in ("OPEN", "AUTO_DEFAULTED"):
+                raise SpecConflictError("问题已经回答，请刷新")
+            answer = item["answer"].strip()
+            if not answer or (q["options"] and answer not in q["options"]):
+                raise ValueError("请选择有效选项或填写非空回答")
+            heading = f"澄清 {q['question_key']} · {q['clarify_id']}"
+            content = re.sub(r"^## " + re.escape(heading) + r"\n.*?(?=^## |\Z)", "", content, flags=re.M | re.S)
+            content += f"\n## {heading}\n\n问题：{q['question']}\n\n确认：{answer}\n"
+            if item.get("supplement", "").strip():
+                content += f"\n补充：{item['supplement'].strip()}\n"
+            normalized.append((q["clarify_id"], answer))
+        new = publish_revision(engine, feature, "spec", content, expected_rev_id=expected_rev_id,
+                               author=actor, summary="记录本轮负责人回答")
+        for clarify_id, answer in normalized:
+            engine.db._exec("UPDATE clarifications SET status='ANSWERED',answer=?,answered_by=?,applied_rev_id=?,updated_at=? WHERE clarify_id=?",
+                            (answer, actor, new["rev_id"], now_iso(), clarify_id))
+        return new
 
 
 def ensure_specification_gate(engine) -> None:

@@ -107,6 +107,8 @@ async def _finalize_launched_project(
     execution_pool: str = "",
     harness: str = "",
     start_council: bool = False,
+    guided_delivery: bool = False,
+    intent: str = "feature",
     actor: str = "owner",
 ) -> dict[str, Any]:
     from autodev import public_pool
@@ -226,6 +228,12 @@ async def _finalize_launched_project(
     except OpsError:
         slices = 0
 
+    mission = None
+    if guided_delivery and (wish.strip() or docs):
+        from autodev.speckit import missions
+        mission = missions.save(new_eng, "001-initial", wish.strip() or "根据附带的需求文档评估首版范围与验收条件。",
+                                intent, 0, actor=effective_actor(actor))
+
     ctx.persist_config(new_eng)
     new_eng.db.meta_set("binding_existing", "1" if getattr(request.state, "bind_existing", False) else "0")
     new_eng.db.meta_set("binding_owner", effective_actor(actor))
@@ -240,7 +248,21 @@ async def _finalize_launched_project(
     ctx.update_cli_default_if_unscoped(request, slot)
     tok_ctx = current_slot_var.set(slot)
     try:
-        if start_council and slices > 0 and not needs_wish:
+        if guided_delivery and mission and start_council:
+            from autodev.speckit import missions, preflight
+            check = await preflight.inspect(new_eng)
+            if check["ready"]:
+                lease = missions.reserve(new_eng, mission["feature_id"], mission["revision"])
+                mission_actor = effective_actor(actor)
+                async def _guided():
+                    try:
+                        await missions.advance(new_eng, mission["feature_id"], lease, actor=mission_actor)
+                    except Exception:
+                        pass
+                slot.plan_task = ctx.start_background(slot, "_mission", _guided())
+            else:
+                new_eng.db.add_event("mission.preflight_blocked", "目标已保存，执行资源未就绪，请在需求面板查看", actor=effective_actor(actor))
+        elif not guided_delivery and start_council and slices > 0 and not needs_wish:
             async def _auto_plan() -> None:
                 try:
                     await new_eng.plan(extra_instructions="", mode="goal")
@@ -270,7 +292,8 @@ async def _finalize_launched_project(
         "slices": slices,
         "loopforge_synced": lf_synced,
         "repository_id": lf_repo_id,
-        "council_started": bool(start_council and slices > 0 and not needs_wish),
+        "council_started": bool(not guided_delivery and start_council and slices > 0 and not needs_wish),
+        "mission_saved": bool(mission),
         "needs_wish": needs_wish,
     }
 
@@ -526,6 +549,8 @@ async def api_create_project(request: Request, req: ProjectCreateRequest) -> dic
             execution_pool=req.execution_pool,
             harness=req.harness,
             start_council=req.start_council,
+            guided_delivery=req.guided_delivery,
+            intent=req.intent,
             actor=req.actor,
         )
 
@@ -604,6 +629,8 @@ async def api_create_project(request: Request, req: ProjectCreateRequest) -> dic
             execution_pool=req.execution_pool,
             harness=req.harness,
             start_council=req.start_council,
+            guided_delivery=req.guided_delivery,
+            intent=req.intent,
             actor=req.actor,
         )
 
@@ -676,6 +703,8 @@ async def api_create_project(request: Request, req: ProjectCreateRequest) -> dic
         execution_pool=req.execution_pool,
         harness=req.harness,
         start_council=req.start_council,
+        guided_delivery=req.guided_delivery,
+        intent=req.intent,
         actor=req.actor,
     )
 
@@ -757,6 +786,8 @@ async def api_import_folder(request: Request, req: ImportFolderRequest) -> dict[
         execution_pool=req.execution_pool,
         harness=req.harness,
         start_council=req.start_council,
+        guided_delivery=req.guided_delivery,
+        intent=req.intent,
         actor=req.actor,
     )
     result["imported_files"] = len(staged)

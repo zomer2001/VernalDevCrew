@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from autodev.config import Settings, Workspace
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
-BUILTIN_TEMPLATES = ("legacy", "standard", "feature", "bugfix", "doc_reverse")
+BUILTIN_TEMPLATES = ("legacy", "standard", "feature", "bugfix", "doc_reverse", "quick-prototype")
 
 ARTIFACT_PATHS: dict[str, str] = {
     "SRS": "docs/SRS.md",

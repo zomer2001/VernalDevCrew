@@ -53,6 +53,12 @@ def target_is_current(db, record: dict) -> bool:
         if (not db._query("SELECT 1 FROM spec_revisions WHERE source_kind='constitution' LIMIT 1")
                 or db._query("SELECT 1 FROM clarifications WHERE severity='BLOCKING' AND status='OPEN' LIMIT 1")):
             return False
+        from types import SimpleNamespace
+        from autodev.speckit.missions import assert_ready_for_approval
+        try:
+            assert_ready_for_approval(SimpleNamespace(db=db, ws=SimpleNamespace(root=db.path.parent.parent)))
+        except (ValueError, OSError):
+            return False
     current = document_target(db, record["gate_id"], record["scope_id"])
     if not record.get("target_sha") or record["target_sha"] != current["target_sha"]:
         return False

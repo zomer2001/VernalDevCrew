@@ -1,0 +1,23 @@
+{
+  "id": "quick-prototype",
+  "name": "轻量功能交付",
+  "description": "局部低风险功能：精简规格和技术方案，复用编码、独立验证、审查与合入审批。",
+  "review_policy": "risk",
+  "review_checklist": ["实现符合批准的功能规格", "正向与失败场景有可复跑证据", "没有扩展既定修改边界"],
+  "quality": {"changed_line_coverage": 65.0},
+  "stages": [
+    {"id":"requirements","name":"需求确认","required_artifacts":["SRS"],"gates":[
+      {"id":"srs_approval","name":"功能规格与宪章批准","kind":"human_approval","scope":"project","blocking":true}]},
+    {"id":"architecture","name":"轻量方案","required_artifacts":["ADD"],"gates":[
+      {"id":"architecture_approval","name":"实施方案确认","kind":"human_approval","scope":"project","blocking":true}]},
+    {"id":"detailed_design","name":"独立详细设计","enabled":false},
+    {"id":"implementation","name":"实现功能"},
+    {"id":"code_review","name":"代码审查","gates":[
+      {"id":"human_code_review","name":"风险人工复核","kind":"human_approval","scope":"task","blocking":true}]},
+    {"id":"testing","name":"独立验证","gates":[
+      {"id":"quality_gate","name":"代码质量校验","kind":"quality","scope":"task","blocking":true}]},
+    {"id":"integration_delivery","name":"集成与交付","gates":[
+      {"id":"milestone_ci","name":"集成校验","kind":"ci","scope":"milestone","blocking":true},
+      {"id":"milestone_merge_approval","name":"合入审批","kind":"human_approval","scope":"milestone","blocking":true}]}
+  ]
+}

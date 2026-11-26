@@ -997,7 +997,7 @@ async def api_agent_config(request: Request, req: AgentConfigRequest) -> dict[st
         eng.settings.execution_pool = req.execution_pool
         eng.settings.selected_pool = ""
     if req.process_template is not None:
-        if req.process_template not in ("legacy", "standard", "feature", "bugfix", "doc_reverse"):
+        if req.process_template not in ("legacy", "standard", "feature", "bugfix", "doc_reverse", "quick-prototype"):
             raise HTTPException(422, f"不支持的流程模板: {req.process_template}")
         eng.settings.process_template = req.process_template
     if req.review_policy is not None:

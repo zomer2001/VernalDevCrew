@@ -32,7 +32,7 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
   let localSubMode = "host";
   let currentHostPath = "";
   let selectedHostPath = "";
-  let selectedRoute = { pool: "public_docker", harness: "dsh" };
+  let selectedRoute = { pool: "local_runner", harness: "auto" };
   const dismissedProjects = new Set();
   let pendingScratchDocs = [];
   let pendingImportFiles = [];
@@ -44,12 +44,12 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
     const rs = st?.runner_summary || {};
     const pub = rs.pools?.public_docker || {};
     const localHosts = (rs.pools?.local_runner?.runner_names || rs.runner_names || []).filter(Boolean);
-    const pubModel = pub.default_model || "deepseek-flash";
+    const pubModel = pub.default_model || "尚未配置";
     if (selectedRoute.pool === "public_docker") {
       const hName = selectedRoute.harness === "opencode" ? "OpenCode" : "DeepSeek Harness (dsh)";
       meta.textContent = `生效机器：公用 Docker 沙箱 · 执行器：${hName} · 模型：${pubModel}（公用池额度）`;
     } else if (selectedRoute.pool === "local_runner") {
-      meta.textContent = `生效机器：${localHosts.length ? localHosts.join("、") : "本机 Runner"} · 执行器：Codex（本机登录态）`;
+      meta.textContent = `生效机器：${localHosts.length ? localHosts.join("、") : "等待本机 Runner"} · 执行器：按执行机上报能力选择（本机登录态）`;
     } else {
       meta.textContent = `智能自动：优先本机（${localHosts.join("、") || "检测中"}），离线时回退公用沙箱（${pubModel}）`;
     }
@@ -342,7 +342,7 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
       $("wish-content")?.focus();
       toast("空目录已接入，请录入初始需求规格");
     }
-    if (res.council_started && onSwitchView) {
+    if ((res.council_started || res.mission_saved) && onSwitchView) {
       onSwitchView("council");
     }
   }
@@ -391,12 +391,12 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
     e.target._touched = true;
   });
 
-  $("launch-scratch-docs")?.addEventListener("change", async (e) => {
+  async function attachDocuments(fileList) {
     pendingScratchDocs = [];
-    const files = Array.from(e.target.files || []);
+    const files = Array.from(fileList || []);
     for (const f of files.slice(0, 12)) {
       if (f.size > 1024 * 1024) continue;
-      if (/\.(pdf|docx)$/i.test(f.name)) continue;
+      if (!/\.(md|txt|json|yaml|yml|proto)$/i.test(f.name)) continue;
       const content = await f.text();
       pendingScratchDocs.push({ filename: f.name, content });
     }
@@ -406,7 +406,11 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
         ? `已附加 ${pendingScratchDocs.length} 份文档：${pendingScratchDocs.map((d) => d.filename).join("、")}`
         : "支持附加 .md / .txt / .yaml / .proto 文本规格文档（PDF/DOCX 可放入工作区 inputs/ 摄入）";
     }
-  });
+  }
+  $("launch-scratch-docs")?.addEventListener("change", e=>attachDocuments(e.target.files));
+  const composer = panel.querySelector(".lf-composer");
+  composer?.addEventListener("dragover", e=>{e.preventDefault();});
+  composer?.addEventListener("drop", async e=>{e.preventDefault();try{await attachDocuments(e.dataTransfer?.files);}catch(err){toast(err.message);}});
 
   $("launch-browser-folder")?.addEventListener("change", async (e) => {
     pendingImportFiles = [];
@@ -464,6 +468,8 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
         method: "POST",
         body: JSON.stringify({
           ...bindingFields(),
+          guided_delivery: true,
+          intent: $("launch-intent")?.value || "feature",
           mode: "scratch",
           name: $("launch-scratch-name").value.trim(),
           wish: $("launch-scratch-wish").value.trim(),
@@ -506,6 +512,8 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
         method: "POST",
         body: JSON.stringify({
           ...bindingFields(),
+          guided_delivery: true,
+          intent: $("launch-intent")?.value || "feature",
           mode: "local_folder",
           name: $("launch-local-name")?.value?.trim() || "",
           local_path: localPath,
@@ -544,6 +552,8 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
         method: "POST",
         body: JSON.stringify({
           ...bindingFields(),
+          guided_delivery: true,
+          intent: $("launch-intent")?.value || "feature",
           name: $("launch-browser-name")?.value?.trim() || "导入项目",
           wish: $("launch-browser-wish")?.value?.trim() || "",
           files: pendingImportFiles,
@@ -583,6 +593,8 @@ export function initLauncher({ onProjectReady, onSwitchView }) {
         method: "POST",
         body: JSON.stringify({
           ...bindingFields(),
+          guided_delivery: true,
+          intent: $("launch-intent")?.value || "feature",
           mode: "git_repo",
           name: $("launch-git-name")?.value?.trim() || "",
           git_url: gitUrl,

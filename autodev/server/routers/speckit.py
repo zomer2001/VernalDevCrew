@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from autodev.server.deps import effective_actor, get_ctx
-from autodev.speckit import adapter, compiler, service
+from autodev.speckit import adapter, compiler, service, missions, preflight
 from autodev.speckit.assets import load_assets
 
 router=APIRouter()
@@ -56,14 +56,18 @@ def _engine(request, *, write=False):
                                   project=eng.settings.loopforge_project_id or eng.ws.root.name)
         except PermissionError as exc:
             raise HTTPException(403,detail=str(exc)) from exc
+        if eng.db.meta_get("mission.lease"):
+            raise HTTPException(409,detail="需求流程正在执行或待恢复，请先核对当前执行记录")
     return eng
 
 
 @router.get("/vernal-api/specifications")
 def state(request: Request):
     eng=_engine(request)
+    intake = [missions.view(eng,m) for m in missions.all_missions(eng)]
     if not service.enabled(eng):
-        return {"enabled":False,"legacy":eng.ws.prd_json_path.is_file(),"features":[]}
+        return {"enabled":False,"legacy":eng.ws.prd_json_path.is_file(),"features":[],"missions":intake,
+                "running":get_ctx(request).is_planning(get_ctx(request).active_slot(request))}
     try:
         lock,_=load_assets(eng)
         specs=service.current_specs(eng)
@@ -73,7 +77,7 @@ def state(request: Request):
             features.append({"feature_id":feature,"sources":{k:service.latest(eng,feature,k) for k in ("spec","plan","tasks","checklist","analyze")},
                              "clarifications":service.list_clarifications(eng,feature),
                              "last_step":json.loads(eng.db.meta_get(f"speckit.last_step:{feature}") or "null")})
-        return {"enabled":True,"assets":lock,"features":features,
+        return {"enabled":True,"assets":lock,"features":features,"missions":intake,
                 "constitution":service.latest(eng,"project","constitution"),
                 "running":get_ctx(request).is_planning(get_ctx(request).active_slot(request))}
     except (ValueError,OSError) as exc:
@@ -150,5 +154,136 @@ def publish(feature_id: str,req: PublishRequest,request: Request):
     try:
         return {"task_ids":compiler.publish_tasks(_engine(request,write=True),feature_id,
                                                   expected_hashes=req.expected_hashes,actor=effective_actor())}
+    except (ValueError,OSError) as exc:
+        raise _error(exc) from exc
+
+
+class MissionRequest(BaseModel):
+    feature_id: str
+    brief: str = Field(min_length=1,max_length=50000)
+    intent: Literal["new_system","feature","bugfix","refactor","documentation"] = "feature"
+    expected_revision: int = Field(default=0,ge=0)
+
+
+class ContinueRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+
+
+class MissionAnswer(BaseModel):
+    clarify_id: int
+    answer: str = Field(min_length=1,max_length=10000)
+    supplement: str = Field(default="",max_length=10000)
+
+
+class MissionAnswers(BaseModel):
+    expected_rev_id: int = Field(ge=1)
+    answers: list[MissionAnswer] = Field(min_length=1,max_length=3)
+
+
+class PrerequisiteEvidence(ContinueRequest):
+    key: str
+    evidence: str = Field(min_length=1,max_length=10000)
+
+
+def _idle(request):
+    ctx=get_ctx(request);slot=ctx.active_slot(request)
+    if ctx.is_planning(slot) or ctx.is_scheduler_running(slot):
+        raise service.SpecConflictError("项目已有规划或执行任务，请结束后继续")
+    return ctx,slot
+
+
+async def _continue(request,feature,revision):
+    eng=_engine(request,write=True)
+    ctx,slot=_idle(request)
+    # Reserve before network await, so concurrent submissions cannot both pass preflight.
+    token=missions.reserve(eng,feature,revision)
+    try:
+        result=await preflight.inspect(eng)
+        if not result["ready"]:
+            missions.release(eng,token)
+            return {"started":False,"preflight":result}
+        actor=effective_actor()
+        async def work():
+            try:
+                await missions.advance(eng,feature,token,actor=actor)
+            except Exception:
+                pass  # advance persists the exact failure and audit event.
+        slot.plan_task=ctx.start_background(slot,"_mission",work())
+        return {"started":True,"preflight":result}
+    except BaseException:
+        missions.release(eng,token)
+        raise
+
+
+@router.get("/vernal-api/missions/preflight")
+async def mission_preflight(request: Request):
+    return await preflight.inspect(_engine(request))
+
+
+@router.post("/vernal-api/missions")
+def mission_save(req: MissionRequest,request: Request):
+    try:
+        _idle(request)
+        return missions.save(_engine(request,write=True),req.feature_id,req.brief,req.intent,req.expected_revision,actor=effective_actor())
+    except (ValueError,OSError) as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/vernal-api/missions/{feature}/continue")
+async def mission_continue(feature: str,req: ContinueRequest,request: Request):
+    try:
+        return await _continue(request,feature,req.expected_revision)
+    except (ValueError,OSError) as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/vernal-api/missions/{feature}/answers")
+async def mission_answers(feature: str,req: MissionAnswers,request: Request):
+    eng=_engine(request,write=True)
+    try:
+        _idle(request); missions.assert_idle(eng)
+        mission=missions.get(eng,feature)
+        if not mission:
+            raise ValueError("研发目标不存在")
+        ids={q["clarify_id"] for q in service.list_clarifications(eng,feature)}
+        if len({a.clarify_id for a in req.answers})!=len(req.answers) or any(a.clarify_id not in ids for a in req.answers):
+            raise ValueError("回答必须属于当前功能，且不能重复提交同一问题")
+        with eng.db.transaction():
+            from difflib import unified_diff
+            before=(service.latest(eng,feature) or {}).get("content_text", "")
+            rev=service.answer_batch(eng,feature,[a.model_dump() for a in req.answers],expected_rev_id=req.expected_rev_id,actor=effective_actor())
+            revision=rev["rev_id"]
+        remaining=any(q["status"]=="OPEN" and q["severity"]=="BLOCKING" for q in service.list_clarifications(eng,feature))
+        try:
+            result={"started":False} if remaining else await _continue(request,feature,mission["revision"])
+        except Exception as exc:
+            result={"started":False,"continuation_error":str(exc)}
+        diff="".join(unified_diff(before.splitlines(keepends=True),rev["content_text"].splitlines(keepends=True),fromfile="回答前",tofile="回答后"))
+        return {**result,"saved":True,"spec_rev_id":revision,"content":rev["content_text"],"diff":diff}
+    except (ValueError,OSError) as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/vernal-api/missions/{feature}/prerequisites")
+def mission_prerequisite(feature: str,req: PrerequisiteEvidence,request: Request):
+    try:
+        _idle(request)
+        return missions.prerequisite_evidence(_engine(request,write=True),feature,req.key,req.evidence,req.expected_revision,actor=effective_actor())
+    except (ValueError,OSError) as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/vernal-api/missions/recover")
+def mission_recover(request: Request):
+    try:
+        _idle(request)
+        eng=_engine(request)
+        from autodev.governance import check_role_permission
+        check_role_permission(eng.db,effective_actor(),("admin","architect","developer"),
+                              project=eng.settings.loopforge_project_id or eng.ws.root.name)
+        missions.recover(eng,actor=effective_actor())
+        return {"recovered":True}
+    except PermissionError as exc:
+        raise HTTPException(403,detail=str(exc)) from exc
     except (ValueError,OSError) as exc:
         raise _error(exc) from exc

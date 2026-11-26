@@ -1,4 +1,5 @@
 import { $, api, esc, toast, getActiveProjectId as currentProjectId } from "./api.js";
+import { renderMissions } from "./missions.js";
 
 const steps = {constitution:"建立项目约束",specify:"整理功能规格",clarify:"澄清需求边界",checklist:"检查规格质量",plan:"制定技术方案",tasks:"拆解实施任务",analyze:"核对交付一致性"};
 const kinds = {constitution:"项目宪章",spec:"功能规格",plan:"技术方案",tasks:"任务草案",checklist:"质量检查",analyze:"一致性检查"};
@@ -16,6 +17,7 @@ export async function renderSpecifications() {
   try { data=await api("/vernal-api/specifications"); }
   catch (err) { if (active()) mount.textContent=`功能规格暂不可用：${err.message}`; return; }
   if (!active()) return;
+  renderMissions(data,renderSpecifications);
   const act = fn => async ev => {
     if (!active()) return;
     const button=ev.currentTarget; button.disabled=true;

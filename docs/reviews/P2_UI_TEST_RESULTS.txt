@@ -1,0 +1,46 @@
+TAP version 13
+# Subtest: trace downloads follow the current project when the existing panel is reused
+ok 1 - trace downloads follow the current project when the existing panel is reused
+  ---
+  duration_ms: 4.364209
+  type: 'test'
+  ...
+# Subtest: clarification UI preserves project and revision, offers no implicit answer and posts one round
+ok 2 - clarification UI preserves project and revision, offers no implicit answer and posts one round
+  ---
+  duration_ms: 3.503
+  type: 'test'
+  ...
+# Subtest: zero unresolved questions leads directly to continuation and late responses never enter another project
+ok 3 - zero unresolved questions leads directly to continuation and late responses never enter another project
+  ---
+  duration_ms: 0.737875
+  type: 'test'
+  ...
+# Subtest: low risk defaults are collapsed and do not render a blocking question button
+ok 4 - low risk defaults are collapsed and do not render a blocking question button
+  ---
+  duration_ms: 0.308708
+  type: 'test'
+  ...
+# Subtest: specification panel drops stale project responses and binds edits to the displayed revision
+ok 5 - specification panel drops stale project responses and binds edits to the displayed revision
+  ---
+  duration_ms: 2.623083
+  type: 'test'
+  ...
+# Subtest: switching projects drops cached events and ignores a delayed response
+ok 6 - switching projects drops cached events and ignores a delayed response
+  ---
+  duration_ms: 2.167625
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 134.434625

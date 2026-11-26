@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -71,6 +71,8 @@ class ProjectSelectRequest(BaseModel):
 
 
 class ProjectCreateRequest(BaseModel):
+    guided_delivery: bool = False
+    intent: Literal["new_system", "feature", "bugfix", "refactor", "documentation"] = "new_system"
     mode: str = "scratch"  # scratch | local_folder | git_repo
     name: str = ""
     project_id: str = ""
@@ -91,6 +93,8 @@ class ProjectCreateRequest(BaseModel):
 
 
 class ImportFolderRequest(BaseModel):
+    guided_delivery: bool = False
+    intent: Literal["new_system", "feature", "bugfix", "refactor", "documentation"] = "feature"
     name: str
     project_id: str = ""
     bind_existing: bool = False
