@@ -285,6 +285,10 @@ class LoopForgeProxy:
         for k, v in resp_headers:
             if k.lower() != "content-type":
                 response.headers.append(k, v)
+        if upstream_resp.status_code >= 400 and path.startswith("/api/runs/") and path.endswith("/telemetry"):
+            body_preview = raw[:512].decode("utf-8", errors="ignore").lower()
+            if "1054" in body_preview and "unknown column" in body_preview and "adapter" in body_preview:
+                response.headers["X-Vernal-Upstream-Diagnostic"] = "upstream-schema-column-missing:run_telemetry.adapter"
         for sc in set_cookies:
             response.headers.append("set-cookie", sc)
         return response

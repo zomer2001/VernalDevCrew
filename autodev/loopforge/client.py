@@ -118,6 +118,38 @@ class LoopForgeClient:
         except LoopForgeError as exc:
             return False, {"error": str(exc)}
 
+    async def check_telemetry_schema(self, run_id: str) -> dict[str, Any]:
+        """Read-only probe distinguishing LoopForge liveness from run_telemetry schema compatibility."""
+        rid = (run_id or "").strip()
+        if not rid:
+            return {"checked": False, "compatible": None, "code": "", "reason": "暂无历史运行记录可供数据结构检查"}
+        endpoint = f"/api/runs/{quote(rid, safe='')}/telemetry"
+        try:
+            await self._req("GET", endpoint, params={"limit": "1", "adapter": "live"})
+            return {"checked": True, "compatible": True, "status_code": 200, "endpoint": endpoint, "code": "", "reason": ""}
+        except LoopForgeError as exc:
+            msg = str(exc)
+            low = msg.lower()
+            if "1054" in low and "adapter" in low:
+                return {
+                    "checked": True,
+                    "compatible": False,
+                    "status_code": exc.status_code,
+                    "endpoint": endpoint,
+                    "code": "UPSTREAM_SCHEMA_COLUMN_MISSING",
+                    "table": "run_telemetry",
+                    "column": "adapter",
+                    "reason": msg,
+                }
+            return {
+                "checked": True,
+                "compatible": False,
+                "status_code": exc.status_code,
+                "endpoint": endpoint,
+                "code": "UPSTREAM_TELEMETRY_ERROR",
+                "reason": msg,
+            }
+
     async def gitea_health(self, gitea_url: str) -> tuple[bool, dict[str, Any]]:
         url = f"{gitea_url.rstrip('/')}/api/v1/version"
         try:

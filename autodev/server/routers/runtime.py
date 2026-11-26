@@ -107,6 +107,8 @@ async def api_runtime_status(request: Request) -> dict[str, Any]:
             "workflow_id": eng.settings.loopforge_workflow_id,
             "repository_id": eng.settings.loopforge_repository_id,
             "health": lf_health,
+            "schema_ready": None,
+            "schema_diagnostics": {"checked": False, "compatible": None, "code": "", "reason": ""},
         },
         "gitea": {
             "url": gitea_public,
@@ -154,6 +156,11 @@ async def api_runtime_status(request: Request) -> dict[str, Any]:
             payload["online_runners"] = online_runners
             payload["runners_online_count"] = len(online_runners)
             payload["recent_runs"] = [r for r in runs if run_project_id(r) == eng.settings.loopforge_project_id][:25]
+            probe_run_id = str((payload["recent_runs"][0] if payload["recent_runs"] else {}).get("id") or "")
+            if probe_run_id:
+                schema_diag = await client.check_telemetry_schema(probe_run_id)
+                payload["loopforge"]["schema_diagnostics"] = schema_diag
+                payload["loopforge"]["schema_ready"] = schema_diag.get("compatible")
         except LoopForgeError as exc:
             payload["auth_error"] = str(exc)
     return payload

@@ -14,6 +14,15 @@ if docker info >/dev/null 2>&1; then
     echo "$svc ${status:-未运行}"
     [[ "$status" == healthy || "$status" == running ]] || bad=1
   done
+  mysql_id="$(docker compose --profile full ps -q mysql)"
+  if [[ -n "$mysql_id" ]]; then
+    adapter_col="$(docker exec "$mysql_id" sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -N -B -u "$MYSQL_USER" "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='\''run_telemetry'\'' AND COLUMN_NAME='\''adapter'\'';"' 2>/dev/null || true)"
+    if [[ "$adapter_col" == "1" ]]; then
+      echo "loopforge-schema run_telemetry.adapter 就绪"
+    elif [[ "$adapter_col" == "0" ]]; then
+      echo "loopforge-schema 不兼容：服务存活但 run_telemetry 缺少 adapter 列（上游详情页 telemetry?adapter= 筛选会触发 MySQL 1054）"
+    fi
+  fi
   if [[ "${VERNAL_ENABLE_CI:-0}" == "1" ]]; then
     if [[ -s .runner/pool/act-runner-token ]]; then
       echo "act-runner-token 已就绪"
