@@ -1,0 +1,58 @@
+TAP version 13
+# Subtest: trace downloads follow the current project when the existing panel is reused
+ok 1 - trace downloads follow the current project when the existing panel is reused
+  ---
+  duration_ms: 25.979333
+  type: 'test'
+  ...
+# Subtest: clarification UI preserves project and revision, offers no implicit answer and posts one round
+ok 2 - clarification UI preserves project and revision, offers no implicit answer and posts one round
+  ---
+  duration_ms: 8.371125
+  type: 'test'
+  ...
+# Subtest: zero unresolved questions leads directly to continuation and late responses never enter another project
+ok 3 - zero unresolved questions leads directly to continuation and late responses never enter another project
+  ---
+  duration_ms: 0.978042
+  type: 'test'
+  ...
+# Subtest: low risk defaults are collapsed and do not render a blocking question button
+ok 4 - low risk defaults are collapsed and do not render a blocking question button
+  ---
+  duration_ms: 0.540917
+  type: 'test'
+  ...
+# Subtest: empty answers stay editable and retry succeeds after the browser clears currentTarget
+ok 5 - empty answers stay editable and retry succeeds after the browser clears currentTarget
+  ---
+  duration_ms: 1.185667
+  type: 'test'
+  ...
+# Subtest: preflight restores its button after success or failure and prevents concurrent retries
+ok 6 - preflight restores its button after success or failure and prevents concurrent retries
+  ---
+  duration_ms: 0.8555
+  type: 'test'
+  ...
+# Subtest: specification panel drops stale project responses and binds edits to the displayed revision
+ok 7 - specification panel drops stale project responses and binds edits to the displayed revision
+  ---
+  duration_ms: 4.995916
+  type: 'test'
+  ...
+# Subtest: switching projects drops cached events and ignores a delayed response
+ok 8 - switching projects drops cached events and ignores a delayed response
+  ---
+  duration_ms: 3.931084
+  type: 'test'
+  ...
+1..8
+# tests 8
+# suites 0
+# pass 8
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 254.798125
