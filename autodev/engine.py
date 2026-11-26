@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import json
 import re
@@ -131,6 +132,10 @@ class Engine:
         self.ws = ws
         self.settings = settings or ws.load_settings()
         self.db = db or Database(ws.db_path)
+        from autodev.security import initialize_project_signing
+        with self.db.transaction():
+            initialize_project_signing(ws, self.settings)
+        self.planning_stop = asyncio.Event()
         self._harness = harness
         self._runtimes_cache: dict[str, dict[str, Any]] | None = None
         ws.ensure_dirs()
@@ -144,11 +149,11 @@ class Engine:
         if link:
             return LinkWorkerHarness(self, link)
         if self._harness is None:
-            if self.settings.runtime_backend == "loopforge" and self.settings.effective_loopforge_token():
+            if self.settings.runtime_backend == "loopforge":
                 from autodev.harnesses.loopforge_harness import LoopForgeHarness
 
                 self._harness = LoopForgeHarness(
-                    self.settings, self.db, self.ws, activity_cb=self._on_activity
+                    self.settings, self.db, self.ws, activity_cb=self._on_activity, stop_event=self.planning_stop
                 )
             else:
                 self._harness = create_harness(self.settings, activity_cb=self._on_activity)
@@ -258,6 +263,9 @@ class Engine:
             for k in total:
                 total[k] += u.get(k, 0)
 
+        from autodev.process.runner import list_gate_records
+
+        slice_cnt = len(self.db.list_slices())
         return {
             "name": self.db.meta_get("name", self.ws.root.name),
             "root": str(self.ws.root),
@@ -265,10 +273,12 @@ class Engine:
             "planning_mode": self.db.meta_get("planning_mode", self.settings.planning_mode),
             "has_prd": self.ws.prd_json_path.exists(),
             "council_count": len(self.db.list_council_messages()),
+            "pending_gates_count": len(list_gate_records(self.db, status="PENDING")),
             "prd_vision": self.db.meta_get("prd_vision", ""),
             "plan_summary": self.db.meta_get("plan_summary", ""),
             "contract_hash": self.db.meta_get("contract_hash", ""),
-            "slices": len(self.db.list_slices()),
+            "slices": slice_cnt,
+            "slices_count": slice_cnt,
             "squads": squads,
             "worker_slots": self.db.list_slots(),
             "runtimes": self.runtimes_status(),
@@ -283,7 +293,10 @@ class Engine:
                 "enable_pm_spec": self.settings.enable_pm_spec,
                 "runtime_backend": self.settings.runtime_backend,
                 "execution_pool": self.settings.execution_pool,
+                "native_executor_user_id": self.settings.native_executor_user_id,
+                "native_approver_user_id": self.settings.native_approver_user_id,
                 "loopforge_url": self.settings.loopforge_url,
+                "loopforge_project_id": self.settings.loopforge_project_id,
                 "loopforge_configured": bool(self.settings.effective_loopforge_token() and self.settings.loopforge_project_id),
                 "gitea_url": self.settings.gitea_url,
                 "max_concurrency": self.settings.max_concurrency,
@@ -304,6 +317,10 @@ class Engine:
                 "director_model": self.settings.director_model,
                 "coder_model": self.settings.coder_model,
                 "qa_model": self.settings.qa_model,
+                "process_template": self.settings.process_template,
+                "review_policy": self.settings.review_policy,
+                "doc_profile": self.settings.doc_profile,
+                "ci_provider": self.settings.ci_provider,
             },
         }
 
@@ -422,6 +439,22 @@ class Engine:
                     )
                     self.db.meta_set("prd_vision", spec.product_vision)
                     self.set_status(ProjectStatus.SPECIFIED)
+                    from autodev.process.runner import ensure_gate_record, load_template
+
+                    tpl = load_template(self.ws, self.settings)
+                    req_stage = next((s for s in tpl.stages if s.id == "requirements" and s.enabled), None)
+                    if req_stage:
+                        for g in req_stage.gates:
+                            if g.id == "srs_approval" and g.blocking:
+                                ensure_gate_record(
+                                    self.db,
+                                    stage_id="requirements",
+                                    gate_id=g.id,
+                                    kind=g.kind,
+                                    scope_type="project",
+                                    scope_id="project",
+                                    summary="需求规格书已生成，等待人工评审签字",
+                                )
                     self.db.add_event(
                         "pm.done",
                         f"产品规格书已生成：docs/PRD_SPEC.md（{len(spec.core_workflows)} 条业务流，{len(spec.edge_cases)} 项边界约定）",
@@ -500,6 +533,41 @@ class Engine:
             current_task.reset(t_tok)
         raise PlanningError(errors)
 
+    def _sync_planning_gates(self) -> None:
+        from autodev.process.runner import decide_gate, ensure_gate_record, load_template
+
+        tpl = load_template(self.ws, self.settings)
+        arch_stage = next((s for s in tpl.stages if s.id == "architecture" and s.enabled), None)
+        if arch_stage:
+            for g in arch_stage.gates:
+                if g.id == "architecture_approval":
+                    rec = ensure_gate_record(
+                        self.db,
+                        stage_id="architecture",
+                        gate_id=g.id,
+                        kind=g.kind,
+                        scope_type="project",
+                        scope_id="project",
+                        summary="架构与立项蓝图已就绪，等待评审确认",
+                    )
+                    if not self.settings.require_plan_approval and rec["status"] == "PENDING":
+                        decide_gate(self.db, int(rec["record_id"]), "pass", actor="system", comment="require_plan_approval=false 自动放行")
+        dd_stage = next((s for s in tpl.stages if s.id == "detailed_design" and s.enabled), None)
+        if dd_stage:
+            for g in dd_stage.gates:
+                if g.id == "detailed_design_approval" and g.blocking:
+                    for ms in self.db.list_milestones():
+                        if ms.planned:
+                            ensure_gate_record(
+                                self.db,
+                                stage_id="detailed_design",
+                                gate_id=g.id,
+                                kind=g.kind,
+                                scope_type="milestone",
+                                scope_id=ms.milestone_id,
+                                summary=f"里程碑 {ms.milestone_id} 详细设计待评审",
+                            )
+
     def _apply_blueprint(self, bp: ProjectBlueprint, ident: dict[str, str]) -> None:
         self.db.save_blueprint(bp, self.settings.max_retries)
         bp_dict = bp.model_dump()
@@ -536,6 +604,7 @@ class Engine:
             actor=ident["label"],
         )
         self.set_status(ProjectStatus.PLANNED if self.settings.require_plan_approval else ProjectStatus.APPROVED)
+        self._sync_planning_gates()
 
     # ---------- 统一规划入口（classic 单次模式 / goal 多角色滚动模式） ----------
     async def plan(
@@ -641,6 +710,7 @@ class Engine:
             payload={"milestones": [m.milestone_id for m in plan.milestones]},
         )
         self.set_status(ProjectStatus.PLANNED if self.settings.require_plan_approval else ProjectStatus.APPROVED)
+        self._sync_planning_gates()
 
     # ---------- 研发总监：滚动展开下一里程碑 ----------
     async def expand_milestone_wave(self, milestone_id: str, max_attempts: int = 3) -> MilestoneWavePlan:
@@ -879,6 +949,37 @@ class Engine:
     def approve_plan(self, actor: str = "owner") -> None:
         if self.status != ProjectStatus.PLANNED:
             raise OpsError(f"当前状态 {self.status} 不需要批准规划")
+        from autodev.process.runner import decide_gate, ensure_gate_record, is_gate_passed, load_template
+
+        tpl = load_template(self.ws, self.settings)
+        req_stage = next((s for s in tpl.stages if s.id == "requirements" and s.enabled), None)
+        if req_stage and any(g.id == "srs_approval" and g.blocking for g in req_stage.gates):
+            if not is_gate_passed(self.db, "srs_approval", "project", "project"):
+                ensure_gate_record(
+                    self.db,
+                    stage_id="requirements",
+                    gate_id="srs_approval",
+                    kind="human_approval",
+                    scope_type="project",
+                    scope_id="project",
+                    summary="批准研发蓝图前需先完成需求规格 (SRS) 评审",
+                )
+                raise OpsError("当前流程模板要求先通过需求规格说明书 (SRS) 评审门禁，再批准研发蓝图")
+
+        arch_stage = next((s for s in tpl.stages if s.id == "architecture" and s.enabled), None)
+        if arch_stage and any(g.id == "architecture_approval" for g in arch_stage.gates):
+            rec = ensure_gate_record(
+                self.db,
+                stage_id="architecture",
+                gate_id="architecture_approval",
+                kind="human_approval",
+                scope_type="project",
+                scope_id="project",
+                summary="立项蓝图批准",
+            )
+            if rec["status"] == "PENDING":
+                decide_gate(self.db, int(rec["record_id"]), "pass", actor=actor, comment="批准研发蓝图")
+
         self.set_status(ProjectStatus.APPROVED)
         self.db.add_event("plan.approved", "立项蓝图与规划已批准，可启动全自动滚动研发", actor=actor)
 
@@ -923,6 +1024,32 @@ class Engine:
             raise OpsError(f"{task_id} 已合入主干，不能重开")
         if task.status in (TaskStatus.BLOCKED, TaskStatus.READY) and not note.strip():
             raise OpsError(f"{task_id} 尚未执行，无需接管")
+        recovered = {}
+        if verify_only and self.settings.runtime_backend == "loopforge":
+            from autodev.artifacts import snapshot
+            wt = Path(task.worktree_path).resolve() if task.worktree_path else None
+            trusted_wt = wt and wt.is_relative_to(self.ws.worktrees_dir.resolve()) and wt.is_dir()
+            try:
+                if self.settings.collaboration_mode == "files":
+                    exchange = FileExchange(self.ws,self.db)
+                    if task.artifact_digest:
+                        exchange.get(task.artifact_digest)
+                    elif trusted_wt:
+                        before = exchange.baseline(task.depends_on)
+                        protected = [] if task.role in ("contract","bootstrap") else self.settings.protected_paths
+                        key = exchange.patch(task,before,snapshot(wt),protected)
+                        recovered["artifact_digest"] = key
+                        self.db.meta_set(f"verified-base:{task_id}:{key}",exchange.put(before))
+                    else:
+                        raise ValueError("缺少文件快照")
+                elif task.candidate_commit_sha:
+                    gitops.git(["cat-file","-e",f"{task.candidate_commit_sha}^{{commit}}"], self.ws.root)
+                elif trusted_wt and task.base_sha:
+                    recovered["candidate_commit_sha"] = gitops.freeze_candidate(wt,task.base_sha)
+                else:
+                    raise ValueError("缺少 Git 候选")
+            except (OSError,ValueError,gitops.GitError) as exc:
+                raise OpsError(f"没有可还原的候选可供复验：{exc}") from exc
         self.db.update_task(
             task_id,
             status=TaskStatus.READY if task.status != TaskStatus.BLOCKED else TaskStatus.BLOCKED,
@@ -932,7 +1059,8 @@ class Engine:
             pending_action="verify_only" if verify_only else None,
             owner_member=actor,
             failure_reason=None,
-            loopforge_run_id=None,
+            loopforge_run_id=task.loopforge_run_id if verify_only else None,
+            **recovered,
         )
         ms = self.db.get_milestone(task.milestone_id)
         if ms and ms.status in (MilestoneStatus.FAILED, MilestoneStatus.AWAITING_MERGE):
@@ -954,21 +1082,127 @@ class Engine:
             self.set_status(ProjectStatus.APPROVED)
 
     def merge_milestone(self, milestone_id: str, actor: str) -> None:
-        with self.db.transaction():
-            self._merge_milestone(milestone_id, actor)
+        import fcntl
+        from autodev.review.service import current_milestone_candidate_ref
 
-    def _merge_milestone(self, milestone_id: str, actor: str) -> None:
-        history = self.db.list_milestone_deliveries(milestone_id)
-        version = history[-1]["version_no"] + 1 if history else 1
-        previous = history[-1]["commit_sha"] if history else ""
+        with (self.ws.state_dir / "publication.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise OpsError("已有里程碑正在发布") from exc
+            with self.db.transaction():
+                ms, current_cand, version, previous = self._reserve_publication(milestone_id)
+            try:
+                delivery, message = self._publish_candidate(ms, version, previous, current_cand)
+                from autodev.ci.service import write_release_notes_and_tag
+                release_tag = write_release_notes_and_tag(self, milestone_id, version, delivery.get("commit_sha"))
+                with self.db.transaction():
+                    current = self.db.get_milestone(milestone_id)
+                    if current.status != MilestoneStatus.PUBLISHING or current_milestone_candidate_ref(self, milestone_id) != current_cand:
+                        raise OpsError("发布期间候选状态发生变化，请核对交付记录")
+                    self.db.record_milestone_delivery(milestone_id, version, **delivery)
+                    from autodev.trace.candidate import delivery_evidence
+                    self.db._exec("UPDATE milestone_deliveries SET evidence_json=? WHERE milestone_id=? AND version_no=?",
+                        (json.dumps(delivery_evidence(self.db, milestone_id, current_cand, release_tag=release_tag, publication=delivery), ensure_ascii=False), milestone_id, version))
+                    for task in self.db.list_tasks(milestone_id=milestone_id):
+                        if task.status != TaskStatus.CANCELLED:
+                            self.db.update_task(task.task_id, status=TaskStatus.MERGED, assigned_slot=None, active_agent_label=None)
+                    self.db.update_milestone(milestone_id, status=MilestoneStatus.MERGED)
+                    self.db.add_event("milestone.merged", message, actor=actor)
+                    from autodev.process.runner import decide_gate, latest_gate_record
+                    gate = latest_gate_record(self.db, "milestone_merge_approval", "milestone", milestone_id)
+                    if gate and gate["status"] == "PENDING":
+                        decide_gate(self.db, gate["record_id"], "pass", actor=actor, comment="里程碑合入签字完成")
+                    if all(m.status == MilestoneStatus.MERGED for m in self.db.list_milestones()):
+                        self.set_status(ProjectStatus.COMPLETED)
+                        self.db.add_event("project.completed", "全部里程碑已合入主干")
+            except BaseException:
+                self.db._exec("UPDATE milestones SET status=? WHERE milestone_id=? AND status=?",
+                    (MilestoneStatus.AWAITING_MERGE, milestone_id, MilestoneStatus.PUBLISHING))
+                raise
+        deliveries = self.db.list_milestone_deliveries(milestone_id)
+        if deliveries:
+            from autodev.docs_center.service import generate_milestone_test_report
+            from autodev.process.runner import load_template
+            tpl = load_template(self.ws, self.settings)
+            wants_test_doc = any(
+                "TEST_REPORT" in (s.required_artifacts or []) for s in tpl.stages if s.enabled
+            )
+            if wants_test_doc:
+                rel_doc = generate_milestone_test_report(self, milestone_id)
+                if self.settings.collaboration_mode == "git":
+                    self.record_documents([rel_doc], f"autodev(qa): archive {rel_doc}")
+
+    def _reserve_publication(self, milestone_id):
+        from autodev.ci.service import ci_gate_enabled, list_ci_runs
+        from autodev.process.runner import is_gate_passed, load_template
+        from autodev.review.policy import effective_review_policy
+        from autodev.review.service import current_milestone_candidate_ref, list_reviews
+
         ms = self.db.get_milestone(milestone_id)
         if ms is None:
             raise OpsError(f"里程碑不存在: {milestone_id}")
-        if ms.status == MilestoneStatus.AWAITING_MERGE and self.settings.collaboration_mode == "files":
+
+        current_cand = current_milestone_candidate_ref(self, milestone_id)
+        if self.settings.collaboration_mode == "files":
+            materialized = self.db.meta_get(f"delivery:{milestone_id}")
+        else:
+            materialized = gitops.head_sha(self.ws.root, ms.branch_name) if ms.branch_name else ""
+        if materialized and current_cand and materialized != current_cand:
+            raise OpsError("待交付产物已变化，请重新集成、验收当前候选")
+
+        if effective_review_policy(self.ws, self.settings) == "milestone":
+            ms_revs = list_reviews(self.db, scope_type="milestone", scope_id=milestone_id)
+            if not ms_revs:
+                raise OpsError(f"{milestone_id} 尚未通过里程碑人工代码审查，禁止合入")
+            latest_rev = ms_revs[0]
+            if latest_rev["status"] != "APPROVED" or (current_cand and latest_rev["head_ref"] != current_cand):
+                raise OpsError(f"{milestone_id} 当前候选尚未通过里程碑人工代码审查，禁止合入")
+
+        tpl = load_template(self.ws, self.settings)
+        if ci_gate_enabled(self):
+            if not is_gate_passed(self.db, "milestone_ci", "milestone", milestone_id):
+                raise OpsError(f"{milestone_id} 尚未通过持续集成 (CI) 流水线门禁，禁止合入")
+            ci_rows = list_ci_runs(self.db, milestone_id)
+            if not ci_rows or ci_rows[0]["status"] != "SUCCESS":
+                raise OpsError(f"{milestone_id} 最新一轮持续集成 (CI) 未通过，禁止合入")
+            latest_ci_cand = str(ci_rows[0].get("candidate_ref") or "").strip()
+            if current_cand and latest_ci_cand and latest_ci_cand != current_cand:
+                raise OpsError(f"{milestone_id} 当前候选版本尚未完成持续集成 (CI) 验证，禁止合入")
+
+        # WP-6：若流程模板配置了阻塞级 trace_coverage 门禁，校验 P0 需求测试覆盖
+        trace_gates = [g for stage in tpl.stages if stage.enabled for g in stage.gates
+                       if g.kind == "trace_coverage" and g.blocking]
+        if trace_gates:
+            from autodev.trace.service import check_p0_trace_gate
+
+            strict = any(g.config.get("metric") == "verified_candidate_pass_rate" for g in trace_gates)
+            ok_trace, trace_msg = check_p0_trace_gate(self, verified_candidate=strict)
+            if not ok_trace:
+                raise OpsError(trace_msg)
+
+        history = self.db.list_milestone_deliveries(milestone_id)
+        version = history[-1]["version_no"] + 1 if history else 1
+        previous = history[-1]["commit_sha"] if history else ""
+        if ms.status not in (MilestoneStatus.AWAITING_MERGE, MilestoneStatus.PUBLISHING):
+            raise OpsError(f"{milestone_id} 当前状态 {ms.status}，不能合并")
+        previous_intent = json.loads(self.db.meta_get(f"publication:{milestone_id}") or "null")
+        if previous_intent and previous_intent[1] >= version:
+            version = previous_intent[1] + int(previous_intent[0] != current_cand)
+        intent = json.dumps([current_cand, version])
+        if ms.status == MilestoneStatus.PUBLISHING and self.db.meta_get(f"publication:{milestone_id}") != intent:
+            raise OpsError("中断的发布与当前候选不一致")
+        self.db.meta_set(f"publication:{milestone_id}", intent)
+        self.db.update_milestone(milestone_id, status=MilestoneStatus.PUBLISHING)
+        return ms, current_cand, version, previous
+
+    def _publish_candidate(self, ms, version, previous, candidate):
+        milestone_id = ms.milestone_id
+        if self.settings.collaboration_mode == "files":
             from tempfile import NamedTemporaryFile, TemporaryDirectory
 
             exchange = FileExchange(self.ws, self.db)
-            key = self.db.meta_get(f"delivery:{milestone_id}")
+            key = candidate
             files = exchange.get(key)
             is_inplace = self.db.meta_get("source_mode") == "local_folder"
             changed_paths: list[str] = []
@@ -1045,21 +1279,13 @@ class Engine:
                         Path(tf.name).replace(target)
 
                 self.db.meta_set("last_inplace_digest", key)
-            self.db.record_milestone_delivery(milestone_id, version, "files", artifact_digest=key)
-            for task in self.db.list_tasks(milestone_id=milestone_id):
-                if task.status != TaskStatus.CANCELLED:
-                    self.db.update_task(task.task_id, status=TaskStatus.MERGED)
-            self.db.update_milestone(milestone_id, status=MilestoneStatus.MERGED)
             msg = (
                 f"已写回原目录（更新 {len(changed_paths)} 个文件）并归档交付至 {destination}"
                 if is_inplace
                 else f"已交付文件 {destination}"
             )
-            self.db.add_event("milestone.merged", msg, actor=actor)
-            if all(m.status == MilestoneStatus.MERGED for m in self.db.list_milestones()):
-                self.set_status(ProjectStatus.COMPLETED)
-            return
-        if ms.status != MilestoneStatus.AWAITING_MERGE or not ms.branch_name:
+            return {"collab_mode": "files", "artifact_digest": key}, msg
+        if not ms.branch_name:
             raise OpsError(f"{milestone_id} 当前状态 {ms.status}，不能合并")
         root, base = self.ws.root, self.settings.base_branch
         source = self.db.meta_get("git_delivery_source")
@@ -1070,7 +1296,9 @@ class Engine:
         if not gitops.is_clean(root):
             raise OpsError("主仓库工作区存在未提交改动，请先提交或清理后再合并")
         prev_sha = gitops.head_sha(root)
-        gitops.fast_forward(root, ms.branch_name, f"autodev: merge milestone {milestone_id}")
+        if gitops.git(["merge-base","--is-ancestor",prev_sha,candidate],root,check=False).returncode:
+            raise OpsError("主分支已有候选之外的提交，请重新集成后交付")
+        gitops.git(["merge","--ff-only",candidate],root)
         merged_sha = gitops.head_sha(root)
         pushed_remote = False
         from autodev import local_git_bridge
@@ -1103,7 +1331,7 @@ class Engine:
                     raise
                 published_branch = archive
                 self.db.add_event("milestone.delivery_conflict",
-                                  f"检测到交付分支存在人工新提交，保留人工提交，第 {version} 版已发布至 {archive}", actor=actor)
+                                  f"检测到交付分支存在人工新提交，保留人工提交，第 {version} 版已发布至 {archive}", actor="Publisher")
             if not source and gitops.has_remote(root, "origin"):
                 ok_push, detail = gitops.push_branch(root, base, remote="origin")
                 if not ok_push:
@@ -1116,25 +1344,15 @@ class Engine:
         if not git_url:
             git_url = gitops.git(["remote", "get-url", "origin"], target, check=False).stdout.strip()
         self.db.meta_set(f"delivery_branch:{milestone_id}", published_branch)
-        self.db.record_milestone_delivery(milestone_id, version, "git", commit_sha=merged_sha,
-                                          prev_commit_sha=previous or None, rolling_branch=delivery_branch,
-                                          archive_branch=archive, compare_url=local_git.compare_url(git_url, base, archive))
+        delivery = dict(collab_mode="git", commit_sha=merged_sha, prev_commit_sha=previous or None,
+                        rolling_branch=delivery_branch, archive_branch=archive, compare_url=local_git.compare_url(git_url, base, archive))
         for t in self.db.list_tasks(milestone_id=milestone_id):
-            if t.status == TaskStatus.CANCELLED:
-                continue
-            self.db.update_task(t.task_id, status=TaskStatus.MERGED, assigned_slot=None, active_agent_label=None)
             if t.worktree_path:
                 gitops.remove_worktree(root, Path(t.worktree_path))
                 self.db.update_task(t.task_id, worktree_path=None)
         gitops.remove_worktree(root, self.ws.integration_dir / milestone_id)
-        self.db.update_milestone(milestone_id, status=MilestoneStatus.MERGED)
         self.db.meta_set("contract_hash", gitops.tree_fingerprint(root, self.settings.protected_paths))
         push_note = " 并推送至 origin" if pushed_remote else ""
         if published_branch:
             push_note = f"，已交付到原仓库分支 {published_branch}"
-        self.db.add_event(
-            "milestone.merged", f"{milestone_id} 已合入 {base}{push_note}（{merged_sha[:10]}）", actor=actor
-        )
-        if all(m.status == MilestoneStatus.MERGED for m in self.db.list_milestones()):
-            self.set_status(ProjectStatus.COMPLETED)
-            self.db.add_event("project.completed", "全部里程碑已合入主干 🎉")
+        return delivery, f"{milestone_id} 已合入 {base}{push_note}（{merged_sha[:10]}）"

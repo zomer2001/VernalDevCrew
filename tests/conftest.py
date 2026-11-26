@@ -5,3 +5,4 @@ import pytest
 def isolate_deployment_credentials(tmp_path, monkeypatch):
     """Keep local deployment credentials and image markers outside test runs."""
     monkeypatch.setenv("VERNAL_POOL_DIR", str(tmp_path / "test-deployment-pool"))
+    monkeypatch.setenv("VERNAL_SERVICE_TOKEN_FILE", str(tmp_path / "test-deployment.token"))

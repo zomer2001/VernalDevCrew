@@ -294,7 +294,8 @@ async def synthesize_council(
                     )
                 )
                 engine.db.meta_set("prd_vision", consensus.executive_summary)
-                engine.set_status(ProjectStatus.SPECIFIED)
+                if engine.status in (ProjectStatus.CREATED, ProjectStatus.INGESTED, ProjectStatus.SPECIFIED):
+                    engine.set_status(ProjectStatus.SPECIFIED)
                 try:
                     from autodev.steering import sync_council_adrs_to_decisions
 
@@ -317,12 +318,19 @@ async def synthesize_council(
     raise PlanningError(errors)
 
 
-async def interject_council(engine: "Engine", actor: str, note: str) -> CouncilConsensus:
+async def interject_council(engine: "Engine", actor: str, note: str, *, refresh_blueprint: bool = True) -> CouncilConsensus:
     from autodev.engine import OpsError
+    from autodev.models import TaskStatus
 
     note = note.strip()
     if not note:
         raise OpsError("插话内容不能为空")
+    progressed = [
+        t for t in engine.db.list_tasks() if t.status not in (TaskStatus.BLOCKED, TaskStatus.READY, TaskStatus.CANCELLED)
+    ]
+    if progressed:
+        raise OpsError("已有任务进入编码执行阶段，请通过「变更与评审」发起局部调整，避免推翻已完成工作")
+    had_blueprint = bool(engine.db.list_milestones()) and engine.db.meta_get("planning_mode") == "goal"
     all_msgs = engine.db.list_council_messages()
     cur_round = max((int(m.get("round_no") or 1) for m in all_msgs), default=1)
     engine.db.add_council_message(
@@ -334,4 +342,7 @@ async def interject_council(engine: "Engine", actor: str, note: str) -> CouncilC
         body={"note": note},
     )
     engine.db.add_event("council.human", f"负责人插话：{note}", task_id="_council", actor=actor or "owner")
-    return await synthesize_council(engine)
+    consensus = await synthesize_council(engine)
+    if refresh_blueprint and had_blueprint:
+        await engine.plan_blueprint(extra_instructions=f"请严格落实负责人最新插话裁决：{note}")
+    return consensus

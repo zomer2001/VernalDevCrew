@@ -11,6 +11,7 @@ export function createTimeline(onSelectTask) {
   let current = "";
   let selected = "";
   let generation = 0;
+  let workspaceGeneration = 0;
   let nextBefore = null;
   let loading = false;
   let connected = false;
@@ -61,6 +62,14 @@ export function createTimeline(onSelectTask) {
   older.addEventListener("click", () => readPage(nextBefore));
   return {
     async start(state) {
+      const workspaceToken = ++workspaceGeneration;
+      ++generation;
+      records.clear();
+      recent.clear();
+      nextBefore = null;
+      loading = false;
+      connected = false;
+      failure = "";
       current = state.root.split("/").filter(Boolean).pop();
       selected = current;
       source.replaceChildren(new Option(current + "（当前）", current));
@@ -71,11 +80,13 @@ export function createTimeline(onSelectTask) {
       draw();
       try {
         const catalog = await api("/vernal-api/history/workspaces");
+        if (workspaceToken !== workspaceGeneration) return;
         for (const name of catalog.workspaces) {
           if (name !== current) source.add(new Option(name, name));
         }
         await select();
       } catch (err) {
+        if (workspaceToken !== workspaceGeneration) return;
         failure = "已显示当前项目。历史工作区列表读取失败，请确认 Vernal 已重启。";
         draw();
       }

@@ -3,17 +3,36 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from contextlib import contextmanager
 import sqlite3
 import threading
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from autodev.models import MilestoneStatus, PlanTask, ProjectBlueprint, ProjectPlan, SquadSpec, TaskStatus
+
+def sqlite_journal_mode() -> str:
+    """Use DELETE journal inside Docker host mounts where WAL -shm mmap is unsafe across VM boundaries."""
+    override = os.environ.get("VERNAL_SQLITE_JOURNAL_MODE", "").strip().upper()
+    if override in ("DELETE", "TRUNCATE", "PERSIST", "WAL"):
+        return override
+    if Path("/.dockerenv").exists():
+        return "DELETE"
+    return "WAL"
+
+from autodev.models import (
+    ACTIVE_TASK_STATUSES,
+    MilestoneStatus,
+    PlanTask,
+    ProjectBlueprint,
+    ProjectPlan,
+    SquadSpec,
+    TaskStatus,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -99,6 +118,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     steer_note TEXT,
     pending_action TEXT,
     owner_member TEXT,
+    exec_seq INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS worker_slots (
@@ -173,6 +193,14 @@ CREATE TABLE IF NOT EXISTS evolution_checkpoints (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS dispatch_records (
+    dispatch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL, exec_seq INTEGER NOT NULL, attempt_no INTEGER NOT NULL,
+    pool TEXT NOT NULL, actor TEXT NOT NULL, issue_id TEXT NOT NULL DEFAULT '',
+    lf_task_id TEXT NOT NULL DEFAULT '', lf_run_id TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    command_key TEXT UNIQUE, UNIQUE(task_id, exec_seq)
+);
 CREATE TABLE IF NOT EXISTS link_codes (
     code_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, expires REAL NOT NULL, runner_code TEXT
 );
@@ -201,9 +229,166 @@ CREATE TABLE IF NOT EXISTS milestone_deliveries (
 );
 CREATE INDEX IF NOT EXISTS idx_runs_task ON task_runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
+
+CREATE TABLE IF NOT EXISTS gate_records (
+    record_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_id TEXT NOT NULL,
+    gate_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    scope_type TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    round INTEGER NOT NULL DEFAULT 1,
+    actor TEXT,
+    summary TEXT,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    decided_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gate_scope_round
+    ON gate_records(gate_id, scope_type, scope_id, round);
+
+CREATE TABLE IF NOT EXISTS quality_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT,
+    milestone_id TEXT,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    gate TEXT NOT NULL,
+    status TEXT NOT NULL,
+    skipped_reason TEXT NOT NULL DEFAULT '',
+    duration_sec REAL NOT NULL DEFAULT 0,
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    findings_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS code_reviews (
+    review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_type TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    milestone_id TEXT,
+    round INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'OPEN',
+    head_ref TEXT NOT NULL,
+    base_ref TEXT,
+    risk_reasons_json TEXT NOT NULL DEFAULT '[]',
+    ai_summary_md TEXT,
+    checklist_json TEXT NOT NULL DEFAULT '{}',
+    reviewer TEXT,
+    decision_note TEXT,
+    override_reason TEXT,
+    created_at TEXT NOT NULL,
+    decided_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_review_scope_round
+    ON code_reviews(scope_type, scope_id, round);
+
+CREATE TABLE IF NOT EXISTS review_comments (
+    comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id INTEGER NOT NULL,
+    file TEXT NOT NULL,
+    line INTEGER NOT NULL DEFAULT 0,
+    side TEXT NOT NULL DEFAULT 'new',
+    severity TEXT NOT NULL DEFAULT 'major',
+    body TEXT NOT NULL,
+    author TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'human',
+    resolved INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_outbox (
+    event_key TEXT PRIMARY KEY, payload TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS model_budget_reservations(
+    request_id TEXT PRIMARY KEY, tokens INTEGER NOT NULL, finalized INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS candidate_evidence (
+    task_id TEXT NOT NULL, candidate TEXT NOT NULL, attempt INTEGER NOT NULL,
+    issue_id TEXT, run_id TEXT, diff_digest TEXT NOT NULL, review_context TEXT NOT NULL,
+    verified_requirements TEXT NOT NULL, verified_at TEXT NOT NULL,
+    PRIMARY KEY(task_id,candidate,attempt)
+);
+
+CREATE TABLE IF NOT EXISTS ci_runs (
+    ci_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    milestone_id TEXT NOT NULL,
+    round INTEGER NOT NULL DEFAULT 1,
+    provider TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    commit_sha TEXT NOT NULL,
+    candidate_ref TEXT NOT NULL DEFAULT '',
+    external_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'QUEUED',
+    url TEXT,
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    log_tail TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS deployments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    milestone_id TEXT NOT NULL,
+    version_no INTEGER NOT NULL DEFAULT 1,
+    target TEXT NOT NULL DEFAULT 'staging',
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    actor TEXT NOT NULL,
+    log_tail TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS doc_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    content_sha TEXT NOT NULL,
+    content_text TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(path, version)
+);
+
+CREATE TABLE IF NOT EXISTS doc_comments (
+    comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL,
+    section TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL,
+    author TEXT NOT NULL,
+    resolved INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS requirements (
+    req_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'P1',
+    acceptance_json TEXT NOT NULL DEFAULT '[]',
+    source_section TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS members (
+    user_id TEXT NOT NULL,
+    project TEXT NOT NULL DEFAULT '*',
+    role TEXT NOT NULL DEFAULT 'developer',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, project)
+);
 """
 
-_TASK_JSON_FIELDS = ("acceptance_criteria", "depends_on", "doc_slice_ids", "allowed_paths", "verify_cmds")
+_TASK_JSON_FIELDS = (
+    "acceptance_criteria",
+    "depends_on",
+    "doc_slice_ids",
+    "allowed_paths",
+    "verify_cmds",
+    "requirement_ids",
+    "design_refs",
+)
 _MS_JSON_FIELDS = ("target_squads", "key_deliverables")
 
 
@@ -244,9 +429,12 @@ class Task:
     last_feedback: str | None
     failure_reason: str | None
     steer_note: str | None
-    pending_action: str | None
-    owner_member: str | None
-    updated_at: str | None
+    pending_action: str | None = None
+    owner_member: str | None = None
+    exec_seq: int = 0
+    updated_at: str | None = None
+    requirement_ids: list[str] = field(default_factory=list)
+    design_refs: list[str] = field(default_factory=list)
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -256,6 +444,7 @@ class Task:
         data["status"] = TaskStatus(data["status"])
         data["squad"] = data.get("squad") or data.get("module") or ""
         data["arbitration_count"] = int(data.get("arbitration_count") or 0)
+        data["exec_seq"] = int(data.get("exec_seq") or 0)
         return cls(**{f.name: data.get(f.name) for f in fields(cls)})
 
     def to_dict(self) -> dict[str, Any]:
@@ -312,7 +501,10 @@ class Database:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None, timeout=30)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        mode = sqlite_journal_mode()
+        self._conn.execute(f"PRAGMA journal_mode={mode}")
+        if mode != "WAL":
+            self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.executescript(SCHEMA)
@@ -325,7 +517,9 @@ class Database:
             return {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
         additions = {
-            "host_links": {"codex_login": "INTEGER NOT NULL DEFAULT 0"},
+            "link_codes": {"owner_id": "TEXT", "verified_at": "REAL NOT NULL DEFAULT 0"},
+            "host_links": {"codex_login": "INTEGER NOT NULL DEFAULT 0", "owner_id": "TEXT",
+                           "verified_at": "REAL NOT NULL DEFAULT 0", "revoked_at": "REAL", "expires_at": "REAL"},
             "evolution_checkpoints": {
                 "plan_revision": "INTEGER NOT NULL DEFAULT 0",
                 "min_director_rework": "INTEGER NOT NULL DEFAULT 0",
@@ -333,13 +527,38 @@ class Database:
                 "rejected_plans_json": "TEXT NOT NULL DEFAULT '[]'",
                 "last_error": "TEXT",
             },
-            "tasks": {"source_checkpoint_id": "INTEGER", "source_item_idx": "INTEGER"},
+            "tasks": {
+                "source_checkpoint_id": "INTEGER",
+                "source_item_idx": "INTEGER",
+                "requirement_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+                "design_refs_json": "TEXT NOT NULL DEFAULT '[]'",
+                "exec_seq": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "milestone_deliveries": {"evidence_json": "TEXT NOT NULL DEFAULT '{}'"},
+            "ci_runs": {
+                "candidate_ref": "TEXT NOT NULL DEFAULT ''",
+                "external_id": "TEXT NOT NULL DEFAULT ''",
+            },
         }
         for table, columns in additions.items():
             existing = _cols(table)
             for column, declaration in columns.items():
                 if column not in existing:
                     self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        # Keep historical run ids. Signed callbacks continue to resolve to the newest original round.
+        self._conn.execute("""
+            WITH ranked AS (
+                SELECT ci_run_id, milestone_id, ROW_NUMBER() OVER (
+                    PARTITION BY milestone_id,round ORDER BY ci_run_id DESC) AS duplicate,
+                    MAX(round) OVER (PARTITION BY milestone_id) AS last_round FROM ci_runs
+            ), reassigned AS (
+                SELECT ci_run_id,last_round+ROW_NUMBER() OVER (
+                    PARTITION BY milestone_id ORDER BY ci_run_id) AS new_round FROM ranked WHERE duplicate>1
+            ) UPDATE ci_runs SET round=(SELECT new_round FROM reassigned WHERE reassigned.ci_run_id=ci_runs.ci_run_id)
+              WHERE ci_run_id IN (SELECT ci_run_id FROM reassigned)
+        """)
+        self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ci_milestone_round ON ci_runs(milestone_id,round)")
+        self._conn.execute("UPDATE host_links SET expires_at=unixepoch()+90*86400 WHERE expires_at IS NULL")
         self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_checkpoint_item "
                            "ON tasks(source_checkpoint_id, source_item_idx) WHERE source_checkpoint_id IS NOT NULL")
 
@@ -395,7 +614,12 @@ class Database:
                 raise
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error:
+                pass
+            self._conn.close()
 
     # ---------- 基础 ----------
     def _exec(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
@@ -532,8 +756,8 @@ class Database:
         self._conn.execute(
             "INSERT INTO tasks(task_id, milestone_id, squad, module, role, title, description,"
             " acceptance_criteria_json, depends_on_json, doc_slice_ids_json, allowed_paths_json,"
-            " verify_cmds_json, priority, status, max_retries, updated_at)"
-            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " verify_cmds_json, requirement_ids_json, design_refs_json, priority, status, max_retries, updated_at)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 t.task_id,
                 t.milestone_id,
@@ -547,6 +771,8 @@ class Database:
                 json.dumps(t.doc_slice_ids),
                 json.dumps(t.allowed_paths, ensure_ascii=False),
                 json.dumps(t.verify_cmds, ensure_ascii=False),
+                json.dumps(t.requirement_ids, ensure_ascii=False),
+                json.dumps(t.design_refs, ensure_ascii=False),
                 t.priority,
                 status.value,
                 max_retries,
@@ -771,9 +997,135 @@ class Database:
         rows = self._query("SELECT * FROM tasks WHERE task_id=?", (task_id,))
         return Task.from_row(rows[0]) if rows else None
 
+    def claim_task_execution(self, task_id: str, *, allow_from_ready: bool = False) -> int | None:
+        """原子声明并递增任务执行代次（exec_seq），用于隔离旧协程与替代执行。"""
+        active_vals = [s.value for s in ACTIVE_TASK_STATUSES]
+        if allow_from_ready:
+            active_vals.append(TaskStatus.READY.value)
+        marks = ",".join("?" * len(active_vals))
+        ts = now_iso()
+        with self.transaction():
+            if allow_from_ready:
+                cur = self._exec(
+                    f"UPDATE tasks SET exec_seq = exec_seq + 1, status = CASE WHEN status='READY' THEN 'IN_PROGRESS' ELSE status END,"
+                    f" updated_at = ? WHERE task_id = ? AND status IN ({marks})",
+                    [ts, task_id, *active_vals],
+                )
+            else:
+                cur = self._exec(
+                    f"UPDATE tasks SET exec_seq = exec_seq + 1, updated_at = ? WHERE task_id = ? AND status IN ({marks})",
+                    [ts, task_id, *active_vals],
+                )
+            if cur.rowcount != 1:
+                return None
+            row = self._query("SELECT exec_seq FROM tasks WHERE task_id=?", (task_id,))
+            return int(row[0]["exec_seq"]) if row else None
+
+    def _ownership_where(
+        self,
+        task_id: str,
+        *,
+        expected_exec_seq: int | None = None,
+        expected_attempt: int | None = None,
+        expected_run_id: str | None = None,
+    ) -> tuple[str, list[Any]]:
+        active_vals = [s.value for s in ACTIVE_TASK_STATUSES]
+        marks = ",".join("?" * len(active_vals))
+        clauses = ["task_id=?", f"status IN ({marks})"]
+        params: list[Any] = [task_id, *active_vals]
+        if expected_exec_seq is not None:
+            clauses.append("exec_seq=?")
+            params.append(int(expected_exec_seq))
+        if expected_attempt is not None:
+            clauses.append("retry_count=?")
+            params.append(int(expected_attempt) - 1)
+        if expected_run_id is not None:
+            if expected_run_id == "":
+                clauses.append("(loopforge_run_id IS NULL OR loopforge_run_id='')")
+            else:
+                clauses.append("loopforge_run_id=?")
+                params.append(expected_run_id)
+        return " AND ".join(clauses), params
+
+    def get_owned_task(
+        self,
+        task_id: str,
+        *,
+        expected_exec_seq: int | None = None,
+        expected_attempt: int | None = None,
+        expected_run_id: str | None = None,
+    ) -> Task | None:
+        where_sql, params = self._ownership_where(
+            task_id,
+            expected_exec_seq=expected_exec_seq,
+            expected_attempt=expected_attempt,
+            expected_run_id=expected_run_id,
+        )
+        rows = self._query(f"SELECT * FROM tasks WHERE {where_sql}", params)
+        return Task.from_row(rows[0]) if rows else None
+
+    def is_task_owned(
+        self,
+        task_id: str,
+        *,
+        expected_exec_seq: int | None = None,
+        expected_attempt: int | None = None,
+        expected_run_id: str | None = None,
+    ) -> bool:
+        return (
+            self.get_owned_task(
+                task_id,
+                expected_exec_seq=expected_exec_seq,
+                expected_attempt=expected_attempt,
+                expected_run_id=expected_run_id,
+            )
+            is not None
+        )
+
+    def update_task_if_owned(
+        self,
+        task_id: str,
+        *,
+        expected_exec_seq: int | None = None,
+        expected_attempt: int | None = None,
+        expected_run_id: str | None = None,
+        **values: Any,
+    ) -> bool:
+        """CAS 原子更新：仅当任务仍处于活跃状态且代次/重试轮次/远端 Run ID 完全匹配时生效。"""
+        values["updated_at"] = now_iso()
+        cols, set_params = [], []
+        for key, value in values.items():
+            if key in _TASK_JSON_FIELDS:
+                key, value = f"{key}_json", json.dumps(value, ensure_ascii=False)
+            cols.append(f"{key}=?")
+            set_params.append(value.value if hasattr(value, "value") else value)
+        where_sql, where_params = self._ownership_where(
+            task_id,
+            expected_exec_seq=expected_exec_seq,
+            expected_attempt=expected_attempt,
+            expected_run_id=expected_run_id,
+        )
+        cur = self._exec(f"UPDATE tasks SET {', '.join(cols)} WHERE {where_sql}", [*set_params, *where_params])
+        return cur.rowcount == 1
+
     def update_task(self, task_id: str, **values: Any) -> None:
         values["updated_at"] = now_iso()
+        bump_for_status = False
+        if "status" in values:
+            raw_st = values["status"].value if hasattr(values["status"], "value") else str(values["status"])
+            if raw_st not in {s.value for s in ACTIVE_TASK_STATUSES}:
+                bump_for_status = True
+        new_run_id = values.get("loopforge_run_id") if isinstance(values.get("loopforge_run_id"), str) else ""
         cols, params = [], []
+        if "exec_seq" not in values:
+            if bump_for_status:
+                cols.append("exec_seq = exec_seq + 1")
+            elif new_run_id.strip():
+                cols.append(
+                    "exec_seq = CASE WHEN loopforge_run_id IS NOT NULL AND loopforge_run_id != '' AND loopforge_run_id != ?"
+                    " THEN exec_seq + 1 ELSE exec_seq END"
+                )
+                params.append(new_run_id.strip())
         for key, value in values.items():
             if key in _TASK_JSON_FIELDS:
                 key, value = f"{key}_json", json.dumps(value, ensure_ascii=False)

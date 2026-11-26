@@ -127,7 +127,8 @@ def test_rework_v2_and_idempotency(tmp_path, monkeypatch, rolling_changed):
                                                reconcile_steering_checkpoint(engine, cid))
             assert response.status_code == 200
             assert db.get_checkpoint(cid)["applied_summary"]["added_tasks"] == ["T-004"]
-            assert len([i for i in box["issues"].values() if i.get("title", "").startswith("[T-004]")]) == 1
+            assert db.get_task("T-004").loopforge_issue_id is None
+            assert not any(i.get("title", "").startswith("[T-004]") for i in box["issues"].values())
             assert db.get_task("T-003").status == TaskStatus.CANCELLED
             assert db.get_task("T-002").status == TaskStatus.READY
             assert db.get_task("T-001").status == TaskStatus.MERGED
@@ -151,6 +152,8 @@ def test_rework_v2_and_idempotency(tmp_path, monkeypatch, rolling_changed):
         if rolling_changed:
             assert db.meta_get("delivery_branch:M1") == archive + "/v2"
             assert any(ev["event_type"] == "milestone.delivery_conflict" for ev in db.events_after(0))
+        assert gitops.head_sha(source, "refs/tags/vernal-M1-v1") == first
+        assert gitops.head_sha(source, "refs/tags/vernal-M1-v2") == second
         assert gitops.head_sha(source, archive + "/v1") == first
         assert gitops.git(["show", archive + "/v2:src/T-002"], source).stdout == "2"
         assert rounds == {"T-001": 1, "T-002": 2}

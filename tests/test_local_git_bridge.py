@@ -109,7 +109,7 @@ def test_private_task_checkout_push_and_signed_relay(tmp_path, monkeypatch):
             assert client.get(path + "/info/refs?service=git-upload-pack").content == b"git response"
             assert client.post(path + "/git-receive-pack", content=b"git request").content == b"git response"
             assert client.get(path.replace(task_repo, "vernal-task-" + "0"*32) + "/info/refs?service=git-upload-pack").status_code == 403
-            assert client.get(path + "/config").status_code == 404
+            assert client.get(path + "/config").status_code == 401
             monkeypatch.setattr(time, "time", lambda: 2**40)
             assert client.get(path + "/info/refs?service=git-upload-pack").status_code == 403
     finally:

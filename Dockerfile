@@ -12,18 +12,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 先仅安装 pyproject.toml 中的运行依赖（绕开 hatchling 隔离构建，且修改业务代码时完全命中 Docker 层缓存）
+# 先安装运行依赖与 PDF/DOCX 文档解析依赖，并建立非特权运行用户 vernal
 COPY pyproject.toml README.md ./
-RUN python3 -c "import subprocess, sys, tomllib; deps = tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']; subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', *deps])" \
+RUN python3 -c "import subprocess, sys, tomllib; p = tomllib.load(open('pyproject.toml', 'rb'))['project']; deps = [*p['dependencies'], *p.get('optional-dependencies', {}).get('docs', []), 'socksio>=1.0', 'pytest>=8,<10']; subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', *deps])" \
   && printf '#!/bin/sh\nexec python3 -m autodev.cli "$@"\n' > /usr/local/bin/vernal \
   && cp /usr/local/bin/vernal /usr/local/bin/autodev \
-  && chmod +x /usr/local/bin/vernal /usr/local/bin/autodev
+  && chmod +x /usr/local/bin/vernal /usr/local/bin/autodev \
+  && (id -u vernal >/dev/null 2>&1 || useradd -m -u 1000 -s /bin/sh vernal)
 
 ENV PYTHONPATH=/app
 COPY autodev ./autodev
 COPY deploy/loopforge/start-runner.sh deploy/loopforge/wait-and-bind-runner.sh ./deploy/loopforge/
-RUN mkdir -p /app/workspaces
+RUN mkdir -p /app/workspaces && chown -R vernal:vernal /app
 
+USER vernal
 EXPOSE 8787
 
 CMD ["vernal", "serve", "--host", "0.0.0.0", "--port", "8787"]

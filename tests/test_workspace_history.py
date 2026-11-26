@@ -35,8 +35,8 @@ def test_archive_pages_are_isolated_and_reach_first_event(tmp_path):
             assert web.get(endpoint, params={"workspace": "../old"}).status_code == 404
             assert len(web.get(endpoint, params={"workspace": "game"}).json()["events"]) == 1
         with TestClient(app, client=("192.0.2.2", 12345)) as web:
-            assert web.get("/vernal-api/history/workspaces").json()["workspaces"] == ["game"]
-            assert web.get(endpoint, params={"workspace": "old"}).status_code == 404
+            assert web.get("/vernal-api/history/workspaces").status_code == 401
+            assert web.get(endpoint, params={"workspace": "old"}).status_code == 401
     finally:
         archive.db.close()
         current.db.close()

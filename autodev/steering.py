@@ -11,10 +11,10 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
 from autodev.db import now_iso
-from autodev.loopforge.bootstrap import ensure_vernal_loopforge_assets, lane_workflow_id, review_workflow_id, sync_decisions_rule
+from autodev.loopforge.bootstrap import classify_lane, ensure_vernal_loopforge_assets, lane_workflow_id, review_workflow_id, sync_decisions_rule
 from autodev.loopforge.bridge import build_restore_command, sign_context_sig
 from autodev.loopforge.client import LoopForgeClient, LoopForgeError
-from autodev.models import MilestoneStatus, ProjectStatus, TaskStatus
+from autodev.models import ACTIVE_TASK_STATUSES, MilestoneStatus, ProjectStatus, TaskStatus
 
 if TYPE_CHECKING:
     from autodev.engine import Engine
@@ -285,8 +285,10 @@ async def _dispatch(engine, cp, actor):
                 f"上下文较长，请先在当前目录执行以下命令还原 `REVIEW_CONTEXT.md` 后阅读：\n```sh\n{restore}\n```\n"
             )
 
-        issue_id = cp.get("loopforge_issue_id")
-        if not issue_id:
+        from autodev.loopforge.dispatch import reserve, record, accept_task, observe_task
+        receipt, fresh = reserve(engine.db, f"steering:{cid}", 1, 1, s.execution_pool, actor, cp.get("loopforge_issue_id"))
+        issue_id = receipt["issue_id"]
+        if fresh and not issue_id:
             issue = await client.create_issue(
                 project_id=s.loopforge_project_id,
                 title=f"[评审 #{round_no}] {clean_topic[:72]}",
@@ -298,10 +300,23 @@ async def _dispatch(engine, cp, actor):
             if not issue_id:
                 raise LoopForgeError("创建评审工单未返回 ID", 502)
             engine.db.update_checkpoint(cid, loopforge_issue_id=issue_id)
-        disp = await client.dispatch_issue(issue_id, rerun=False)
-        run_id = str(disp.get("latestRunId") or (disp.get("run") or {}).get("id") or "")
-        if not run_id:
-            raise LoopForgeError("派单未返回运行 ID", 502)
+            record(engine.db, receipt, "DISPATCHING", issue_id=issue_id)
+        if not fresh and receipt["state"] == "REJECTED" and issue_id:
+            # Explicit retry only after both native histories confirm no accepted work.
+            runs = await client.list_issue_runs(issue_id)
+            tasks = await client.list_issue_tasks(issue_id)
+            if not runs and not tasks:
+                fresh = engine.db._exec("UPDATE dispatch_records SET state='DISPATCHING' WHERE dispatch_id=? AND state='REJECTED'",
+                                        (receipt["dispatch_id"],)).rowcount == 1
+        if fresh:
+            try:
+                native = await client.dispatch_issue(issue_id, rerun=False)
+            except LoopForgeError as exc:
+                record(engine.db, receipt, "REJECTED" if exc.status_code else "NEEDS_CONFIRMATION")
+                raise
+            run_id = await accept_task(engine.db, receipt, client, native, timeout=s.agent_timeout_sec)
+        else:
+            run_id = await observe_task(engine.db, receipt, client, timeout=s.agent_timeout_sec)
         engine.db.update_checkpoint(cid, status="RUNNING", loopforge_run_id=run_id, last_error=None)
         engine.db.add_event(
             "steering.started",
@@ -470,18 +485,19 @@ async def apply_steering_plan(engine, checkpoint_id, plan, *, actor="owner"):
     s = engine.settings
     if s.runtime_backend == "loopforge" and s.effective_loopforge_token() and s.loopforge_project_id:
         client = LoopForgeClient(s.loopforge_url, s.effective_loopforge_token())
+        for old_run_id in summary.get("interrupted_runs") or []:
+            try:
+                await client.pause_run(old_run_id)
+            except LoopForgeError:
+                pass
         summary["loopforge_rule_synced"] = await _push_decisions_to_loopforge(engine, summary["rule_version"])
-        lane = lane_workflow_id(s.loopforge_project_id, s.collaboration_mode, "backend")
-        for action in ("reopened_tasks", "cancelled_tasks", "added_tasks"):
+        for action in ("reopened_tasks", "cancelled_tasks"):
             for tid in summary[action]:
                 task = db.get_task(tid)
+                if task is None:
+                    continue
                 try:
-                    if action == "added_tasks":
-                        issue = await client.create_issue(project_id=s.loopforge_project_id, title=f"[{tid}] {task.title}",
-                            description=task.description, workflow_id=s.loopforge_workflow_id or lane,
-                            repository_id=s.loopforge_repository_id, base_branch=s.base_branch if s.collaboration_mode == "git" else "")
-                        db.update_task(tid, loopforge_issue_id=issue["id"])
-                    elif task.loopforge_issue_id and action == "reopened_tasks":
+                    if task.loopforge_issue_id and action == "reopened_tasks":
                         await client.reopen_issue(task.loopforge_issue_id)
                     elif task.loopforge_issue_id:
                         await client.update_issue(issue_id=task.loopforge_issue_id, project_id=s.loopforge_project_id,
@@ -526,21 +542,61 @@ def _apply_local(engine, cp, data, actor):
         ver += 1
         engine.db.meta_set("decisions_rule_version", str(ver))
 
-    # 2. 局部退回重做（仅重置点名任务，绝不触碰其他已 APPROVED / MERGED 任务）
-    reopened_ids: list[str] = []
+    interrupted_runs: list[str] = []
+
+    # 2. 先关闭取消尚未合入的任务，避免退回或依赖计算引用已取消任务
+    cancelled_ids: list[str] = []
+    for raw_tid in data.get("cancel_tasks") or []:
+        tid = str(raw_tid or "").strip()
+        task = engine.db.get_task(tid)
+        if task is None or task.status == TaskStatus.MERGED:
+            continue
+        if task.status in ACTIVE_TASK_STATUSES and task.loopforge_run_id:
+            interrupted_runs.append(task.loopforge_run_id)
+        engine.db.update_task(tid, status=TaskStatus.CANCELLED, assigned_slot=None, active_agent_label=None,
+                              loopforge_run_id=None, steer_note=f"[评审 #{round_no} 已取消]")
+        milestone = engine.db.get_milestone(task.milestone_id)
+        if milestone and milestone.status in (MilestoneStatus.AWAITING_MERGE, MilestoneStatus.FAILED):
+            engine.db.update_milestone(task.milestone_id, status=MilestoneStatus.PENDING, failure_reason=None)
+        cancelled_ids.append(tid)
+    cancel_set = set(cancelled_ids)
+
+    # 3. 局部退回重做（保持 DAG 拓扑依赖阻塞：若上游也被退回或未完成，下游退回单置为 BLOCKED）
+    reopen_entries: list[tuple[str, str]] = []
     for item in data.get("reopen_tasks") or []:
         if not isinstance(item, dict):
             continue
         tid = str(item.get("task_id") or "").strip()
         reason = str(item.get("reason") or "评审决定局部退回返工").strip()
         task = engine.db.get_task(tid)
-        if task is None or task.status == TaskStatus.CANCELLED:
+        if task is None or task.status == TaskStatus.CANCELLED or tid in cancel_set:
             continue
+        reopen_entries.append((tid, reason))
+
+    reopen_target_set = {tid for tid, _ in reopen_entries}
+    done_after_reopen = {
+        t.task_id
+        for t in engine.db.list_tasks()
+        if t.status in (TaskStatus.APPROVED, TaskStatus.MERGED) and t.task_id not in reopen_target_set
+    }
+
+    reopened_ids: list[str] = []
+    for tid, reason in reopen_entries:
+        task = engine.db.get_task(tid)
+        if task is None:
+            continue
+        if task.status in ACTIVE_TASK_STATUSES and task.loopforge_run_id:
+            interrupted_runs.append(task.loopforge_run_id)
+        clean_deps = [d for d in task.depends_on if d not in cancel_set]
+        next_status = TaskStatus.READY if all(d in done_after_reopen for d in clean_deps) else TaskStatus.BLOCKED
         engine.db.update_task(
             tid,
-            status=TaskStatus.READY,
+            status=next_status,
+            depends_on=clean_deps,
             retry_count=0,
             arbitration_count=0,
+            assigned_slot=None,
+            active_agent_label=None,
             steer_note=f"[评审 #{round_no} 局部返工] {reason}",
             failure_reason=None,
             loopforge_run_id=None,
@@ -550,27 +606,17 @@ def _apply_local(engine, cp, data, actor):
             engine.db.update_milestone(ms.milestone_id, status=MilestoneStatus.PENDING, failure_reason=None)
         reopened_ids.append(tid)
 
-    # 3. 关闭取消尚未合入的任务，并清理下游依赖防死锁
-    cancelled_ids: list[str] = []
-    for raw_tid in data.get("cancel_tasks") or []:
-        tid = str(raw_tid or "").strip()
-        task = engine.db.get_task(tid)
-        if task is None or task.status == TaskStatus.MERGED:
-            continue
-        engine.db.update_task(tid, status=TaskStatus.CANCELLED, assigned_slot=None, active_agent_label=None,
-                              steer_note=f"[评审 #{round_no} 已取消]")
-        milestone = engine.db.get_milestone(task.milestone_id)
-        if milestone and milestone.status in (MilestoneStatus.AWAITING_MERGE, MilestoneStatus.FAILED):
-            engine.db.update_milestone(task.milestone_id, status=MilestoneStatus.PENDING, failure_reason=None)
-        cancelled_ids.append(tid)
-
-    if cancelled_ids:
-        cancel_set = set(cancelled_ids)
-        done_ids = {t.task_id for t in engine.db.list_tasks() if t.status in (TaskStatus.APPROVED, TaskStatus.MERGED)}
+    if cancel_set or reopen_target_set:
         for t in engine.db.list_tasks():
-            if any(d in cancel_set for d in t.depends_on):
-                new_deps = [d for d in t.depends_on if d not in cancel_set]
-                new_st = TaskStatus.READY if (t.status == TaskStatus.BLOCKED and all(d in done_ids for d in new_deps)) else t.status
+            if t.task_id in cancel_set or t.task_id in reopen_target_set:
+                continue
+            new_deps = [d for d in t.depends_on if d not in cancel_set]
+            deps_changed = new_deps != t.depends_on
+            # 若未合入任务的上游被退回重做，重新回退至 BLOCKED 等待上游新版契约/产物完成
+            if t.status == TaskStatus.READY and not all(d in done_after_reopen for d in new_deps):
+                engine.db.update_task(t.task_id, depends_on=new_deps, status=TaskStatus.BLOCKED)
+            elif deps_changed:
+                new_st = TaskStatus.READY if (t.status == TaskStatus.BLOCKED and all(d in done_after_reopen for d in new_deps)) else t.status
                 engine.db.update_task(t.task_id, depends_on=new_deps, status=new_st)
 
     # 4. 新增任务并同步创建对应 LoopForge Issue
@@ -637,6 +683,7 @@ def _apply_local(engine, cp, data, actor):
         "reopened_tasks": reopened_ids,
         "cancelled_tasks": cancelled_ids,
         "added_tasks": added_ids,
+        "interrupted_runs": interrupted_runs,
     }
     engine.db.update_checkpoint(checkpoint_id, status="APPLIED", rule_version=ver, draft_plan=data,
                                 applied_summary=applied_summary, last_error=None)
@@ -684,21 +731,21 @@ async def approve_steering_checkpoint(
         if not s.effective_loopforge_token():
             raise LoopForgeError("无法确认远端审批，缺少 LoopForge 凭据", 503)
         client = LoopForgeClient(s.loopforge_url, s.effective_loopforge_token())
-        remote = await client.get_run(run_id)
+        remote = await client.project_run(run_id, s.loopforge_project_id)
         if await _current_draft(client, remote, cp) != cp["draft_plan"]:
             raise LoopForgeError("远端草案已更改或尚未就绪，请刷新后确认", 409)
         try:
             await client.approve_run(run_id, comment=comment or f"由 {actor} 拍板通过转向变更单", node_id="human_gate")
         except LoopForgeError as exc:
             try:
-                remote = await client.get_run(run_id)
+                remote = await client.project_run(run_id, s.loopforge_project_id)
             except LoopForgeError:
                 remote = {}
             if remote.get("status") != "succeeded":
                 raise LoopForgeError(str(exc), 503 if exc.status_code == 503 else 502) from exc
         else:
             try:
-                remote = await client.get_run(run_id)
+                remote = await client.project_run(run_id, s.loopforge_project_id)
             except LoopForgeError:
                 remote = {}
         confirmed = await _current_draft(client, remote, cp) if remote else None
@@ -731,7 +778,7 @@ async def reject_steering_checkpoint(
         if not s.effective_loopforge_token():
             raise LoopForgeError("无法向远端提交驳回意见，缺少 LoopForge 凭据", 503)
         client = LoopForgeClient(s.loopforge_url, s.effective_loopforge_token())
-        run = await client.get_run(run_id)
+        run = await client.project_run(run_id, s.loopforge_project_id)
         watermark = max(watermark, int(((run.get("nodes") or {}).get("director_plan") or {}).get("reworkCount") or 0)) + 1
         await client.reject_run(run_id, reason=clean_reason, target_node="director_plan", node_id="human_gate")
     with engine.db.transaction():

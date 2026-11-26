@@ -25,12 +25,17 @@ from autodev.loopforge.client import LoopForgeClient
 LINK_USER = contextvars.ContextVar("link_user", default="")
 
 
+WORKER_DELEGATE = contextvars.ContextVar("worker_delegate", default=None)
+
+
 def personal_worker(engine):
+    delegation = WORKER_DELEGATE.get()
+    owner = LINK_USER.get() or (delegation[1] if delegation and delegation[0] == engine.settings.loopforge_project_id else "")
     pool = engine.settings.execution_pool
-    if pool not in ("local_runner", "auto") or not LINK_USER.get() or engine.db.meta_get("source_mode") != "host_link":
+    if pool not in ("local_runner", "auto") or not owner or engine.db.meta_get("source_mode") != "host_link":
         return None
     rows = engine.db._query("SELECT * FROM host_links WHERE platform='win32' AND baseline_hash IS NOT NULL "
-                            "AND owner=? AND clis!='[]' ORDER BY seen DESC LIMIT 1", (LINK_USER.get(),))
+                            "AND revoked_at IS NULL AND expires_at>unixepoch() AND owner=? AND clis!='[]' ORDER BY seen DESC LIMIT 1", (owner,))
     if not rows:
         return None
     link = dict(rows[0])
@@ -76,6 +81,8 @@ class LinkWorkerHarness(Harness):
         return await self.run_workspace_task(prompt, **options)
 
     async def _submit(self, prompt, cwd, schema_path, role, readonly):
+        from autodev.public_pool import check_egress
+        check_egress(self.engine.settings, "link:" + self.link["id"])
         db = self.engine.db
         if not (await self.health_check())[0]:
             return AgentResult(False, 1, None, "", error="个人 Windows Worker 离线")
@@ -90,22 +97,39 @@ class LinkWorkerHarness(Harness):
         jobs = self.engine.ws.state_dir / "link-jobs"
         jobs.mkdir(exist_ok=True)
         source = jobs / job_id
+        native = None
+        accepted = False
+        from autodev.harnesses import link_node
+        from autodev.engine import current_task
+        task = db.get_task(current_task.get() or "")
         try:
             gitops.git(["archive", "--format=zip", "-o", str(source), "HEAD"], cwd)
             payload = {"role": role, "cli": name, "readonly": readonly, "prompt": prompt,
                        "schema": json.loads(Path(schema_path).read_text()) if schema_path else {}}
             if not readonly:
-                from autodev.engine import current_task
-                task = db.get_task(current_task.get() or "")
                 payload["verify_cmds"] = [re.sub(r"^python3(?=\s|$)", "python", cmd)
                                           for cmd in task.verify_cmds] if task else []
             expires = time.time() + self.engine.settings.agent_timeout_sec
-            db._exec("INSERT INTO link_jobs(id,link_id,state,payload,expires) VALUES(?,?,'pending',?,?)",
-                     (job_id, self.link["id"], json.dumps(payload), expires))
+            native_mode = self.engine.settings.runtime_backend == "loopforge"
+            db._exec("DELETE FROM link_jobs WHERE expires<?",(time.time()-3600,))
+            db._exec("INSERT INTO link_jobs(id,link_id,state,payload,expires) VALUES(?,?,?,?,?)",
+                     (job_id, self.link["id"], "awaiting_node" if native_mode else "pending", json.dumps(payload), expires))
+            if native_mode:
+                native = await link_node.launch(self.engine,self.link,job_id,task,role)
+            next_probe = 0
             while time.time() < expires:
+                if self.engine.planning_stop.is_set():
+                    return AgentResult(False, 1, None, "", error="Windows 委托已取消")
+                if native and time.monotonic() >= next_probe:
+                    check = await link_node.observe_node(native[0], native[1], self.engine.settings.loopforge_project_id)
+                    if check.get("status") in ("failed","cancelled","paused"):
+                        return AgentResult(False, 1, None, "", error="原生委托已停止")
+                    next_probe = time.monotonic() + 2
                 rows = db._query("SELECT result FROM link_jobs WHERE id=?", (job_id,))
                 if rows and rows[0]["result"]:
                     output = json.loads(rows[0]["result"])
+                    if native:
+                        await link_node.confirm(self.engine, job_id, rows[0]["result"], native, expires)
                     if not output.get("ok"):
                         return AgentResult(False, 1, None, "", error=str(output.get("error", "Windows CLI 执行失败")))
                     if not readonly and output.get("patch"):
@@ -116,11 +140,20 @@ class LinkWorkerHarness(Harness):
                                               cwd=cwd, input=patch, capture_output=True)
                         if proc.returncode:
                             raise ValueError("Windows Worker 补丁与任务基线不匹配")
-                    return AgentResult(True, 0, None, "", structured=output["structured"])
+                    accepted = True
+                    return AgentResult(True, 0, native[1] if native else None, "", structured=output["structured"])
                 await asyncio.sleep(0.2)
             return AgentResult(False, 1, None, "", error="Windows Worker 等待超时")
         finally:
-            db._exec("DELETE FROM link_jobs WHERE id=?", (job_id,))
+            db._exec("UPDATE link_jobs SET state=? WHERE id=?", ("accepted" if accepted else "cancelled", job_id))
+            if native and not accepted:
+                from autodev.loopforge.dispatch import record
+                from autodev.loopforge.client import LoopForgeError
+                try:
+                    await native[0].pause_run(native[1])
+                except LoopForgeError as exc:
+                    db.add_event("link.pause_failed",str(exc),task_id=task.task_id if task else None)
+                record(db,native[2],"FAILED")
             source.unlink(missing_ok=True)
 
 
@@ -171,9 +204,10 @@ def register_jobs(app, slot, authorize):
         with db.transaction():
             rows = db._query("SELECT state,result FROM link_jobs WHERE id=? AND link_id=? AND claim=? AND expires>?",
                              (body.get("id"), link_id, body.get("claim"), time.time()))
-            if not rows or rows[0]["state"] == "done" and rows[0]["result"] != result:
+            if not rows or rows[0]["state"] not in ("claimed","done","accepted") or (
+                    rows[0]["state"] != "claimed" and rows[0]["result"] != result):
                 raise HTTPException(409, "任务租约已失效")
-            db._exec("UPDATE link_jobs SET state='done',result=? WHERE id=?", (result, body["id"]))
+            db._exec("UPDATE link_jobs SET state='done',result=? WHERE id=? AND state='claimed'", (result, body["id"]))
         return {"ok": True}
 
 

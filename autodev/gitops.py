@@ -268,3 +268,27 @@ def tree_fingerprint(cwd: Path, paths: list[str], ref: str = "HEAD") -> str:
     """受保护目录（契约）在某一提交上的内容指纹。"""
     out = git(["ls-tree", "-r", ref, "--", *paths], cwd, check=False).stdout if paths else ""
     return hashlib.sha256(out.encode()).hexdigest()[:16]
+
+
+def freeze_candidate(worktree: Path, base: str) -> str:
+    """Snapshot an interrupted task without changing its branch, index or working files."""
+    import os
+    import tempfile
+    head = head_sha(worktree)
+    if git(["merge-base","--is-ancestor",base,head],worktree,check=False).returncode:
+        raise GitError("候选工作树基线不匹配")
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ,"GIT_INDEX_FILE":str(Path(tmp)/"index")}
+        def index(*args):
+            proc = subprocess.run(["git",*args],cwd=worktree,env=env,text=True,capture_output=True)
+            if proc.returncode:
+                raise GitError(proc.stderr)
+            return proc.stdout.strip()
+        index("read-tree",head)
+        index("add","-A")
+        tree = index("write-tree")
+        if tree == index("rev-parse",base+"^{tree}"):
+            raise GitError("候选工作树没有改动")
+        if tree == index("rev-parse",head+"^{tree}"):
+            return head
+        return index("commit-tree",tree,"-p",head,"-m","Vernal: freeze verification candidate")

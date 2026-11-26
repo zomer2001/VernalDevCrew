@@ -116,6 +116,8 @@ def extract_run_usage(run: dict[str, Any]) -> Usage:
     sources: list[dict[str, Any]] = []
     if isinstance(run.get("usage"), dict):
         sources.append(run["usage"])
+    elif isinstance(run.get("tokenUsage"), dict):
+        sources.append(run["tokenUsage"])
     for node in (run.get("nodes") or {}).values():
         if isinstance(node, dict) and isinstance(node.get("usage"), dict):
             sources.append(node["usage"])
@@ -239,6 +241,13 @@ async def poll_loopforge_run(
                 continue
 
         summary = f"LoopForge [{st}] " + (", ".join(active_nodes) or "处理中") + gate_note
+        if st == "running":
+            for nid, node in nodes.items():
+                if not isinstance(node, dict) or node.get("status") == "succeeded":
+                    continue
+                error = str(node.get("error") or "").lower()
+                if "docker workspace not ready" in error or ("container " in error and "is not running" in error):
+                    summary += f"。{nid} 最近一次沙盒启动失败，等待 LoopForge 更新状态"
         if summary != last_summary:
             last_summary = summary
             if on_progress:
@@ -300,6 +309,66 @@ class LoopForgeBridge:
         self.settings = settings
         self.db = db
         self.client = LoopForgeClient(settings.loopforge_url, settings.effective_loopforge_token())
+
+    def client_for_run(self, run_id):
+        from autodev import public_pool
+        rows = self.db._query("SELECT pool FROM dispatch_records WHERE lf_run_id=? ORDER BY dispatch_id DESC LIMIT 1", (run_id,))
+        pool = rows[0]["pool"] if rows else self.db.meta_get(f"pool.run:{run_id}")
+        if pool == "public_docker":
+            if self.settings.loopforge_url.rstrip("/") != public_pool.server_url() or not public_pool.service_token():
+                raise LoopForgeError("缺少派单时使用的公用身份", 409)
+            return LoopForgeClient(public_pool.server_url(), public_pool.service_token(), transport=self.client.transport)
+        if rows:
+            token = self.settings.service_token()
+            if not token:
+                raise LoopForgeError("缺少原生派单使用的部署服务身份", 409)
+            if self.client.token != token:
+                return LoopForgeClient(self.settings.loopforge_url, token, transport=self.client.transport)
+        return self.client
+
+    async def await_candidate_signoff(self, task, candidate, stop):
+        from autodev.loopforge.dispatch import reserve, accept_task, observe_task, record
+        dispatch = self.db._query("SELECT dispatch_id,pool FROM dispatch_records WHERE lf_run_id=? "
+                                  "AND task_id=? ORDER BY dispatch_id DESC LIMIT 1", (task.loopforge_run_id, task.task_id))
+        saved = self.db.meta_get(f"signoff-policy:{dispatch[0]['dispatch_id']}") if dispatch else ""
+        executor, approver = json.loads(saved) if saved else (
+            self.settings.native_executor_user_id, self.settings.native_approver_user_id)
+        if not approver:
+            return
+        client = self.client_for_run(task.loopforge_run_id)
+        client.issue_user_id = executor
+        client.approval_user_id = approver
+        workflow = self.settings.loopforge_project_id + "-vernal-signoff"
+        client.approval_workflow = workflow
+        receipt, fresh = reserve(self.db, "_signoff:" + task.task_id, 0, task.retry_count+1,
+            dispatch[0]["pool"] if dispatch else self.settings.selected_pool, str(client.approval_user_id), task.loopforge_issue_id,
+            command=f"signoff:{task.loopforge_run_id}:{candidate}")
+        options = dict(timeout=self.settings.agent_timeout_sec, stop=stop)
+        if fresh:
+            # The same native Issue provides the reviewer with the exact evidence being signed.
+            await client._req("POST", f"/api/issues/{task.loopforge_issue_id}/comments", json_body={
+                "body": f"待签字候选 {candidate}。开发 Run {task.loopforge_run_id}，服务端独立验证和任务质量门已通过。"})
+            prior = await client.list_issue_runs(task.loopforge_issue_id)
+            native = await client.dispatch_issue(task.loopforge_issue_id, rerun=any(r.get("workflowId") == workflow for r in prior),
+                                                 workflow_id=workflow)
+            run_id = await accept_task(self.db, receipt, client, native, **options)
+        else:
+            run_id = await observe_task(self.db, receipt, client, **options)
+        stamp = await client.project_run(run_id, self.settings.loopforge_project_id)
+        if stamp.get("workflowId") != workflow or str((stamp.get("executionContext") or {}).get("responsibleUserId")) != str(receipt["actor"]):
+            raise LoopForgeError("原生审批责任人与派单不一致", 409)
+        ok, last_run, message = await poll_loopforge_run(client, run_id, stop_event=stop, timeout_sec=self.settings.agent_timeout_sec)
+        if ok:
+            approved = (last_run.get("nodes") or {}).get("signoff") or {}
+            nodes = (last_run.get("workflowSnapshot") or {}).get("nodes") or []
+            if approved.get("status") != "succeeded" or not any(
+                    n.get("id") == "signoff" and n.get("type") == "approval" for n in nodes):
+                raise LoopForgeError("原生 Run 缺少指定人工节点的通过证据", 409)
+        if not ok:
+            if last_run.get("status") in ("failed", "cancelled"):
+                record(self.db, receipt, "FAILED")
+            raise LoopForgeError("原生候选审批未通过：" + message, 409)
+        record(self.db, receipt, "FINISHED")
 
     def is_configured(self) -> bool:
         return bool(
@@ -376,6 +445,8 @@ class LoopForgeBridge:
         baseline_file: str = "",
         git_restore: str = "",
         vernal_base_url: str = "http://127.0.0.1:8787",
+        expected_exec_seq: int | None = None,
+        expected_attempt: int | None = None,
     ) -> tuple[bool, str]:
         """在 LoopForge 中建 Issue + 派发 SOP，轮询对账直到结束。返回 (是否成功, 摘要/失败原因)。"""
         if not self.settings.loopforge_url.strip() or not self.settings.effective_loopforge_token():
@@ -390,14 +461,21 @@ class LoopForgeBridge:
 
         from autodev import public_pool
         dispatch_client = self.client
-        if task.loopforge_run_id and self.db.meta_get(f"pool.run:{task.loopforge_run_id}") == "public_docker":
+        previous = self.db._query("SELECT pool FROM dispatch_records WHERE task_id=? "
+                                  "AND state NOT IN ('FAILED','FINISHED') ORDER BY dispatch_id DESC LIMIT 1",
+                                  (task.task_id,))
+        if previous:
+            self.settings.selected_pool = previous[0]["pool"]
+        restoring_shared = (previous and previous[0]["pool"] == "public_docker") or (
+            task.loopforge_run_id and self.db.meta_get(f"pool.run:{task.loopforge_run_id}") == "public_docker")
+        if restoring_shared:
             if self.settings.loopforge_url.rstrip("/") != public_pool.server_url() or not public_pool.service_token():
                 return False, "恢复公用 Run 需要原部署的公用账号"
             dispatch_client = LoopForgeClient(public_pool.server_url(), public_pool.service_token())
         # Register project assets with the owner before using the shared execution identity.
-        if not task.loopforge_run_id:
+        if not task.loopforge_run_id and not previous:
             try:
-                selected, dispatch_client = await public_pool.resolve(self.settings, self.client)
+                selected, dispatch_client = getattr(self, "selected_execution", None) or await public_pool.resolve(self.settings, self.client)
                 changed = bool(self.settings.selected_pool and self.settings.selected_pool != selected)
                 self.settings.selected_pool = selected
                 if selected == "public_docker" or changed:
@@ -411,11 +489,18 @@ class LoopForgeBridge:
             except LoopForgeError as exc:
                 return False, str(exc)
 
+        from autodev.context_bundle import build_task_input_bundle
+        from pathlib import Path
+        source_root = Path(task.worktree_path) if task.worktree_path else None
+        try:
+            bundle = build_task_input_bundle(self.db.path.parent.parent, self.db, task, source_root=source_root, files=inputs)
+        except ValueError as exc:
+            return False, str(exc)
         trimmed_ctx = context
         if len(trimmed_ctx.encode("utf-8")) > 16_000:
             trimmed_ctx = trimmed_ctx.encode("utf-8")[:16_000].decode("utf-8", errors="ignore") + "\n…（上下文已按单任务上限截断）"
         description = (
-            format_issue_description(task, squad_name, decisions=self.db.list_decisions(active_only=True))
+            format_issue_description(task, squad_name) + bundle
             + "\n"
             + trimmed_ctx
         )
@@ -466,16 +551,38 @@ class LoopForgeBridge:
         repo_id = self.settings.loopforge_repository_id if inputs is None and not git_restore else ""
         base_br = (task.branch_name or self.settings.base_branch) if inputs is None and self.settings.loopforge_repository_id else ""
 
-        issue_id = task.loopforge_issue_id
+        from autodev.loopforge.dispatch import accept_task, observe_task, record, reserve
+        receipt, fresh = reserve(self.db, task.task_id, expected_exec_seq or task.exec_seq,
+                                 expected_attempt or task.retry_count + 1, self.settings.selected_pool,
+                                 str(self.settings.native_executor_user_id or "deployment-service"), task.loopforge_issue_id, task.loopforge_run_id)
+        if fresh:
+            self.db.meta_set(f"signoff-policy:{receipt['dispatch_id']}", json.dumps(
+                [self.settings.native_executor_user_id, self.settings.native_approver_user_id]))
+        issue_id = receipt["issue_id"]
         is_rerun = False
         if git_restore:
             base_br = ""
             workflow_id = await ensure_local_git_workflow(
-                self.client, self.settings.loopforge_project_id, classify_lane(task.role, task.allowed_paths, task.title)
+                self.client,
+                self.settings.loopforge_project_id,
+                classify_lane(task.role, task.allowed_paths, task.title),
+                settings=self.settings,
             )
         else:
             workflow_id = await self.pick_workflow_id(task)
-        if not issue_id:
+        if self.settings.native_approver_user_id:
+            dispatch_client.issue_user_id = self.settings.native_executor_user_id
+            dispatch_client.approval_user_id = self.settings.native_approver_user_id
+            dispatch_client.approval_workflow = self.settings.loopforge_project_id + "-vernal-signoff"
+            from autodev.loopforge.bootstrap import ensure_signoff_workflow
+            await ensure_signoff_workflow(self.client, self.settings.loopforge_project_id)
+        if fresh and not task.loopforge_run_id:
+            try:
+                await public_pool.check_workflow_sandbox(self.settings, self.client, workflow_id, self.settings.selected_pool)
+            except LoopForgeError as exc:
+                record(self.db, receipt, "FAILED")
+                return False, str(exc)
+        if fresh and not issue_id:
             issue = await dispatch_client.create_issue(
                 project_id=self.settings.loopforge_project_id,
                 title=f"[{task.task_id}] {task.title}",
@@ -486,15 +593,26 @@ class LoopForgeBridge:
             )
             issue_id = str(issue.get("id") or "")
             if not issue_id:
-                return False, f"LoopForge 创建 Issue 未返回 id: {issue}"
-            self.db.update_task(task.task_id, loopforge_issue_id=issue_id)
+                record(self.db, receipt, "NEEDS_CONFIRMATION")
+                return False, "派单结果待人工确认"
+            record(self.db, receipt, "DISPATCHING", issue_id=issue_id)
+            if expected_exec_seq is not None:
+                if not self.db.update_task_if_owned(
+                    task.task_id,
+                    expected_exec_seq=expected_exec_seq,
+                    expected_attempt=expected_attempt,
+                    loopforge_issue_id=issue_id,
+                ):
+                    return False, "任务已被取消、重置或由替代执行接管"
+            else:
+                self.db.update_task(task.task_id, loopforge_issue_id=issue_id)
             self.db.add_event(
                 "loopforge.issue_created",
                 f"已在 LoopForge 创建需求 {issue_id}",
                 task_id=task.task_id,
                 actor="VernalBridge",
             )
-        elif not task.loopforge_run_id:
+        elif fresh and not task.loopforge_run_id:
             is_rerun = True
             try:
                 await dispatch_client.reopen_issue(issue_id)
@@ -510,17 +628,37 @@ class LoopForgeBridge:
                     repository_id=repo_id,
                     base_branch=base_br,
                 )
-            except LoopForgeError:
-                pass
+            except LoopForgeError as exc:
+                record(self.db, receipt, "FAILED")
+                return False, f"更新原生工单失败，已停止派发：{exc}"
 
         run_id = task.loopforge_run_id
         if not run_id:
-            dispatched = await dispatch_client.dispatch_issue(issue_id, rerun=is_rerun) if is_rerun else await dispatch_client.dispatch_issue(issue_id)
-            run_id = str(dispatched.get("latestRunId") or dispatched.get("runId") or "")
-            if not run_id:
-                return False, f"派发需求 {issue_id} 未返回 Run ID"
+            try:
+                opts = {"stop": stop_event, "timeout": self.settings.agent_timeout_sec}
+                if fresh:
+                    if expected_exec_seq is not None and not self.db.is_task_owned(task.task_id, expected_exec_seq=expected_exec_seq):
+                        return False, "派单已取消"
+                    native = await dispatch_client.dispatch_issue(issue_id, rerun=True) if is_rerun else await dispatch_client.dispatch_issue(issue_id)
+                    run_id = await accept_task(self.db, receipt, dispatch_client, native, **opts)
+                else:
+                    run_id = await observe_task(self.db, receipt, dispatch_client, **opts)
+            except LoopForgeError as exc:
+                if receipt["state"] == "DISPATCHING":
+                    record(self.db, receipt, "NEEDS_CONFIRMATION")
+                return False, f"查询 LoopForge 派单：{exc}"
+            if expected_exec_seq is not None:
+                if not self.db.update_task_if_owned(
+                    task.task_id,
+                    expected_exec_seq=expected_exec_seq,
+                    expected_attempt=expected_attempt,
+                    expected_run_id="",
+                    loopforge_run_id=run_id,
+                ):
+                    return False, "任务已被取消、重置或由替代执行接管"
+            else:
+                self.db.update_task(task.task_id, loopforge_run_id=run_id)
             self.db.meta_set(f"pool.run:{run_id}", self.settings.selected_pool)
-            self.db.update_task(task.task_id, loopforge_run_id=run_id)
         self.db.update_slot(slot_id, current_action=f"LoopForge SOP 运行中（Run {run_id[:12]}）…")
         self.db.add_event(
             "loopforge.dispatched",
@@ -531,6 +669,13 @@ class LoopForgeBridge:
 
         # 以 LoopForge 为单任务执行真相源，每 2.5 秒幂等对账
         def _on_progress(st: str, summary: str, _run: dict[str, Any]) -> None:
+            if expected_exec_seq is not None and not self.db.is_task_owned(
+                task.task_id,
+                expected_exec_seq=expected_exec_seq,
+                expected_attempt=expected_attempt,
+                expected_run_id=run_id,
+            ):
+                return
             self.db.update_slot(slot_id, current_action=summary[:200])
             self.db.add_event(
                 "loopforge.progress",
@@ -539,7 +684,17 @@ class LoopForgeBridge:
                 actor="VernalBridge",
             )
             if st == "waiting":
-                self.db.update_task(task.task_id, status=TaskStatus.REVIEWING)
+                if expected_exec_seq is not None:
+                    if not self.db.update_task_if_owned(
+                        task.task_id,
+                        expected_exec_seq=expected_exec_seq,
+                        expected_attempt=expected_attempt,
+                        expected_run_id=run_id,
+                        status=TaskStatus.REVIEWING,
+                    ):
+                        return
+                else:
+                    self.db.update_task(task.task_id, status=TaskStatus.REVIEWING)
                 self.db.add_event(
                     "loopforge.waiting_gate",
                     f"LoopForge Run {run_id} 正在等待人工审批门禁（可在左侧「待我确认」直接审批）",
@@ -572,4 +727,6 @@ class LoopForgeBridge:
             on_progress=_on_progress,
             on_auto_passed=_on_auto_passed,
         )
+        if _run.get("status") in ("succeeded", "failed", "cancelled", "completed"):
+            record(self.db, receipt, "FINISHED" if ok else "FAILED")
         return ok, msg

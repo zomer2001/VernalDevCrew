@@ -164,4 +164,15 @@ cd <仓库目录>
 ```
 
 - 详细操作与应急排查手册：[USAGE_GUIDE.md](USAGE_GUIDE.md)
-- 开源 Skill / SOP 扩充与演进备忘：[ROADMAP_AND_ASSETS.md](ROADMAP_AND_ASSETS.md)
+- 标准化七阶段研发流水线任务书：[CODEX_PIPELINE_PLATFORM_SPEC.md](CODEX_PIPELINE_PLATFORM_SPEC.md)
+- 演进路线与架构蓝图：[ROADMAP_V2.md](ROADMAP_V2.md) · [ROADMAP_AND_ASSETS.md](ROADMAP_AND_ASSETS.md)
+
+## 标准化七阶段研发流水线（新增）
+
+平台内置可配置的 **Process-as-Code** 工程流程引擎，覆盖 **需求分析 → 架构设计 → 详细设计 → AI 辅助编码 → 人工代码审查 → 自动化测试与质量门禁 → 持续集成与交付**：
+
+1. **流程阶段门禁（`autodev/process/`）**：提供 `legacy`、`standard`、`feature`、`bugfix`、`doc_reverse` 五套模板，支持在「流水线总控」顶栏查看七阶段实时步进状态并在线签字放行或记录豁免。
+2. **规范文档中心与详细设计（`autodev/docs_center/`）**：支持 `arc42/MADR/EARS` 与 `GB/T 8567` 双规范模板，自动校验详细设计中的 `P0` 需求双向覆盖与测试用例绑定，支持多版本对比及一键导出 `.docx` / `.zip` 归档包。
+3. **人机协同 Code Review（`autodev/review/`）**：支持 `off / risk / milestone / all` 四档审查策略；高风险变更（触及契约、子进程/鉴权敏感代码、多轮返工）自动进入「审查与交付」工作台，支持逐行评论与一键打回编码智能体返工。
+4. **多维代码质量门禁（`autodev/quality/`）**：内置 AST 假测试检测（拦截空壳测试、`assert True`、无断言、整文件跳过、吞异常）、硬编码密钥扫描、增量 Lint、变更行覆盖率与离线 Semgrep SAST。
+5. **持续集成与版本交付（`autodev/ci/`）**：支持内置 Gitea Actions（`ci` profile）及外部 GitLab / Jenkins / Webhook 适配，CI 失败自动派发 `bugfix` 泳道任务进入闭环修复，合入时自动打标签并归档 Release Notes 与测试报告。

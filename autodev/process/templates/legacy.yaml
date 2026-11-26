@@ -1,0 +1,40 @@
+{
+  "id": "legacy",
+  "name": "轻量敏捷默认流程 (Legacy)",
+  "description": "兼容既有自动编排行为：保留蓝图批准与里程碑合入审批，不强制详细设计与人工逐单审查。",
+  "review_policy": "off",
+  "review_checklist": [
+    "变更范围未越出任务 allowed_paths",
+    "自动化验证命令全部通过"
+  ],
+  "quality": {},
+  "stages": [
+    {"id": "requirements", "name": "需求分析", "enabled": true, "required_artifacts": [], "gates": []},
+    {
+      "id": "architecture",
+      "name": "架构与蓝图",
+      "enabled": true,
+      "required_artifacts": [],
+      "gates": [
+        {"id": "architecture_approval", "name": "立项蓝图批准", "kind": "human_approval", "scope": "project", "blocking": true}
+      ]
+    },
+    {"id": "detailed_design", "name": "详细设计", "enabled": false, "required_artifacts": [], "gates": []},
+    {"id": "implementation", "name": "AI 辅助编码", "enabled": true, "required_artifacts": [], "gates": []},
+    {"id": "code_review", "name": "代码审查", "enabled": true, "required_artifacts": [], "gates": [
+      {"id": "ai_independent_review", "name": "独立只读 AI 审查", "kind": "ai_review", "scope": "task", "blocking": true}
+    ]},
+    {"id": "testing", "name": "自动化测试", "enabled": true, "required_artifacts": [], "gates": [
+      {"id": "task_verify_cmd", "name": "确定性验证命令", "kind": "command", "scope": "task", "blocking": true}
+    ]},
+    {
+      "id": "integration_delivery",
+      "name": "集成与交付",
+      "enabled": true,
+      "required_artifacts": [],
+      "gates": [
+        {"id": "milestone_merge_approval", "name": "里程碑合入签字", "kind": "human_approval", "scope": "milestone", "blocking": true}
+      ]
+    }
+  ]
+}

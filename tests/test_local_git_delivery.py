@@ -65,12 +65,14 @@ def test_launch_and_deliver_with_dirty_source(tmp_path, monkeypatch):
     packs = ws.state_dir / "git-snapshots"
     snapshot = local_git.prepare_snapshot(worktree, base, packs)
     assert local_git.prepare_snapshot(worktree, base, packs) == snapshot
-    signature = sign_context_sig(settings.effective_loopforge_token(), "demo", f"git:{snapshot}")
+    signature = sign_context_sig(settings.project_signing_key(), "demo", f"git:{snapshot}")
     route = f"/vernal-api/git-snapshots/{snapshot}.pack"
     runner = tmp_path / "runner"
     runner.mkdir()
     with TestClient(create_app(engine)) as client:
         assert client.get(route, params={"project": "demo", "sig": "invalid"}).status_code == 403
+        service_signature = sign_context_sig(settings.service_token(), "demo", f"git:{snapshot}")
+        assert client.get(route, params={"project": "demo", "sig": service_signature}).status_code == 403
         response = client.get(route, params={"project": "demo", "sig": signature})
         assert response.status_code == 200
         (runner / "download.pack").write_bytes(response.content)

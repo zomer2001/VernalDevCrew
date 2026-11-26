@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+import os
 from datetime import datetime
 from ipaddress import ip_address
 from typing import Any
@@ -11,14 +13,38 @@ import httpx
 
 
 def use_environment_proxy(url: str) -> bool:
-    """Connect directly to a local LoopForge or Gitea, even when macOS has a proxy."""
+    """内网/回环/容器服务直连绕过宿主机代理，公网外部地址严格遵循环境代理合约。"""
     host = (urlsplit(url).hostname or "").rstrip(".").lower()
-    if host == "localhost" or host.endswith(".localhost"):
+    if not host or "." not in host or host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
         return False
     try:
-        return not ip_address(host).is_loopback
+        ip = ip_address(host)
+        if ip.is_loopback or ip.is_private or ip.is_link_local:
+            return False
     except ValueError:
-        return True
+        pass
+    return True
+
+
+def create_async_http_client(
+    url: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+    **kwargs: Any,
+) -> httpx.AsyncClient:
+    """统一构造 httpx.AsyncClient：保留内外网代理合约；要求 SOCKS 代理却缺少 socksio 时给出清晰可操作报错。"""
+    trust_env = False if transport is not None else use_environment_proxy(url)
+    if transport is not None:
+        kwargs["transport"] = transport
+    try:
+        return httpx.AsyncClient(trust_env=trust_env, **kwargs)
+    except ImportError as exc:
+        if "socksio" in str(exc).lower():
+            raise RuntimeError(
+                f"当前环境配置了 SOCKS 代理访问外部地址 ({url})，但缺少 socksio 依赖；"
+                "请执行 `pip install 'httpx[socks]'`（或 `pip install socksio`），或在离线测试中显式注入 transport"
+            ) from exc
+        raise
 
 
 class LoopForgeError(RuntimeError):
@@ -27,26 +53,53 @@ class LoopForgeError(RuntimeError):
         super().__init__(message)
 
 
+def run_project_id(run: dict) -> str:
+    context = run.get("executionContext") or {}
+    stamped, flat = context.get("projectId"), run.get("projectId")
+    if stamped and flat and stamped != flat:
+        return ""
+    return str(stamped or flat or "")
+
+
+class SessionCookie(str):
+    """Verified browser credential. Never serialize as a service credential."""
+
+
 class LoopForgeClient:
-    def __init__(self, base_url: str, token: str = "", timeout: float = 15.0):
+    def __init__(
+        self,
+        base_url: str,
+        token: str = "",
+        timeout: float = 15.0,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
-        self.token = token.strip()
+        self.token = token if isinstance(token, SessionCookie) else token.strip()
         self.timeout = timeout
+        self.transport = transport
+        self.approval_user_id = None
+        self.approval_workflow = ""
         self.issue_user_id: int | str | None = None
 
     def _headers(self) -> dict[str, str]:
         h = {"Accept": "application/json", "Content-Type": "application/json"}
-        if self.token:
+        if isinstance(self.token, SessionCookie):
+            h["Cookie"] = str(self.token)
+            h["Origin"] = self.base_url
+        elif self.token:
             h["Authorization"] = f"Bearer {self.token}"
         return h
 
     async def _req(self, method: str, path: str, *, json_body: dict[str, Any] | None = None, params: dict[str, Any] | None = None) -> Any:
         url = f"{self.base_url}{path}"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, trust_env=use_environment_proxy(url)) as client:
+            async with create_async_http_client(url, timeout=self.timeout, transport=self.transport) as client:
                 resp = await client.request(method, url, headers=self._headers(), json=json_body, params=params)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, RuntimeError) as exc:
             raise LoopForgeError(f"无法连接 LoopForge ({url}): {exc}") from exc
+        if method == "POST" and path.endswith("/retry") and resp.status_code == 202:
+            raise LoopForgeError("原生工作区仍在恢复，重试尚未确认", 409)
         if resp.status_code == 204:
             return {"ok": True}
         try:
@@ -68,17 +121,21 @@ class LoopForgeClient:
     async def gitea_health(self, gitea_url: str) -> tuple[bool, dict[str, Any]]:
         url = f"{gitea_url.rstrip('/')}/api/v1/version"
         try:
-            async with httpx.AsyncClient(timeout=4.0, trust_env=use_environment_proxy(url)) as client:
+            async with create_async_http_client(url, timeout=4.0) as client:
                 resp = await client.get(url)
             if resp.status_code < 400:
                 return True, resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"ok": True}
             # Gitea 未完成首次安装页时根路径返回 200，API 返回 404/302 也算服务存活
             return resp.status_code in (302, 307, 401, 403, 404), {"status_code": resp.status_code, "note": "已启动（待首次初始化）"}
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, RuntimeError) as exc:
             return False, {"error": str(exc)}
 
     async def list_projects(self) -> list[dict[str, Any]]:
         data = await self._req("GET", "/api/projects")
+        return data if isinstance(data, list) else []
+
+    async def list_users(self) -> list[dict[str, Any]]:
+        data = await self._req("GET", "/api/users")
         return data if isinstance(data, list) else []
 
     async def create_project(
@@ -89,8 +146,11 @@ class LoopForgeClient:
         description: str = "",
         workflow_id: str = "",
         default_repository_id: str = "",
+        members: list[dict] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"id": project_id, "name": name, "description": description}
+        if members:
+            body["members"] = members
         if workflow_id:
             body["workflowId"] = workflow_id
         if default_repository_id:
@@ -135,9 +195,9 @@ class LoopForgeClient:
                 "Cookie": cookie_header,
             }
             try:
-                async with httpx.AsyncClient(timeout=self.timeout, trust_env=use_environment_proxy(url)) as client:
+                async with create_async_http_client(url, timeout=self.timeout) as client:
                     resp = await client.put(url, headers=headers, json=body)
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, RuntimeError) as exc:
                 raise LoopForgeError(f"无法连接 LoopForge ({url}): {exc}") from exc
             data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
             if resp.status_code >= 400:
@@ -152,11 +212,11 @@ class LoopForgeClient:
 
     async def list_runners_with_cookie(self, cookie: str) -> list[dict[str, Any]]:
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, trust_env=use_environment_proxy(self.base_url)) as client:
+            async with create_async_http_client(self.base_url, timeout=self.timeout) as client:
                 response = await client.get(f"{self.base_url}/api/runners", headers={"Cookie": cookie})
                 response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise LoopForgeError("无法读取当前登录账号的执行机") from exc
+        except (httpx.HTTPError, RuntimeError) as exc:
+            raise LoopForgeError(f"无法读取当前登录账号的执行机：{exc}") from exc
         rows = response.json()
         return rows if isinstance(rows, list) else []
 
@@ -174,9 +234,9 @@ class LoopForgeClient:
         if cookie_header:
             headers["Cookie"] = cookie_header
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, trust_env=use_environment_proxy(url)) as client:
+            async with create_async_http_client(url, timeout=self.timeout) as client:
                 resp = await client.get(url, headers=headers)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, RuntimeError) as exc:
             raise LoopForgeError(f"无法连接 LoopForge ({url}): {exc}") from exc
         data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
         if resp.status_code >= 400:
@@ -189,9 +249,9 @@ class LoopForgeClient:
         if cookie_header:
             headers["Cookie"] = cookie_header
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, trust_env=use_environment_proxy(url)) as client:
+            async with create_async_http_client(url, timeout=self.timeout) as client:
                 resp = await client.get(url, headers=headers)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, RuntimeError) as exc:
             raise LoopForgeError(f"无法连接 LoopForge ({url}): {exc}") from exc
         if resp.status_code >= 400:
             raise LoopForgeError(f"HTTP {resp.status_code}", status_code=resp.status_code)
@@ -217,13 +277,13 @@ class LoopForgeClient:
         if cookie_header:
             headers["Cookie"] = cookie_header
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, trust_env=use_environment_proxy(url)) as client:
+            async with create_async_http_client(url, timeout=self.timeout) as client:
                 resp = await client.post(
                     url,
                     headers=headers,
                     json={"name": name, "expiresInDays": expires_in_days},
                 )
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, RuntimeError) as exc:
             raise LoopForgeError(f"无法连接 LoopForge ({url}): {exc}") from exc
         try:
             data = resp.json()
@@ -293,6 +353,18 @@ class LoopForgeClient:
     async def get_run(self, run_id: str) -> dict[str, Any]:
         return await self._req("GET", f"/api/runs/{run_id}")
 
+    async def project_run(self, run_id: str, project_id: str) -> dict[str, Any]:
+        run = await self.get_run(run_id)
+        context = run.get("executionContext") or {}
+        owner = run_project_id(run)
+        if not owner and not context.get("projectId") and not run.get("projectId") and context.get("issueId"):
+            detail = await self.issue_detail(context["issueId"])
+            issue = detail.get("issue", {})
+            owner = issue.get("projectId") if issue.get("id") == context["issueId"] else ""
+        if not project_id or owner != project_id or run.get("id") != run_id:
+            raise LoopForgeError("运行不属于当前项目", 403)
+        return run
+
     async def named_artifact(self, run: dict[str, Any], filename: str, *, node_id: str = "") -> str:
         """Read one declared SOP output from the run's artifact index."""
         records = [a for a in run.get("artifacts") or []
@@ -343,9 +415,17 @@ class LoopForgeClient:
     async def get_run_logs(self, run_id: str) -> Any:
         return await self._req("GET", f"/api/runs/{run_id}/logs")
 
-    async def get_analytics(self) -> dict[str, Any]:
-        data = await self._req("GET", "/api/analytics")
+    async def get_analytics(self, project_id: str = "") -> dict[str, Any]:
+        data = await self._req("GET", "/api/analytics", params={"projectId": project_id} if project_id else None)
         return data if isinstance(data, dict) else {}
+
+    def issue_bindings(self, workflow_id):
+        steps = [{"id": "development", "workflowId": workflow_id, "order": 1, "assigneeUserId": int(self.issue_user_id)}]
+        if self.approval_user_id and self.approval_workflow and workflow_id != self.approval_workflow:
+            steps.append({"id": "approval", "workflowId": self.approval_workflow, "order": 2,
+                          "assigneeUserId": int(self.approval_user_id), "dependsOn": ["development"],
+                          "handoff": ["review-report.md"]})
+        return steps
 
     async def create_issue(
         self,
@@ -365,7 +445,9 @@ class LoopForgeClient:
             "priority": priority,
         }
         if self.issue_user_id is not None:
-            body["responsibleUserId"] = self.issue_user_id
+            body["assigneeUserId"] = self.issue_user_id
+            if workflow_id:
+                body["sopBindings"] = self.issue_bindings(workflow_id)
         if workflow_id:
             body["workflowId"] = workflow_id
         if repository_id:
@@ -393,7 +475,9 @@ class LoopForgeClient:
             "description": description,
         }
         if self.issue_user_id is not None:
-            body["responsibleUserId"] = self.issue_user_id
+            body["assigneeUserId"] = self.issue_user_id
+            if workflow_id:
+                body["sopBindings"] = self.issue_bindings(workflow_id)
         if workflow_id:
             body["workflowId"] = workflow_id
         if repository_id:
@@ -410,20 +494,37 @@ class LoopForgeClient:
             raise LoopForgeError("LoopForge 返回无效的工单详情")
         return data
 
-    async def dispatch_issue(self, issue_id: str, rerun: bool = False) -> dict[str, Any]:
+    async def dispatch_issue(self, issue_id: str, rerun: bool = False, *, workflow_id: str = "") -> dict[str, Any]:
         if self.issue_user_id is not None:
             # LoopForge selects provider credentials by issue responsibility, with project-owner fallback.
             recorded = await self.issue_detail(issue_id)
             issue = recorded.get("issue", recorded) if isinstance(recorded, dict) else {}
-            if str(issue.get("responsibleUserId", "")) != str(self.issue_user_id):
+            expected = self.approval_user_id if workflow_id and workflow_id == self.approval_workflow else self.issue_user_id
+            binding = next((b for b in issue.get("sopBindings", []) if b.get("workflowId") == (workflow_id or issue.get("workflowId"))), {})
+            if str(binding.get("assigneeUserId") or issue.get("assigneeUserId", "")) != str(expected):
                 raise LoopForgeError("LoopForge 未确认工单的公用账号责任人，已停止派单")
-        return await self._req("POST", f"/api/issues/{issue_id}/dispatch", json_body={"rerun": rerun})
+        return await self._req("POST", f"/api/issues/{issue_id}/dispatch", json_body={"rerun": rerun, **({"workflowId": workflow_id} if workflow_id else {})})
+
+    async def get_task(self, task_id: str) -> dict[str, Any]:
+        return await self._req("GET", f"/api/tasks/{quote(task_id, safe='')}")
+
+    async def list_issue_tasks(self, issue_id: str) -> list[dict[str, Any]]:
+        rows = await self._req("GET", "/api/tasks")
+        if not isinstance(rows, list):
+            raise LoopForgeError("原生 Task 列表格式无效", 502)
+        return [r for r in rows if isinstance(r, dict) and r.get("issueId") == issue_id]
+
+    async def list_issue_runs(self, issue_id: str) -> list[dict[str, Any]]:
+        runs = await self._req("GET", f"/api/issues/{quote(issue_id, safe='')}/runs")
+        if not isinstance(runs, list):
+            raise LoopForgeError("原生运行历史格式无效", 502)
+        return runs
 
     async def reopen_issue(self, issue_id: str) -> dict[str, Any]:
         return await self._req("POST", f"/api/issues/{issue_id}/reopen", json_body={})
 
     async def approve_run(self, run_id: str, comment: str = "", node_id: str = "") -> dict[str, Any]:
-        body: dict[str, Any] = {"comment": comment}
+        body: dict[str, Any] = {"context": comment}
         if node_id:
             body["nodeId"] = node_id
         return await self._req("POST", f"/api/runs/{run_id}/approve", json_body=body)
@@ -431,7 +532,7 @@ class LoopForgeClient:
     async def reject_run(self, run_id: str, reason: str, target_node: str = "", node_id: str = "") -> dict[str, Any]:
         body: dict[str, Any] = {"reason": reason}
         if target_node:
-            body["targetNodeId"] = target_node
+            body["targetId"] = target_node
         if node_id:
             body["nodeId"] = node_id
         return await self._req("POST", f"/api/runs/{run_id}/reject", json_body=body)
@@ -446,11 +547,15 @@ class LoopForgeClient:
     async def resume_run(self, run_id: str) -> dict[str, Any]:
         return await self._req("POST", f"/api/runs/{run_id}/resume", json_body={})
 
-    async def list_pending_approvals(self) -> list[dict[str, Any]]:
+    async def list_pending_approvals(self, project_id: str) -> list[dict[str, Any]]:
         """筛选 LoopForge 中正停在人工审批门禁（waiting / waiting_approval）的运行项，聚合进统一收件箱。"""
+        if not project_id:
+            return []
         runs = await self.list_runs()
         pending: list[dict[str, Any]] = []
         for r in runs:
+            if run_project_id(r) != project_id:
+                continue
             if r.get("status") not in ("waiting", "waiting_approval"):
                 continue
             nodes = r.get("nodes") or {}
@@ -466,7 +571,7 @@ class LoopForgeClient:
                     {
                         "source": "loopforge",
                         "run_id": r.get("id", ""),
-                        "issue_id": r.get("issueId", ""),
+                        "issue_id": (r.get("executionContext") or {}).get("issueId") or r.get("issueId", ""),
                         "workflow_id": r.get("workflowId", ""),
                         "workflow_name": (r.get("workflowSnapshot") or {}).get("name") or r.get("workflowId", ""),
                         "node_id": nid,
