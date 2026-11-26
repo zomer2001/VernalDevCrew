@@ -1,0 +1,43 @@
+{
+  "sha256": "8474f63c074a519d42dfd5bea7db420dcfd622cbde80fe14dded501010cac81c",
+  "original_question_count": 4,
+  "checks": [
+    {
+      "runtime": "py",
+      "case": "original-schema",
+      "exit_code": 0,
+      "passed": true
+    },
+    {
+      "runtime": "py",
+      "case": "fixed-schema",
+      "exit_code": 1,
+      "passed": true
+    },
+    {
+      "runtime": "py",
+      "case": "empty-clarifications-test-copy",
+      "exit_code": 0,
+      "passed": true
+    },
+    {
+      "runtime": "cjs",
+      "case": "original-schema",
+      "exit_code": 0,
+      "passed": true
+    },
+    {
+      "runtime": "cjs",
+      "case": "fixed-schema",
+      "exit_code": 1,
+      "passed": true
+    },
+    {
+      "runtime": "cjs",
+      "case": "empty-clarifications-test-copy",
+      "exit_code": 0,
+      "passed": true
+    }
+  ],
+  "note": "修正数组仅限临时测试副本，没有改写真实项目产物或批准结果。"
+}
