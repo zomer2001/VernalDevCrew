@@ -17,7 +17,7 @@ from autodev.process.targets import document_sha
 from .assets import digest_json, load_assets
 from .parser import parse_spec, parse_tasks
 from .service import (SpecConflictError, assert_no_blocking_questions, assert_source_current,
-                      checklist_findings_digest, input_fingerprint, latest, quality_review)
+                      checklist_findings_digest, revision_inputs_current, latest, quality_review)
 
 
 def _path(path: str) -> str:
@@ -75,7 +75,7 @@ def compile_tasks(engine, feature_id: str, *, require_analysis: bool = True) -> 
         if not rev:
             raise ValueError(f"缺少 {kind} 修订")
         assert_source_current(engine,rev)
-        if rev["input_sha"] != input_fingerprint(engine,feature_id,kind):
+        if not revision_inputs_current(engine, rev):
             raise SpecConflictError(f"{kind} 基于旧规格，请重新生成或确认修订")
         revisions[kind] = rev
     qr = None
@@ -150,7 +150,7 @@ def compile_tasks(engine, feature_id: str, *, require_analysis: bool = True) -> 
                 raise ValueError("最小编译器每次只发布同一里程碑，跨里程碑编译在后续批次提供")
     if require_analysis:
         analysis = latest(engine,feature_id,"analyze")
-        if not analysis or analysis["input_sha"] != input_fingerprint(engine,feature_id,"analyze"):
+        if not analysis or not revision_inputs_current(engine, analysis):
             raise SpecConflictError("请先对当前任务草案执行一致性检查")
         assert_source_current(engine,analysis)
         findings = engine.db.meta_get(f"speckit.analysis:{analysis['rev_id']}")
@@ -209,8 +209,11 @@ def assert_package_current(db, task) -> CompiledWorkPackage | None:
         if db.meta_get("speckit.enabled") == "1" and task.status not in ("MERGED","CANCELLED"):
             raise SpecConflictError("规格项目的待执行任务必须由工作包编译器发布")
         return None
-    package = CompiledWorkPackage.model_validate_json(task.compiled_package_json)
-    if digest_json(package.model_dump(exclude={"compiled_task_hash"})) != task.compiled_task_hash:
+    frozen = json.loads(task.compiled_package_json)
+    package = CompiledWorkPackage.model_validate(frozen)
+    # Hash the signed payload as stored. Model defaults added by newer releases
+    # must not change the preimage of an already published work package.
+    if digest_json({k: v for k, v in frozen.items() if k != "compiled_task_hash"}) != task.compiled_task_hash:
         raise SpecConflictError("工作包指纹校验失败")
     if package.compiled_task_hash != task.compiled_task_hash or package.feature_id != task.feature_id or package.spec_rev_id != task.spec_rev_id:
         raise SpecConflictError("任务锚点与冻结工作包不一致")
@@ -220,7 +223,7 @@ def assert_package_current(db, task) -> CompiledWorkPackage | None:
     for kind,expected in (("spec",package.spec_sha),("plan",package.plan_sha),("tasks",package.tasks_sha),("constitution",package.constitution_sha)):
         feature = "project" if kind == "constitution" else task.feature_id
         rows = db._query("SELECT * FROM spec_revisions WHERE feature_id=? AND source_kind=? ORDER BY rev_no DESC LIMIT 1",(feature,kind))
-        if not rows or rows[0]["content_sha"] != expected or (kind == "spec" and rows[0]["rev_id"] != task.spec_rev_id):
+        if not rows or rows[0]["status"] == "STALE" or rows[0]["content_sha"] != expected or (kind == "spec" and rows[0]["rev_id"] != task.spec_rev_id):
             raise SpecConflictError("工作包所依据的规格已变化，旧任务不能继续执行")
         path = db.path.parent.parent / rows[0]["rel_path"]
         if path.is_symlink() or not path.resolve().is_relative_to(db.path.parent.parent.resolve()) or not path.is_file() or document_sha(path.read_text("utf-8")) != expected:
@@ -231,7 +234,7 @@ def assert_package_current(db, task) -> CompiledWorkPackage | None:
     engine = SimpleNamespace(db=db,ws=SimpleNamespace(root=db.path.parent.parent,state_dir=db.path.parent))
     chk_rows = db._query("SELECT * FROM spec_revisions WHERE feature_id=? AND source_kind='checklist' ORDER BY rev_no DESC LIMIT 1",(task.feature_id,))
     if package.checklist_sha:
-        if not chk_rows or chk_rows[0]["content_sha"] != package.checklist_sha or (package.checklist_rev_id and chk_rows[0]["rev_id"] != package.checklist_rev_id):
+        if not chk_rows or chk_rows[0]["status"] == "STALE" or chk_rows[0]["content_sha"] != package.checklist_sha or (package.checklist_rev_id and chk_rows[0]["rev_id"] != package.checklist_rev_id):
             raise SpecConflictError("工作包所依据的规格质量检查已变化，旧任务不能继续执行")
         chk_path = db.path.parent.parent / chk_rows[0]["rel_path"]
         if chk_path.is_symlink() or not chk_path.resolve().is_relative_to(db.path.parent.parent.resolve()) or not chk_path.is_file() or document_sha(chk_path.read_text("utf-8")) != package.checklist_sha:

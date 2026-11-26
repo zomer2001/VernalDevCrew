@@ -431,8 +431,10 @@ async def reconcile_steering_checkpoint(engine: "Engine", checkpoint_id: int) ->
                 continue
             if decision.action != "approve_recovery":
                 continue
-            dup_or_stale, _why = ledger.is_duplicate_or_stale(decision)
-            if dup_or_stale:
+            claimed, claim_state = ledger.claim(decision)
+            if not claimed:
+                if claim_state == "pending":
+                    permission_error = "恢复请求结果尚未确认，已停止重复提交，请核对远端节点状态"
                 continue
             try:
                 await client.approve_run(
@@ -448,8 +450,8 @@ async def reconcile_steering_checkpoint(engine: "Engine", checkpoint_id: int) ->
                 run = await client.get_run(run_id)
                 st = str(run.get("status") or "")
                 nodes = run.get("nodes") or {}
-            except LoopForgeError:
-                pass
+            except LoopForgeError as exc:
+                permission_error = f"恢复请求结果尚未确认，已停止重复提交：{exc}"
 
     opinions = dict(cp.get("opinions") or {})
     for slug in ("pm", "arch", "qa"):

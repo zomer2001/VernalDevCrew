@@ -155,7 +155,7 @@ def test_bridge_controlled_recovery_requires_current_turn_evidence_and_is_idempo
         waiting_state = {
             "id": "run-1",
             "status": "waiting",
-            "workflowSnapshot": {"nodes": [{"id": "implement", "type": "agent"}]},
+            "workflowSnapshot": {"completionProtocol": "controlled_recovery", "nodes": [{"id": "implement", "type": "agent"}]},
             "nodes": {
                 "implement": {
                     "status": "waiting_approval",
@@ -316,7 +316,7 @@ def test_poll_completion_policy_never_auto_approves_unsafe_states(case_name, wf_
 def test_review_gate_checks_current_report_even_for_succeeded_runs(report, expected_action, may_release):
     from autodev.loopforge.bridge import poll_loopforge_run
 
-    node = {"id": "review", "type": "agent", "rejectTo": "implement",
+    node = {"id": "review", "type": "agent", "rejectTo": "implement", "completionProtocol": "controlled_recovery",
             "artifactOutputs": [{"name": "review-report.md", "required": True}]}
     def artifact(nid, attempt, text, timestamp):
         return {"nodeId": nid, "attempt": attempt, "name": "review-report.md",
@@ -331,7 +331,7 @@ def test_review_gate_checks_current_report_even_for_succeeded_runs(report, expec
     run = {"id": "run-1", "workflowSnapshot": {"nodes": [node]}, "artifacts": records}
     info = {"attempt": 2, "startedAt": "2026-01-01T00:01:00Z", "reworkCount": 1}
     waiting = {**run, "status": "waiting", "nodes": {"review": {
-        **info, "status": "waiting_approval", "error": "未收到 submit_gate_result"}}}
+        **info, "exitCode": 0, "status": "waiting_approval", "error": "未收到 submit_gate_result"}}}
     succeeded = {**run, "status": "succeeded", "nodes": {"review": {**info, "status": "succeeded"}}}
     client = LoopForgeClient("http://lf.test")
     client.get_run = AsyncMock(side_effect=[waiting, succeeded])

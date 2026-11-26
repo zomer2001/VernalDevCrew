@@ -307,8 +307,10 @@ async def poll_loopforge_run(
                     if decision.category == CompletionCategory.ARTIFACT_INVALID and decision.reason:
                         gate_note = f"。{decision.reason}"
                     continue
-                dup_or_stale, _why = ledger.is_duplicate_or_stale(decision)
-                if dup_or_stale:
+                claimed, claim_state = ledger.claim(decision)
+                if not claimed:
+                    if claim_state == "pending":
+                        gate_note = "。恢复请求结果尚未确认，已停止重复提交，请核对远端节点状态"
                     continue
                 if decision.action == "reject_rework":
                     gate_note = f"。独立审查要求返工。{decision.reason[:220]}"

@@ -208,7 +208,7 @@ def test_intake_uses_native_sop_dispatch_receipts_and_frozen_execution(project):
     from autodev.harnesses.loopforge_harness import LoopForgeHarness
     from autodev.loopforge.client import LoopForgeClient
     from autodev.loopforge.bridge import LoopForgeBridge
-    current={"step":"intake"};issues=[];runs=[]
+    current={"step":"intake"};issues=[];runs=[];native_assets={}
     outputs={"constitution":"# 项目宪章\n交付必须有验收依据。", "checklist":"# 规格检查\n验收条件明确。", "plan":PLAN,
              "tasks":render_tasks([draft()]),"analyze":"# 一致性检查\n全部需求已覆盖。"}
     def handler(req):
@@ -216,7 +216,11 @@ def test_intake_uses_native_sop_dispatch_receipts_and_frozen_execution(project):
         if p=="/api/runners":return httpx.Response(200,json=[{"id":"runner-test","status":"online","isDefault":True,"runtimes":[{"provider":"codex"}]}])
         if p=="/api/sandboxes":return httpx.Response(200,json=[{"id":"local"}])
         if p in ("/api/rules","/api/agents","/api/skills","/api/mcp-servers","/api/workflows"):
-            return httpx.Response(200,json=[] if req.method=="GET" else {**json.loads(req.content),"status":"draft"})
+            if req.method == "GET":
+                return httpx.Response(200, json=list(native_assets.get(p, {}).values()))
+            value = json.loads(req.content)
+            native_assets.setdefault(p, {})[value["id"]] = value
+            return httpx.Response(200, json={**value, "status": "draft"})
         if p.endswith("/publish"):return httpx.Response(200,json={"status":"published"})
         if p=="/api/issues" and req.method=="POST":
             body=json.loads(req.content);issues.append(body)

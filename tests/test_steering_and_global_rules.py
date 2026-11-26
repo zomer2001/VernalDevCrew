@@ -581,6 +581,7 @@ def test_steering_reconcile_enforces_shared_completion_policy(tmp_path: Path) ->
             client.get("/vernal-api/steering")
             assert box["approvals"] == []
 
+            box["runs"][run_id]["workflowSnapshot"]["completionProtocol"] = "controlled_recovery"
             # 3) Controlled recovery succeeds ONCE when current-turn required artifacts exist and stays idempotent
             box["runs"][run_id]["nodes"] = {
                 "pm_opinion": {

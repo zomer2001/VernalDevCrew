@@ -173,6 +173,7 @@ class LoopForgeHarness(Harness):
         self._assets_lock = asyncio.Lock()
         self._dispatch_lock = asyncio.Lock()
         self._assets_ready = False
+        self._asset_config = ""
         self._last_rule_digest: str = ""
 
     def _client(self) -> LoopForgeClient:
@@ -196,9 +197,17 @@ class LoopForgeHarness(Harness):
                     )
                     pid = str(created.get("id") or "vernal-default")
                 self.settings.loopforge_project_id = pid
-            if not self._assets_ready or self.settings.selected_pool == "public_docker":
+            def config_key():
+                return hashlib.sha256(json.dumps([
+                    pid, self.settings.selected_pool,
+                    [(r, self.settings.harness_for(r), self.settings.model_for(r), self.settings.effort_for(r))
+                     for r in ("pm", "director", "qa_lead", "coder", "reviewer")],
+                ], sort_keys=True).encode()).hexdigest()
+            asset_config = config_key()
+            if not self._assets_ready or self._asset_config != asset_config or self.settings.selected_pool == "public_docker":
                 await ensure_vernal_loopforge_assets(client, pid, self.settings)
                 self._assets_ready = True
+                self._asset_config = config_key()
             from autodev.speckit.service import constitution_rule, enabled, sync_rule
             if enabled(self):
                 rule_sig = hashlib.sha256(
@@ -217,6 +226,57 @@ class LoopForgeHarness(Harness):
                     await sync_rule(self, client, pid)
                     self._last_rule_digest = rule_sig
             return pid, plan_workflow_id(pid, role)
+
+    async def _effort_workflow(self, client, pid: str, wf_id: str, role: str, effort: str) -> str:
+        """Snapshot a distinct effort without editing a shared planner or its SOP.
+
+        Read the source afresh so later human gate edits remain effective.
+        Reuse content-addressed native assets without repeated registration.
+        """
+        if not effort or effort == self.settings.effort_for(role):
+            return wf_id
+        import copy
+        from autodev.loopforge.bootstrap import _NATIVE_METADATA, managed_asset, _managed_digest
+        async with self._assets_lock:
+            workflows, agents, rules = await asyncio.gather(
+                client.list_workflows(pid), client.list_agents(pid),
+                client._req("GET", "/api/rules", params={"projectId": pid}),
+            )
+            source = next((w for w in workflows if w.get("id") == wf_id), None)
+            if not source:
+                raise LoopForgeError("无法读取规划 SOP，不能确认步骤推理配置")
+            if source.get("status") != "published":
+                raise LoopForgeError("规划 SOP 尚未发布，不能自动发布其推理配置副本")
+            workflow = copy.deepcopy({k: v for k, v in source.items() if k not in _NATIVE_METADATA})
+            draft = next((n for n in workflow.get("nodes", []) if n.get("id") == "draft" and n.get("type") == "agent"), None)
+            original = next((a for a in agents if draft and a.get("id") == draft.get("agentId")), None)
+            if not original or original.get("executorId") != "codex":
+                raise LoopForgeError("规划角色与 Codex 推理配置不匹配，请核对原生角色")
+            agent = copy.deepcopy({k: v for k, v in original.items() if k not in _NATIVE_METADATA})
+            agent["effort"] = effort
+            # Explicitly carry workflow-scoped rules onto the cloned planner.
+            agent["rules"] = list(dict.fromkeys([*agent.get("rules", []), *[
+                r["id"] for r in rules if wf_id in (r.get("workflowIds") or [])
+            ]]))
+            for asset in (agent, workflow):
+                asset["description"] = (asset.get("description") or "").split("\n[vernal-managed-v", 1)[0]
+            digest = hashlib.sha256(json.dumps([agent, workflow], sort_keys=True).encode()).hexdigest()[:20]
+            aid, wid = f"{pid}-vernal-effort-agent-{digest}", f"{pid}-vernal-effort-sop-{digest}"
+            draft["agentId"] = aid
+            agent = managed_asset({**agent, "id": aid, "projectId": pid, "version": 1})
+            workflow = managed_asset({**workflow, "id": wid, "projectId": pid, "version": 1, "status": "published"})
+            for desired, existing in ((agent, agents), (workflow, workflows)):
+                previous = next((x for x in existing if x.get("id") == desired["id"]), None)
+                if previous and _managed_digest(previous, set(desired) - _NATIVE_METADATA) != _managed_digest(desired, set(desired) - _NATIVE_METADATA):
+                    raise LoopForgeError("步骤推理配置快照已被修改，请核对后重试")
+            if not any(a.get("id") == aid for a in agents):
+                await client.put_agent(agent)
+            existing = next((w for w in workflows if w.get("id") == wid), None)
+            if not existing:
+                existing = await client.put_workflow(workflow)
+            if existing.get("status") != "published":
+                await client.publish_workflow(wid)
+            return wid
 
     def _build_issue_description(
         self,
@@ -417,9 +477,15 @@ class LoopForgeHarness(Harness):
             )
         t_resolve_sec = round(time.monotonic() - t_resolve_start, 4)
 
+        from autodev.speckit.adapter import PLANNING_BASELINE
+        planning_context = PLANNING_BASELINE.get() or {}
+        step, risk = planning_context.get("step", ""), planning_context.get("risk", "")
+        actual_effort = self.settings.effort_for(role, step=step, risk=risk)
         t_ready_start = time.monotonic()
         try:
             pid, wf_id = await self._ensure_ready(client, role)
+            actual_effort = self.settings.effort_for(role, step=step, risk=risk)
+            wf_id = await self._effort_workflow(client, pid, wf_id, role, actual_effort)
             await public_pool.check_workflow_sandbox(self.settings, client, wf_id, selected)
             client = dispatch_client
         except LoopForgeError as exc:
@@ -438,7 +504,7 @@ class LoopForgeHarness(Harness):
         description = self._build_issue_description(stage_key, prompt, schema_path, role)
         schema_text = schema_path.read_text("utf-8")
         try:
-            signature = hashlib.sha256(json.dumps([prompt, schema_text, selected, wf_id]).encode()).hexdigest()
+            signature = hashlib.sha256(json.dumps([prompt, schema_text, selected, wf_id, actual_effort, self.settings.model_for(role), self.settings.harness_for(role)]).encode()).hexdigest()
             issue_id, run_id = await self._dispatch_plan(client, pid, stage_key, title, description, wf_id,
                                                          prior_candidate, signature)
         except LoopForgeError as exc:
@@ -455,7 +521,6 @@ class LoopForgeHarness(Harness):
 
         actual_executor = self.settings.harness_for(role)
         actual_model = self.settings.model_for(role) or "default"
-        actual_effort = self.settings.effort_for(role)
         (log_dir / "loopforge_run.json").write_text(
             json.dumps(
                 {
@@ -464,6 +529,8 @@ class LoopForgeHarness(Harness):
                     "executor": actual_executor,
                     "model": actual_model,
                     "effort": actual_effort,
+                    "step": step,
+                    "risk": risk,
                     "workflow_id": wf_id,
                     "issue_id": issue_id,
                     "run_id": run_id,

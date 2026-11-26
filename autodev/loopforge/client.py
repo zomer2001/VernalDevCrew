@@ -418,7 +418,9 @@ class LoopForgeClient:
                     continue
                 if node.get("attempt") is not None and item.get("attempt") != node["attempt"]:
                     continue
-                if node.get("reworkCount") or (node.get("startedAt") and item.get("createdAt")):
+                if item.get("reworkCount") is not None and node.get("reworkCount") is not None and item["reworkCount"] != node["reworkCount"]:
+                    continue
+                if (node.get("reworkCount") and item.get("reworkCount") is None) or (node.get("startedAt") and item.get("createdAt")):
                     try:
                         if datetime.fromisoformat(item["createdAt"]) < datetime.fromisoformat(node["startedAt"]):
                             continue

@@ -52,12 +52,12 @@ def _error(exc):
     return HTTPException(409 if isinstance(exc,service.SpecConflictError) else 422,detail=str(exc))
 
 
-def _engine(request, *, write=False):
+def _engine(request, *, write=False, roles=("admin", "architect", "developer")):
     eng=get_ctx(request).active_slot(request).engine
     if write:
         from autodev.governance import check_role_permission
         try:
-            check_role_permission(eng.db,effective_actor(),("admin","architect","developer"),
+            check_role_permission(eng.db,effective_actor(),roles,
                                   project=eng.settings.loopforge_project_id or eng.ws.root.name)
         except PermissionError as exc:
             raise HTTPException(403,detail=str(exc)) from exc
@@ -102,7 +102,7 @@ def enable(req: EnableRequest,request: Request):
 def upgrade_assets_route(req: UpgradeAssetsRequest, request: Request):
     try:
         _idle(request)
-        return assets.upgrade_assets(_engine(request, write=True), req.preset_id, actor=effective_actor(), reason=req.reason)
+        return assets.upgrade_assets(_engine(request, write=True, roles=("admin", "architect")), req.preset_id, actor=effective_actor(), reason=req.reason)
     except (ValueError, OSError) as exc:
         raise _error(exc) from exc
 
@@ -299,7 +299,7 @@ def mission_convert_profile(feature: str, req: ConvertProfileRequest, request: R
     try:
         _idle(request)
         return missions.convert_profile(
-            _engine(request, write=True),
+            _engine(request, write=True, roles=("admin", "architect")),
             feature,
             target_preset=req.target_preset,
             target_process=req.target_process,
@@ -317,7 +317,7 @@ def mission_recover(request: Request):
         _idle(request)
         eng=_engine(request)
         from autodev.governance import check_role_permission
-        check_role_permission(eng.db,effective_actor(),("admin","architect","developer"),
+        check_role_permission(eng.db,effective_actor(),("admin", "architect", "developer"),
                               project=eng.settings.loopforge_project_id or eng.ws.root.name)
         missions.recover(eng,actor=effective_actor())
         return {"recovered":True}

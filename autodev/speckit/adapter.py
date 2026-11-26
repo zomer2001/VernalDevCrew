@@ -11,7 +11,7 @@ from .assets import digest_json, step_assets
 from .compiler import compile_tasks, contract_hash
 from .paths import source_path
 from .service import (SpecConflictError, add_clarifications, assert_no_blocking_questions, assert_source_current,
-                      input_fingerprint, latest, list_clarifications, publish_revision, quality_review)
+                      input_fingerprint, revision_inputs_current, latest, list_clarifications, publish_revision, quality_review)
 
 PLANNING_BASELINE = ContextVar("speckit_planning_baseline", default=None)
 STEP_NAMES = {"constitution":"建立项目约束","specify":"整理功能规格","clarify":"澄清需求边界",
@@ -65,7 +65,7 @@ async def run_step(engine, feature_id: str, step_name: str, preset_id: str = "ve
         if not rev:
             raise ValueError(f"请先完成 {dep} 步骤")
         assert_source_current(engine,rev)
-        if rev["input_sha"] != input_fingerprint(engine,feature_id,dep):
+        if not revision_inputs_current(engine, rev):
             raise SpecConflictError(f"{dep} 基于旧来源，请先重新确认对应修订")
         context.append(f"## 已确认来源：{dep}\n{rev['content_text']}")
     qr = None
@@ -153,7 +153,9 @@ async def run_step(engine, feature_id: str, step_name: str, preset_id: str = "ve
                  if step_name == "clarify" else
                  "content 放完整非空 Markdown 正文；clarifications 必须为空数组，本步骤不得发布澄清问题。未决事项可在正文中标记待确认，不替用户作答。")
               + "findings 无内容时用空数组。不得修改已确认输入。")
-    baseline = {"spec_sha":(latest(engine,feature_id) or {}).get("content_sha",""),
+    mission = json.loads(engine.db.meta_get(f"mission:{feature_id}") or "{}")
+    risk = (mission.get("assessment") or {}).get("risk", "")
+    baseline = {"step": step_name, "risk": risk, "spec_sha":(latest(engine,feature_id) or {}).get("content_sha",""),
                 "checklist_sha": (qr or {}).get("checklist_sha", ""),
                 "checklist_findings_sha": (qr or {}).get("findings_sha", ""),
                 "contract_sha":contract_hash(engine), "compiled_task_hash":"",

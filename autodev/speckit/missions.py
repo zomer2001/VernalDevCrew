@@ -194,6 +194,13 @@ def assert_ready_for_approval(engine):
         raise service.SpecConflictError(readiness["blockers"][0]["message"])
 
 
+def is_custom_process(template) -> bool:
+    if template.id not in ("legacy", "standard", "quick-prototype", "feature", "bugfix"):
+        return True
+    builtin = load_builtin_template(template.id)
+    return template != builtin and template != service.specification_template(builtin)
+
+
 def config_alignment(engine, mission: dict) -> dict:
     """Compare recommended vs actual locked preset & process template with an explicit mismatch reason."""
     route = mission.get("route") or {}
@@ -206,20 +213,21 @@ def config_alignment(engine, mission: dict) -> dict:
             actual_preset = lock["preset_id"]
         except (ValueError, OSError):
             pass
-    actual_process = load_template(engine.ws, engine.settings).id
+    actual_template = load_template(engine.ws, engine.settings)
+    actual_process = actual_template.id
     aligned = (
         (not recommended_preset or actual_preset == recommended_preset)
         and (not recommended_process or actual_process == recommended_process)
     )
     has_tasks = bool(engine.db.list_tasks())
-    is_custom_process = actual_process not in ("legacy", "standard", "quick-prototype", "feature", "bugfix")
+    custom_process = is_custom_process(actual_template)
     mismatch_reason = ""
     if not aligned:
         if has_tasks:
             mismatch_reason = (
                 f"当前评估推荐 {recommended_preset}/{recommended_process}，但项目已锁定 {actual_preset or '未启用'}/{actual_process} 且已有研发任务，不能原地转换配置。"
             )
-        elif is_custom_process:
+        elif custom_process:
             mismatch_reason = (
                 f"当前评估推荐 {recommended_preset}/{recommended_process}，但项目使用自定义流程模板（{actual_process}），系统不会自动降级自定义门禁。"
             )
@@ -233,7 +241,7 @@ def config_alignment(engine, mission: dict) -> dict:
         and bool(recommended_preset and recommended_process)
         and service.enabled(engine)
         and not has_tasks
-        and not is_custom_process
+        and not custom_process
         and not engine.db.meta_get("mission.lease")
     )
     return {
@@ -263,65 +271,75 @@ def convert_profile(
         raise ValueError("仅支持转换为 vernal-core 或 vernal-lite 预设")
     if target_process not in ("standard", "quick-prototype", "feature", "bugfix"):
         raise ValueError("仅支持转换为内置流程模板（standard/quick-prototype/feature/bugfix）")
+    process_path = engine.ws.state_dir / "process.yaml"
     with engine.db.transaction():
-        assert_idle(engine)
-        if engine.db.list_tasks():
-            raise service.SpecConflictError("已有已发布研发任务，不能转换项目预设或流程模板")
-        mission = get(engine, feature)
-        if not mission or mission["revision"] != expected_revision:
-            raise service.SpecConflictError("需求目标修订已变化，请刷新后再转换配置")
-        if not service.enabled(engine):
-            raise ValueError("请先启用功能规格流程")
-        current_tpl = load_template(engine.ws, engine.settings)
-        if current_tpl.id not in ("legacy", "standard", "quick-prototype", "feature", "bugfix"):
-            raise service.SpecConflictError(f"当前项目使用自定义流程模板（{current_tpl.id}），拒绝自动或批量降级")
-    prev_lock, _ = assets.load_assets(engine)
-    prev_process = current_tpl.id
-    upgrade_res = assets.upgrade_assets(
-        engine,
-        target_preset,
-        actor=actor,
-        reason=reason or f"显式配置转换：{prev_lock['preset_id']}/{prev_process} -> {target_preset}/{target_process}",
-    )
-    new_tpl = load_builtin_template(target_process)
-    save_custom_template(engine.ws, new_tpl.model_dump_json())
-    engine.settings.process_template = new_tpl.id
-    # Always preserve blocking human srs_approval gate even in quick-prototype.
-    service.ensure_specification_gate(engine)
-    with engine.db.transaction():
-        invalidated_kinds = ["plan", "tasks", "analyze"]
-        if upgrade_res["changed"]:
-            invalidated_kinds.insert(0, "checklist")
-        placeholders = ",".join("?" for _ in invalidated_kinds)
-        engine.db._exec(
-            f"UPDATE spec_revisions SET status='STALE' WHERE feature_id=? AND source_kind IN ({placeholders})",
-            (feature, *invalidated_kinds),
-        )
-        mission = get(engine, feature)
-        history = list(mission.get("profile_history") or [])
-        entry = {
-            "from": {"preset": prev_lock["preset_id"], "preset_version": prev_lock["preset_version"], "process": prev_process},
-            "to": {"preset": upgrade_res["current"]["preset_id"], "preset_version": upgrade_res["current"]["preset_version"], "process": new_tpl.id},
-            "invalidated": invalidated_kinds,
-            "actor": actor,
-            "reason": reason.strip(),
-            "at": now_iso(),
-        }
-        history.append(entry)
-        mission.update(
-            revision=mission["revision"] + 1,
-            actual_preset=upgrade_res["current"]["preset_id"],
-            actual_process=new_tpl.id,
-            profile_history=history,
-            updated_at=now_iso(),
-        )
-        _store(engine, mission)
-        engine.db.add_event(
-            "mission.profile_converted",
-            f"项目配置已显式转换：{prev_lock['preset_id']}/{prev_process} -> {target_preset}/{new_tpl.id}（已保留原规格、澄清回答与规格审批门禁）",
-            actor=actor,
-            payload=entry,
-        )
+        previous_file = process_path.read_bytes() if process_path.exists() else None
+        previous_setting = engine.settings.process_template
+        try:
+            assert_idle(engine)
+            if engine.db.list_tasks():
+                raise service.SpecConflictError("已有已发布研发任务，不能转换项目预设或流程模板")
+            mission = get(engine, feature)
+            if not mission or mission["revision"] != expected_revision:
+                raise service.SpecConflictError("需求目标修订已变化，请刷新后再转换配置")
+            if not service.enabled(engine):
+                raise ValueError("请先启用功能规格流程")
+            current_tpl = load_template(engine.ws, engine.settings)
+            if is_custom_process(current_tpl):
+                raise service.SpecConflictError(f"当前项目使用自定义流程模板（{current_tpl.id}），拒绝自动或批量降级")
+            prev_lock, _ = assets.load_assets(engine)
+            prev_process = current_tpl.id
+            upgrade_res = assets.upgrade_assets(
+                engine,
+                target_preset,
+                actor=actor,
+                reason=reason or f"显式配置转换：{prev_lock['preset_id']}/{prev_process} -> {target_preset}/{target_process}",
+            )
+            new_tpl = load_builtin_template(target_process)
+            save_custom_template(engine.ws, new_tpl.model_dump_json())
+            engine.settings.process_template = new_tpl.id
+            # Always preserve blocking human srs_approval gate even in quick-prototype.
+            service.ensure_specification_gate(engine)
+            invalidated_kinds = ["plan", "tasks", "analyze"]
+            if upgrade_res["changed"]:
+                invalidated_kinds.insert(0, "checklist")
+            placeholders = ",".join("?" for _ in invalidated_kinds)
+            engine.db._exec(
+                f"UPDATE spec_revisions SET status='STALE' WHERE source_kind IN ({placeholders})",
+                tuple(invalidated_kinds),
+            )
+            mission = get(engine, feature)
+            history = list(mission.get("profile_history") or [])
+            entry = {
+                "from": {"preset": prev_lock["preset_id"], "preset_version": prev_lock["preset_version"], "process": prev_process},
+                "to": {"preset": upgrade_res["current"]["preset_id"], "preset_version": upgrade_res["current"]["preset_version"], "process": new_tpl.id},
+                "invalidated": invalidated_kinds,
+                "actor": actor,
+                "reason": reason.strip(),
+                "at": now_iso(),
+            }
+            history.append(entry)
+            mission.update(
+                revision=mission["revision"] + 1,
+                actual_preset=upgrade_res["current"]["preset_id"],
+                actual_process=new_tpl.id,
+                profile_history=history,
+                updated_at=now_iso(),
+            )
+            _store(engine, mission)
+            engine.db.add_event(
+                "mission.profile_converted",
+                f"项目配置已显式转换：{prev_lock['preset_id']}/{prev_process} -> {target_preset}/{new_tpl.id}（已保留原规格、澄清回答与规格审批门禁）",
+                actor=actor,
+                payload=entry,
+            )
+        except BaseException:
+            engine.settings.process_template = previous_setting
+            if previous_file is None:
+                process_path.unlink(missing_ok=True)
+            elif not process_path.exists() or process_path.read_bytes() != previous_file:
+                process_path.write_bytes(previous_file)
+            raise
     return {"mission": view(engine, mission), "conversion": entry}
 
 
@@ -369,7 +387,7 @@ def _source_current(engine, feature, kind):
     if not rev:
         return False
     service.assert_source_current(engine, rev)
-    return rev["status"] != "STALE" and rev["input_sha"] == service.input_fingerprint(engine, feature, kind)
+    return service.revision_inputs_current(engine, rev)
 
 
 def reserve(engine, feature, expected_revision):
@@ -466,8 +484,16 @@ async def advance(engine, feature, token, *, actor):
                 _store(engine, mission)
             route = triage.recommendation(assessment, triage.source_origin(engine))
             if not service.enabled(engine):
-                _choose_process(engine, route)
-                service.enable(engine, route["available_preset"], actor=actor)
+                with engine.db.transaction():
+                    if triage.input_key(engine, mission) != key:
+                        raise service.SpecConflictError("选择预设期间输入已变化，请重新评估")
+                    _choose_process(engine, route)
+                    service.enable(engine, route["available_preset"], actor=actor)
+                    # Pinning the recommended preset is an intentional part of
+                    # initial intake, not a concurrent external input change.
+                    key = triage.input_key(engine, mission)
+                    mission["assessment_checkpoint"]["input"] = key
+                    _store(engine, mission)
             lock, _ = assets.load_assets(engine)
             if not service.latest(engine, "project", "constitution"):
                 _update_lease_step(engine, token, "constitution")

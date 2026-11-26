@@ -142,7 +142,7 @@ def test_loopforge_harness_dispatches_auto_passes_reuses_issue_and_parses_result
                     json={
                         "id": p.rsplit("/", 1)[-1],
                         "status": "waiting",
-                        "workflowSnapshot": {"nodes": [{"id": "draft", "type": "agent"}]},
+                        "workflowSnapshot": {"completionProtocol": "controlled_recovery", "nodes": [{"id": "draft", "type": "agent"}]},
                         "nodes": {
                             "draft": {
                                 "status": "waiting",

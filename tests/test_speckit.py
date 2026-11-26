@@ -209,7 +209,7 @@ def test_complete_adapter_uses_real_planning_dispatch_with_mock_transport(eng,mo
     import httpx
     from autodev.harnesses.loopforge_harness import LoopForgeHarness
     from autodev.loopforge.client import LoopForgeClient
-    calls=[]; rules=[]; current={}; issues=[]
+    calls=[]; rules=[]; current={}; issues=[]; native_assets={}
     outputs={"constitution":"# 项目宪章\n交付必须有验收依据。\n","specify":SPEC,"clarify":"","plan":PLAN,
              "tasks":render_tasks([draft()]),"analyze":"# 一致性检查\n没有发现严重问题。\n"}
     def handler(req):
@@ -217,8 +217,9 @@ def test_complete_adapter_uses_real_planning_dispatch_with_mock_transport(eng,mo
         if p=="/api/runners": return httpx.Response(200,json=[{"id":"r1","status":"online","isDefault":True,"runtimes":[{"provider":"codex"}]}])
         if p=="/api/sandboxes": return httpx.Response(200,json=[{"id":"local"}])
         if p in ("/api/rules","/api/agents","/api/skills","/api/mcp-servers","/api/workflows"):
-            if req.method=="GET":return httpx.Response(200,json=[])
+            if req.method=="GET":return httpx.Response(200,json=list(native_assets.get(p, {}).values()))
             value=json.loads(req.content)
+            native_assets.setdefault(p, {})[value["id"]] = value
             if p=="/api/rules":rules.append(value)
             return httpx.Response(200,json={**value,"status":"draft"})
         if p.endswith("/publish"):return httpx.Response(200,json={"status":"published"})
@@ -250,6 +251,12 @@ def test_complete_adapter_uses_real_planning_dispatch_with_mock_transport(eng,mo
     assert records[-1]["spec_sha"]==packages[0].spec_sha
     assert any("交付必须有验收依据" in r.get("content","") for r in rules)
     assert len(issues)==6
+    # The analyze dispatch uses a real high-effort native planner snapshot;
+    # lightweight QA's shared role remains medium.
+    analyze_wf = native_assets["/api/workflows"][issues[-1]["workflowId"]]
+    aid = next(n["agentId"] for n in analyze_wf["nodes"] if n["id"] == "draft")
+    assert native_assets["/api/agents"][aid]["effort"] == "high"
+    assert native_assets["/api/agents"]["spec-test-vernal-planner-qa"]["effort"] == "medium"
     from autodev.loopforge.bridge import LoopForgeBridge
     task_ids=compiler.publish_tasks(eng,"001-save",expected_hashes=[p.compiled_task_hash for p in packages],actor="owner")
     eng.approve_plan()

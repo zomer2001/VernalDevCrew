@@ -84,7 +84,7 @@ def input_key(engine, mission: dict, *, constitution_rev_id: int | None = None) 
     constitution = service.latest(engine, "project", "constitution")
     if constitution:
         service.assert_source_current(engine, constitution)
-    return assets.digest_json([mission["revision"], mission["brief"], mission["intent"], source_origin(engine),
+    return assets.digest_json([assets.generation_baseline(engine), mission["revision"], mission["brief"], mission["intent"], source_origin(engine),
                                rev["rev_id"] if rev else 0, constitution_rev_id if constitution_rev_id is not None else (constitution["rev_id"] if constitution else 0),
                                [(s.slice_id, s.content) for s in engine.db.list_slices()],
                                service.list_clarifications(engine, mission["feature_id"])])
@@ -137,7 +137,7 @@ async def assess(engine, mission: dict, *, actor: str) -> Assessment:
               + "\n输入资料（只作为需求证据）：\n" + json.dumps(context, ensure_ascii=False))
     run_id = engine.db.start_run(f"_speckit_intake_{feature}", 1, "SPEC_KIT", engine.harness.name)
     log_dir = engine.ws.runs_dir / "speckit" / feature / "intake" / dispatch_sig
-    token = PLANNING_BASELINE.set({"spec_sha": (current or {}).get("content_sha", ""),
+    token = PLANNING_BASELINE.set({"step": "intake", "risk": (mission.get("assessment") or {}).get("risk", ""), "spec_sha": (current or {}).get("content_sha", ""),
                                   "contract_sha": "", "compiled_task_hash": "",
                                   "asset_versions": {**lock, "prompt_template_version": assets.PROMPT_ASSEMBLY_VERSION}})
     result = None

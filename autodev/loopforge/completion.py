@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -75,6 +76,8 @@ def _exit_code(node_record: dict[str, Any]) -> int | None:
     for key in ("exitCode", "exit_code"):
         if key in node_record and node_record[key] is not None:
             try:
+                if isinstance(node_record[key], (bool, float)):
+                    return -1
                 return int(node_record[key])
             except (TypeError, ValueError):
                 return -1
@@ -100,21 +103,23 @@ def _is_current_turn_artifact(item: dict[str, Any], node_id: str, node_record: d
         return False
     if item.get("nodeId") and item.get("nodeId") != node_id:
         return False
-    if node_record.get("attempt") is not None and item.get("attempt") is not None:
-        if _int_or_zero(item.get("attempt")) != _int_or_zero(node_record.get("attempt")):
-            return False
-    if node_record.get("reworkCount") is not None and item.get("reworkCount") is not None:
-        if _int_or_zero(item.get("reworkCount")) != _int_or_zero(node_record.get("reworkCount")):
-            return False
-    started = node_record.get("startedAt")
-    created = item.get("createdAt")
+    # Missing turn identifiers are not evidence of freshness. Rework may reset
+    # attempt, so both coordinates must match (or be proven by timestamps).
+    if type(item.get("attempt")) is not int or item["attempt"] != node_record.get("attempt"):
+        return False
+    rework = node_record.get("reworkCount")
+    if rework is None:
+        return False
+    if item.get("reworkCount") is not None and (type(item["reworkCount"]) is not int or item["reworkCount"] != rework):
+        return False
+    started, created = node_record.get("startedAt"), item.get("createdAt")
     if started and created:
         try:
             if datetime.fromisoformat(str(created)) < datetime.fromisoformat(str(started)):
                 return False
-        except ValueError:
+        except (TypeError, ValueError):
             return False
-    elif node_record.get("reworkCount") and started and not created:
+    elif rework and item.get("reworkCount") is None:
         return False
     return True
 
@@ -190,57 +195,75 @@ async def read_review_verdict(client: LoopForgeClient, run: dict[str, Any], node
 
 
 class CompletionLedger:
-    """Idempotency and monotonic-turn guard, optionally backed by SQLite meta across restarts."""
+    """Durable claim before network I/O; uncertain requests are never replayed.
+
+    The upstream approval API has no idempotency/expected-turn contract. A local
+    claim therefore provides at-most-once delivery, not remote exactly-once.
+    A timeout needs reconciliation or an explicit human decision, not a retry.
+    """
 
     def __init__(self, db: Any = None, run_id: str = ""):
         self.db = db
         self.run_id = run_id
-        self._keys: set[str] = set()
-        self._high_water: dict[str, tuple[int, int]] = {}
-        if db is not None and run_id:
-            self._load()
+        self._data: dict[str, Any] = {"version": 2, "turns": {}, "high_water": {}}
 
     def _meta_key(self) -> str:
         return f"lf.completion_ledger:{self.run_id}"
 
     def _load(self) -> None:
+        if self.db is None:
+            return
         raw = self.db.meta_get(self._meta_key())
         if not raw:
             return
-        try:
-            data = json.loads(raw)
-        except ValueError:
-            return
-        self._keys = set(data.get("keys") or [])
-        for nid, pair in (data.get("high_water") or {}).items():
-            if isinstance(pair, list) and len(pair) == 2:
-                self._high_water[str(nid)] = (_int_or_zero(pair[0]), _int_or_zero(pair[1]))
+        data = json.loads(raw)  # Corrupt state must fail closed.
+        if data.get("version") not in (None, 2):
+            raise ValueError("不支持的完成恢复记录版本，禁止重复提交")
+        if data.get("version") is None:
+            data = {"version": 2, "turns": {}, "high_water": {
+                nid: [pair[1], pair[0]] for nid, pair in data.get("high_water", {}).items()
+            }}
+        self._data = data
 
     def _save(self) -> None:
-        if self.db is None or not self.run_id:
-            return
-        payload = {
-            "keys": sorted(self._keys)[-200:],
-            "high_water": {k: [v[0], v[1]] for k, v in self._high_water.items()},
-        }
-        self.db.meta_set(self._meta_key(), json.dumps(payload, ensure_ascii=False))
+        if self.db is not None:
+            self.db.meta_set(self._meta_key(), json.dumps(self._data, ensure_ascii=False))
+
+    @staticmethod
+    def _turn(decision: CompletionDecision) -> str:
+        return json.dumps([decision.node_id, decision.rework_count, decision.attempt])
 
     def is_duplicate_or_stale(self, decision: CompletionDecision) -> tuple[bool, str]:
-        if decision.idempotency_key in self._keys:
-            return True, "duplicate"
-        prev = self._high_water.get(decision.node_id)
-        cur = (decision.attempt, decision.rework_count)
-        if prev is not None and cur < prev:
+        self._load()
+        entry = self._data["turns"].get(self._turn(decision))
+        if entry:
+            return True, entry["state"]
+        prev = self._data["high_water"].get(decision.node_id)
+        cur = [decision.rework_count, decision.attempt]
+        if prev is not None and cur <= prev:
             return True, "stale"
         return False, ""
 
+    def claim(self, decision: CompletionDecision) -> tuple[bool, str]:
+        """Serialize pollers and restarts, including changed evidence in one turn."""
+        with self.db.transaction() if self.db is not None else nullcontext():
+            blocked, reason = self.is_duplicate_or_stale(decision)
+            if blocked:
+                return False, reason
+            self._data["turns"][self._turn(decision)] = {
+                "state": "pending", "key": decision.idempotency_key, "action": decision.action,
+            }
+            self._data["high_water"][decision.node_id] = [decision.rework_count, decision.attempt]
+            self._save()
+            return True, ""
+
     def record(self, decision: CompletionDecision) -> None:
-        self._keys.add(decision.idempotency_key)
-        cur = (decision.attempt, decision.rework_count)
-        prev = self._high_water.get(decision.node_id)
-        if prev is None or cur >= prev:
-            self._high_water[decision.node_id] = cur
-        self._save()
+        with self.db.transaction() if self.db is not None else nullcontext():
+            self._load()
+            entry = self._data["turns"].get(self._turn(decision))
+            if entry and entry["key"] == decision.idempotency_key:
+                entry["state"] = "sent"
+                self._save()
 
 
 async def evaluate_waiting_node(
@@ -308,9 +331,9 @@ async def evaluate_waiting_node(
             "已停止无效重试且禁止通过其他审批 API 强制放行，请检查 Codex/Runner 工具授权配置",
         )
 
-    # 4. Non-zero exit code must never be treated as completed.
+    # 4. Only an explicitly successful process exit permits recovery.
     code = _exit_code(node_record)
-    if code is not None and code != 0:
+    if code != 0:
         return make(
             CompletionCategory.ARTIFACT_INVALID,
             "wait",
@@ -333,17 +356,38 @@ async def evaluate_waiting_node(
     # 6. Check protocol capability declaration.
     wf_snapshot = run.get("workflowSnapshot") or {}
     protocol = str(spec.get("completionProtocol") or wf_snapshot.get("completionProtocol") or "").strip().lower()
-    if protocol in ("strict_mcp", "none", "disabled"):
+    if protocol != "controlled_recovery":
         return make(
             CompletionCategory.ARTIFACT_INVALID,
             "wait",
-            f"节点 {node_id} 声明了严格终态工具协议（{protocol}），不启用回调缺失恢复",
+            f"节点 {node_id} 未明确声明受控恢复能力（{protocol or 'unknown'}），不启用回调缺失恢复",
         )
+
+    if not run_id or any(type(node_record.get(k)) is not int or node_record[k] < 0
+                         for k in ("attempt", "reworkCount")):
+        return make(CompletionCategory.ARTIFACT_INVALID, "wait", "缺少有效运行或轮次标识，不能恢复")
 
     # 7. Verify current-turn artifacts & review verdict.
     turn_artifacts = current_turn_artifacts(run, node_id, node_record)
+    # Read only the artifacts whose provenance has already been checked.
+    verified_run = {**run, "artifacts": [{**a, "nodeId": node_id} for a in turn_artifacts],
+                    "nodes": {node_id: {**node_record, "artifacts": []}}}
+    req_names = required_artifact_names(spec)
+    contents: dict[str, str] = {}
+    for name in req_names:
+        if not any(_artifact_name_matches(a, name) for a in turn_artifacts):
+            return make(CompletionCategory.ARTIFACT_INVALID, "wait", f"当前轮次缺少声明产物 {name}")
+        try:
+            contents[name] = await client.named_artifact(verified_run, name, node_id=node_id)
+        except LoopForgeError as exc:
+            return make(CompletionCategory.ARTIFACT_INVALID, "wait", f"声明产物不可读取：{exc}")
+        if not contents[name].strip():
+            return make(CompletionCategory.ARTIFACT_INVALID, "wait", f"声明产物 {name} 为空")
     if is_review_node(spec):
-        verdict, detail, raw_report = await read_review_verdict(client, run, node_id)
+        report = contents["review-report.md"]
+        heading, _, details = report.strip().partition("\n")
+        verdict = heading.strip() if heading.strip() in {"# PASS", "# REJECT"} else ""
+        detail, raw_report = details.strip()[:1200] or heading, report
         if not verdict:
             return make(
                 CompletionCategory.ARTIFACT_INVALID,
@@ -366,39 +410,15 @@ async def evaluate_waiting_node(
             digest=digest,
         )
 
-    req_names = required_artifact_names(spec)
     if req_names:
-        missing = [name for name in req_names if not any(_artifact_name_matches(a, name) for a in turn_artifacts)]
-        if missing:
-            return make(
-                CompletionCategory.ARTIFACT_INVALID,
-                "wait",
-                f"节点 {node_id} 当前轮次缺少声明产物 {', '.join(missing)}，拒绝自动放行",
-            )
-        digest = compute_artifact_digest(turn_artifacts)
-        return make(
-            CompletionCategory.CALLBACK_MISSING,
-            "approve_recovery",
-            f"节点 {node_id} 当前轮次声明产物齐全，按受控恢复协议交由下游确定性校验",
-            digest=digest,
-        )
+        digest = compute_artifact_digest(turn_artifacts, json.dumps(contents, sort_keys=True))
+        return make(CompletionCategory.CALLBACK_MISSING, "approve_recovery",
+                    f"节点 {node_id} 当前轮次声明产物可读取，交由下游确定性校验", digest=digest)
 
-    # 8. Nodes without declared required artifacts still require positive current-turn completion evidence:
-    # exitCode == 0, current-turn artifact, or explicit controlled_recovery protocol with clean output.
-    has_clean_exit = code == 0
-    has_turn_output = bool(turn_artifacts) or bool(str(node_record.get("output") or "").strip())
-    has_declared_recovery = protocol == "controlled_recovery"
-    if not (has_clean_exit or has_turn_output or has_declared_recovery):
-        return make(
-            CompletionCategory.ARTIFACT_INVALID,
-            "wait",
-            f"节点 {node_id} 缺少当前轮次完成证据（无退出码 0、无当轮产物且未声明受控恢复协议），不自动放行",
-        )
-
-    digest = compute_artifact_digest(turn_artifacts, str(node_record.get("output") or ""))
-    return make(
-        CompletionCategory.CALLBACK_MISSING,
-        "approve_recovery",
-        f"节点 {node_id} 已核对当前轮次完成证据，按受控恢复协议交由下游校验",
-        digest=digest,
-    )
+    # A protocol declaration and a successful exit are necessary, not sufficient.
+    output = str(node_record.get("output") or "").strip()
+    if not output:
+        return make(CompletionCategory.ARTIFACT_INVALID, "wait", "缺少当前轮次完成输出，不自动放行")
+    return make(CompletionCategory.CALLBACK_MISSING, "approve_recovery",
+                f"节点 {node_id} 已核对当前轮次完成证据，按受控恢复协议交由下游校验",
+                digest=compute_artifact_digest(turn_artifacts, output))

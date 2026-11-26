@@ -182,7 +182,7 @@ def quality_review(engine, feature_id: str) -> dict:
     head = rows[0]
     try:
         assert_source_current(engine, head)
-        source_ok = head["status"] != "STALE" and head["input_sha"] == input_fingerprint(engine, feature_id, "checklist")
+        source_ok = revision_inputs_current(engine, head)
     except (ValueError, OSError):
         source_ok = False
     head_entry = _format_quality_entry(engine, head, is_current=source_ok)
@@ -220,7 +220,7 @@ def quality_review(engine, feature_id: str) -> dict:
     }
 
 
-def input_fingerprint(engine, feature_id: str, kind: str) -> str:
+def input_fingerprint(engine, feature_id: str, kind: str, *, legacy: bool = False) -> str:
     chain = {"constitution": [], "spec": ["constitution"], "checklist": ["constitution", "spec"],
              "plan": ["constitution", "spec", "checklist"],
              "tasks": ["constitution", "spec", "checklist", "plan"],
@@ -234,7 +234,33 @@ def input_fingerprint(engine, feature_id: str, kind: str) -> str:
                 versions[dep] = [rev["rev_id"], rev["content_sha"], checklist_findings_digest(engine, rev["rev_id"])]
             else:
                 versions[dep] = [rev["rev_id"], rev["content_sha"]]
+    # User-authored roots retain their approval identity. Derived documents must
+    # be regenerated when either the locked methodology or prompt assembly changes.
+    if not legacy and kind in ("checklist", "plan", "tasks", "analyze"):
+        from .assets import generation_baseline
+        versions["generation"] = generation_baseline(engine)
     return digest_json(versions)
+
+
+def revision_inputs_current(engine, rev: dict) -> bool:
+    if rev["status"] == "STALE":
+        return False
+    feature, kind = rev["feature_id"], rev["source_kind"]
+    if rev["input_sha"] == input_fingerprint(engine, feature, kind):
+        return True
+    # The preceding P2 release did not bind generation provenance into derived
+    # document inputs. Accept its unchanged snapshots only under that exact
+    # prompt generation, matching preset versions and no later asset upgrade.
+    from .assets import PROMPT_ASSEMBLY_VERSION
+    if PROMPT_ASSEMBLY_VERSION != "v2-concise-20261126":
+        return False
+    lock, _ = load_assets(engine)
+    if any(rev[k] != lock[k] for k in ("preset_id", "preset_version", "speckit_version")):
+        return False
+    history = json.loads(engine.db.meta_get("speckit.assets.history") or "[]")
+    if any(entry.get("at", "") >= rev["created_at"] for entry in history):
+        return False
+    return rev["input_sha"] == input_fingerprint(engine, feature, kind, legacy=True)
 
 
 def list_clarifications(engine, feature_id: str) -> list[dict]:
@@ -293,7 +319,6 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
     feature_id = "project" if kind == "constitution" else feature_id
     if not enabled(engine):
         raise ValueError("请先启用功能规格流程")
-    assets, _ = load_assets(engine)
     content = normalize_document(content)
     from autodev.prompts_style import validate_public_text
     validate_public_text(content)
@@ -316,6 +341,7 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
             if missing_ids:
                 raise ValueError("技术方案「检查发现处理」缺少以下质量发现标识：" + ", ".join(missing_ids))
     with engine.db.transaction():
+        assets, _ = load_assets(engine)
         active_sql = "SELECT 1 FROM tasks WHERE status IN ('IN_PROGRESS','VERIFYING','REVIEWING')"
         if kind != "constitution":
             active_sql += " AND feature_id=?"
@@ -334,7 +360,9 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
         same_findings = True
         if kind in ("checklist", "analyze") and findings is not None and old:
             same_findings = checklist_findings_digest(engine, old["rev_id"]) == digest_json(findings)
-        if old and old["content_sha"] == document_sha(content) and old["input_sha"] == actual_input and same_findings:
+        if (old and old["status"] != "STALE" and old["content_sha"] == document_sha(content)
+                and old["input_sha"] == actual_input and same_findings
+                and all(old[k] == assets[k] for k in ("preset_id", "preset_version", "speckit_version"))):
             assert_source_current(engine, old)
             return old
         snap = _snapshot(engine, path, content, author=author, summary=summary)
@@ -482,22 +510,30 @@ def answer_batch(engine, feature: str, answers: list[dict], *, expected_rev_id: 
         return new
 
 
-def ensure_specification_gate(engine) -> None:
-    from autodev.process.model import GateDef,StageDef
-    from autodev.process.runner import load_template,save_custom_template
-    template=load_template(engine.ws,engine.settings)
-    stage=next((s for s in template.stages if s.id=="requirements"),None)
+def specification_template(template):
+    """Return the deterministic built-in specification gate overlay."""
+    from autodev.process.model import GateDef, StageDef
+    template = template.model_copy(deep=True)
+    stage = next((s for s in template.stages if s.id == "requirements"), None)
     if stage is None:
-        stage=StageDef(id="requirements",name="需求分析")
-        template.stages.insert(0,stage)
-    gate=next((g for g in stage.gates if g.id=="srs_approval"),None)
-    if stage.enabled and gate and gate.blocking and gate.kind=="human_approval" and gate.scope=="project":
+        stage = StageDef(id="requirements", name="需求分析")
+        template.stages.insert(0, stage)
+    gate = next((g for g in stage.gates if g.id == "srs_approval"), None)
+    if not (stage.enabled and gate and gate.blocking and gate.kind == "human_approval" and gate.scope == "project"):
+        stage.enabled = True
+        stage.gates = [g for g in stage.gates if g.id != "srs_approval"] + [GateDef(
+            id="srs_approval", name="功能规格与宪章批准", kind="human_approval", scope="project", blocking=True)]
+    return template
+
+
+def ensure_specification_gate(engine) -> None:
+    from autodev.process.runner import load_template, save_custom_template
+    current = load_template(engine.ws, engine.settings)
+    template = specification_template(current)
+    if template == current:
         return
-    stage.enabled=True
-    stage.gates=[g for g in stage.gates if g.id!="srs_approval"] + [GateDef(
-        id="srs_approval",name="功能规格与宪章批准",kind="human_approval",scope="project",blocking=True)]
-    save_custom_template(engine.ws,template.model_dump_json())
-    engine.db.add_event("speckit.approval_enabled","已在现有流程模板中启用需求规格审批",actor="SpecAdapter")
+    save_custom_template(engine.ws, template.model_dump_json())
+    engine.db.add_event("speckit.approval_enabled", "已在现有流程模板中启用需求规格审批", actor="SpecAdapter")
 
 
 def enable(engine, preset_id: str, *, migrate: bool = False, actor: str = "owner") -> dict:

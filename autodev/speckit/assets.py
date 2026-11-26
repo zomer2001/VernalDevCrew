@@ -137,6 +137,8 @@ def upgrade_assets(engine, target_preset_id: str | None = None, *, actor: str = 
     if updated == previous:
         return {"previous": previous, "current": updated, "changed": False}
     with engine.db.transaction():
+        from .missions import assert_idle
+        assert_idle(engine)
         if json.loads(engine.db.meta_get("speckit.assets") or "{}") != previous:
             raise SpecConflictError("规格资产锁定状态已变化，请刷新后重试")
         history = json.loads(engine.db.meta_get("speckit.assets.history") or "[]")
@@ -149,6 +151,9 @@ def upgrade_assets(engine, target_preset_id: str | None = None, *, actor: str = 
         })
         engine.db.meta_set("speckit.assets", json.dumps(updated, ensure_ascii=False))
         engine.db.meta_set("speckit.assets.history", json.dumps(history, ensure_ascii=False))
+        # The lock is project-wide, so every feature must be invalidated.
+        engine.db._exec("UPDATE spec_revisions SET status='STALE' "
+                        "WHERE source_kind IN ('checklist','plan','tasks','analyze')")
         engine.db.add_event(
             "speckit.assets_upgraded",
             f"规格资产已显式升级：{previous['preset_id']}@{previous['preset_version']} -> {updated['preset_id']}@{updated['preset_version']}",
@@ -171,6 +176,13 @@ def load_assets(engine) -> tuple[dict, Path]:
     if digest_json(manifest) != key:
         raise ValueError("项目规格资产清单与锁定版本不符")
     return locked, root
+
+
+def generation_baseline(engine) -> dict:
+    raw = engine.db.meta_get("speckit.assets")
+    # Intake is allowed before a preset is chosen; a subsequent lock is a new input.
+    lock = json.loads(raw) if raw else {"asset_sha": digest_json(verify_bundle(ASSET_ROOT))}
+    return {"assets": lock, "prompt_assembly": PROMPT_ASSEMBLY_VERSION}
 
 
 def step_assets(engine, step: str) -> dict:

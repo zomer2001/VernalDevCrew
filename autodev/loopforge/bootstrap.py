@@ -801,6 +801,8 @@ def build_plan_workflow(project_id: str, sandbox_id: str = "local", role: str = 
                 "id": "draft",
                 "name": "圆桌专家 / 总监起草",
                 "type": "agent",
+                "artifactOutputs": [{"name": "vernal-result.json", "path": "vernal-result.json",
+                                     "mediaType": "application/json", "required": True}],
                 "metricStage": "development",
                 "agentId": planner_id,
                 "maxAttempts": 2,
