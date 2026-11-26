@@ -13,16 +13,23 @@ from autodev.trace import build_trace_matrix, export_trace_matrix_csv, export_tr
 router = APIRouter()
 
 
+def _matrix(engine):
+    try:
+        return build_trace_matrix(engine)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/vernal-api/trace/matrix")
 async def api_get_trace_matrix(request: Request) -> dict[str, Any]:
     eng = get_ctx(request).active_slot(request).engine
-    return build_trace_matrix(eng)
+    return _matrix(eng)
 
 
 @router.get("/vernal-api/trace/export")
 async def api_export_trace_matrix(request: Request, format: str = "csv") -> Response:
     eng = get_ctx(request).active_slot(request).engine
-    matrix = build_trace_matrix(eng)
+    matrix = _matrix(eng)
     fmt = format.strip().lower()
     if fmt == "csv":
         csv_text = export_trace_matrix_csv(matrix)

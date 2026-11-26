@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import difflib
-import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,11 +19,25 @@ from autodev.docs_center.templates import (
     render_srs_markdown,
 )
 from autodev.docs_center.validator import validate_detailed_design
+from autodev.docs_center.paths import detailed_design_doc_path, detailed_design_json_path, iter_detailed_design_json_paths
 from autodev.models import CouncilConsensus, DetailedDesign, ProductSpec, RequirementItem, TaskStatus
-from autodev.process.runner import ensure_gate_record, is_gate_passed, load_template
+from autodev.process.runner import ensure_gate_record, is_gate_passed, load_template, refresh_document_gates
+from autodev.process.targets import document_sha, normalize_document
 
 if TYPE_CHECKING:
     from autodev.engine import Engine
+
+
+class DocumentConflictError(ValueError):
+    """The editor no longer holds the current document revision."""
+
+
+def load_product_spec(engine: "Engine") -> ProductSpec:
+    """Read legacy ADR-bearing snapshots without modifying or discarding the original."""
+    data = json.loads(engine.ws.prd_json_path.read_text("utf-8"))
+    if isinstance(data, dict) and "adrs" in data:
+        data = {k: v for k, v in data.items() if k != "adrs"}
+    return ProductSpec.model_validate(data)
 
 
 def _safe_doc_relpath(ws_root: Path, rel_path: str) -> Path:
@@ -39,8 +54,10 @@ def _safe_doc_relpath(ws_root: Path, rel_path: str) -> Path:
 
 def _classify_doc_kind(rel_path: str) -> str:
     norm = rel_path.replace("\\", "/")
-    if norm in ("docs/SRS.md", "docs/PRD_SPEC.md"):
+    if norm == "docs/SRS.md":
         return "SRS"
+    if norm == "docs/PRD_SPEC.md":
+        return "LEGACY_SPEC"
     if norm == "docs/ARCHITECTURE.md":
         return "ADD"
     if norm.startswith("docs/adr/"):
@@ -61,52 +78,81 @@ def save_doc_version(
     *,
     author: str = "owner",
     note: str = "",
+    expected_sha: str | None = None,
 ) -> dict[str, Any]:
     full = _safe_doc_relpath(engine.ws.root, rel_path)
+    version = _save_snapshot(engine, full, content, author=author, note=note, expected_sha=expected_sha)
+    return get_doc(engine, full.relative_to(engine.ws.root.resolve()).as_posix(), version=version)
+
+
+def _save_snapshot(engine: "Engine", full: Path, content: str, *, author: str, note: str,
+                   expected_sha: str | None = None, refresh_gates: bool = True, write_projection: bool = True) -> int:
+    full = full.resolve()
+    if not full.is_relative_to(engine.ws.root.resolve()):
+        raise ValueError("产物路径越出工作区")
     canonical_rel = full.relative_to(engine.ws.root.resolve()).as_posix()
     full.parent.mkdir(parents=True, exist_ok=True)
-    normalized_text = content.rstrip() + "\n"
-    full.write_text(normalized_text, "utf-8")
+    normalized_text = normalize_document(content)
+    sha = document_sha(normalized_text)
+    with engine.db.transaction():
+        rows = engine.db._query("SELECT version, content_sha FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1", (canonical_rel,))
+        old_sha = rows[0]["content_sha"] if rows else ""
+        if expected_sha is not None and (expected_sha != old_sha or
+                (full.is_file() and document_sha(full.read_text("utf-8")) != old_sha)):
+            raise DocumentConflictError("文档已被其他操作修改，请刷新后重新编辑")
+        if rows and old_sha == sha:
+            next_ver = int(rows[0]["version"])
+        else:
+            next_ver = int(rows[0]["version"]) + 1 if rows else 1
+            engine.db._exec(
+                "INSERT INTO doc_versions(path, version, content_sha, content_text, author, note, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (canonical_rel, next_ver, sha, normalized_text, author, note.strip(), now_iso()),
+            )
+        # A committed snapshot remains available even when an external edit damages the projection.
+        if write_projection:
+            fd, name = tempfile.mkstemp(prefix=".vernal-doc-", dir=full.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    stream.write(normalized_text)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(name, full)
+            finally:
+                if os.path.exists(name):
+                    os.unlink(name)
+        if refresh_gates:
+            refresh_document_gates(engine.db)
+        if old_sha != sha:
+            engine.db.add_event("doc.saved", f"规范文档已保存新版本：{canonical_rel} (v{next_ver})", actor=author)
+    return next_ver
 
-    sha = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
-    rows = engine.db._query("SELECT version, content_sha FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1", (canonical_rel,))
-    if rows and rows[0]["content_sha"] == sha:
-        ver = int(rows[0]["version"])
-        return get_doc(engine, canonical_rel, version=ver)
 
-    next_ver = (int(rows[0]["version"]) + 1) if rows else 1
-    ts = now_iso()
-    engine.db._exec(
-        "INSERT INTO doc_versions(path, version, content_sha, content_text, author, note, created_at)"
-        " VALUES(?, ?, ?, ?, ?, ?, ?)",
-        (canonical_rel, next_ver, sha, normalized_text, author, note.strip(), ts),
-    )
-    engine.db.add_event("doc.saved", f"规范文档已保存新版本：{canonical_rel} (v{next_ver})", actor=author)
-    return get_doc(engine, canonical_rel, version=next_ver)
+def _observe_document(engine: "Engine", path: Path) -> None:
+    """Archive a working copy without rewriting it during a read request."""
+    with engine.db.transaction():
+        text = path.read_text("utf-8")
+        _save_snapshot(engine, path, text, author="system", note="发现工作副本新内容", write_projection=False)
 
 
 def list_docs(engine: "Engine") -> list[dict[str, Any]]:
     docs_dir = engine.ws.root / "docs"
-    seen_paths: set[str] = set()
     items: list[dict[str, Any]] = []
+    doc_paths = sorted(p for p in docs_dir.rglob("*.md") if p.is_file())
+
+    # Archive the whole group before rendering any approval badges.
+    for path in [*iter_detailed_design_json_paths(engine.ws), *doc_paths]:
+        rel = path.relative_to(engine.ws.root).as_posix()
+        rows = engine.db._query("SELECT content_sha FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1", (rel,))
+        if not rows or document_sha(path.read_text("utf-8")) != rows[0]["content_sha"]:
+            _observe_document(engine, path)
 
     if docs_dir.is_dir():
-        for fp in sorted(docs_dir.rglob("*.md")):
-            if not fp.is_file():
-                continue
+        for fp in doc_paths:
             rel = fp.relative_to(engine.ws.root).as_posix()
-            seen_paths.add(rel)
             v_rows = engine.db._query(
                 "SELECT version, content_sha, author, created_at FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1",
                 (rel,),
             )
-            if not v_rows:
-                # 首次发现磁盘已有文档时自动纳入 v1 版本基线
-                save_doc_version(engine, rel, fp.read_text("utf-8", errors="replace"), author="system", note="初始纳入版本管理")
-                v_rows = engine.db._query(
-                    "SELECT version, content_sha, author, created_at FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1",
-                    (rel,),
-                )
             kind = _classify_doc_kind(rel)
             status = "DRAFT"
             if kind == "SRS" and is_gate_passed(engine.db, "srs_approval", "project", "project"):
@@ -114,15 +160,25 @@ def list_docs(engine: "Engine") -> list[dict[str, Any]]:
             elif kind == "ADD" and is_gate_passed(engine.db, "architecture_approval", "project", "project"):
                 status = "APPROVED"
             elif kind == "DETAILED_DESIGN":
-                ms_list = engine.db.list_milestones()
-                if ms_list and all(is_gate_passed(engine.db, "detailed_design_approval", "milestone", m.milestone_id) for m in ms_list if m.planned):
+                parts = rel.split("/")
+                ms_ids = [parts[2]] if len(parts) == 4 else [m.milestone_id for m in engine.db.list_milestones() if m.planned]
+                if ms_ids and all(is_gate_passed(engine.db, "detailed_design_approval", "milestone", mid) for mid in ms_ids):
                     status = "APPROVED"
+            if status != "APPROVED":
+                gate_id = {"SRS": "srs_approval", "ADD": "architecture_approval", "DETAILED_DESIGN": "detailed_design_approval"}.get(kind)
+                if gate_id:
+                    scopes = ms_ids if kind == "DETAILED_DESIGN" else ["project"]
+                    for scope in scopes:
+                        records = engine.db._query("SELECT 1 FROM gate_records WHERE gate_id=? AND scope_id=? AND status='STALE' LIMIT 1", (gate_id, scope))
+                        if records:
+                            status = "STALE"
             items.append(
                 {
                     "path": rel,
                     "kind": kind,
                     "status": status,
                     "version": int(v_rows[0]["version"]) if v_rows else 1,
+                    "content_sha": v_rows[0]["content_sha"] if v_rows else "",
                     "author": v_rows[0]["author"] if v_rows else "system",
                     "updated_at": v_rows[0]["created_at"] if v_rows else "",
                 }
@@ -151,8 +207,10 @@ def get_doc(engine: "Engine", rel_path: str, *, version: int | None = None) -> d
             "SELECT * FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1",
             (canonical,),
         )
-        if not rows:
-            return save_doc_version(engine, canonical, content, author="system", note="初始读取建档")
+        if not rows or document_sha(content) != rows[0]["content_sha"]:
+            _observe_document(engine, full)
+            latest = engine.db._query("SELECT version FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1", (canonical,))[0]
+            return get_doc(engine, canonical, version=latest["version"])
         row = dict(rows[0])
         ver = int(row["version"])
 
@@ -165,6 +223,7 @@ def get_doc(engine: "Engine", rel_path: str, *, version: int | None = None) -> d
         "kind": _classify_doc_kind(canonical),
         "version": ver,
         "content": content,
+        "content_sha": row["content_sha"],
         "author": row.get("author", "system"),
         "note": row.get("note", ""),
         "created_at": row.get("created_at", ""),
@@ -222,40 +281,53 @@ def sync_standard_docs_from_artifacts(engine: "Engine") -> list[str]:
     proj_name = engine.db.meta_get("name", engine.ws.root.name) or engine.ws.root.name
     written: list[str] = []
 
+    def render_version(path: str, content: str, author: str, note: str) -> None:
+        key = f"doc.rendered_sha:{path}"
+        digest = document_sha(content)
+        # Refreshing unchanged source must not erase a human revision.
+        if engine.db.meta_get(key) == digest and (engine.ws.root / path).is_file():
+            return
+        save_doc_version(engine, path, content, author=author, note=note)
+        engine.db.meta_set(key, digest)
+        written.append(path)
+
     if engine.ws.prd_json_path.is_file():
         try:
-            spec = ProductSpec.model_validate(json.loads(engine.ws.prd_json_path.read_text("utf-8")))
+            spec = load_product_spec(engine)
             srs_md = render_srs_markdown(spec, profile=profile, project_name=proj_name)
-            save_doc_version(engine, "docs/SRS.md", srs_md, author="PM-Agent", note=f"按 {profile} 规范生成 SRS")
-            written.append("docs/SRS.md")
-        except Exception:
-            pass
+            render_version("docs/SRS.md", srs_md, author="PM-Agent", note=f"按 {profile} 规范生成 SRS")
+        except (ValueError, OSError) as exc:
+            engine.db.add_event("doc.sync_failed", f"SRS 同步失败：{exc}", actor="DocumentService")
+            raise ValueError(f"SRS 规格契约无效：{exc}") from exc
 
     cons: CouncilConsensus | None = None
     c_msgs = [m for m in engine.db.list_council_messages() if m.get("kind") == "consensus"]
     if c_msgs:
         try:
             cons = CouncilConsensus.model_validate(c_msgs[-1]["body"])
-        except Exception:
-            cons = None
+        except ValueError as exc:
+            engine.db.add_event("doc.sync_failed", f"圆桌共识无效：{exc}", actor="DocumentService")
+            raise ValueError(f"圆桌共识契约无效：{exc}") from exc
 
     bp_dict: dict[str, Any] | None = None
-    if engine.ws.blueprint_path.is_file():
+    architecture_source = engine.ws.blueprint_path if engine.ws.blueprint_path.is_file() else engine.ws.plan_json_path
+    if architecture_source.is_file():
         try:
-            bp_dict = json.loads(engine.ws.blueprint_path.read_text("utf-8"))
-        except Exception:
-            bp_dict = None
+            bp_dict = json.loads(architecture_source.read_text("utf-8"))
+            if not isinstance(bp_dict, dict):
+                raise ValueError("架构方案顶层必须是对象")
+        except (ValueError, OSError) as exc:
+            engine.db.add_event("doc.sync_failed", f"架构同步失败：{exc}", actor="DocumentService")
+            raise ValueError(f"架构方案无效：{exc}") from exc
 
     if cons or bp_dict:
         add_md = render_architecture_markdown(cons, bp_dict, profile=profile, project_name=proj_name)
-        save_doc_version(engine, "docs/ARCHITECTURE.md", add_md, author="Architect-Council", note="同步架构说明书")
-        written.append("docs/ARCHITECTURE.md")
+        render_version("docs/ARCHITECTURE.md", add_md, author="Architect-Council", note="同步架构说明书")
 
     if cons and cons.adrs:
         for adr in cons.adrs:
             adr_path = f"docs/adr/{adr.adr_id}.md"
-            save_doc_version(engine, adr_path, render_adr_madr(adr), author="Director", note=adr.title)
-            written.append(adr_path)
+            render_version(adr_path, render_adr_madr(adr), author="Director", note=adr.title)
 
     return written
 
@@ -264,10 +336,11 @@ def load_known_requirements(engine: "Engine") -> list[RequirementItem]:
     if not engine.ws.prd_json_path.is_file():
         return []
     try:
-        spec = ProductSpec.model_validate(json.loads(engine.ws.prd_json_path.read_text("utf-8")))
-        return list(spec.requirements)
-    except Exception:
-        return []
+        spec = load_product_spec(engine)
+        return list(spec.requirements) + list(spec.nfrs)
+    except (ValueError, OSError) as exc:
+        engine.db.add_event("doc.sync_failed", f"需求加载失败：{exc}", actor="DocumentService")
+        raise ValueError(f"需求规格无法读取：{exc}") from exc
 
 
 async def generate_detailed_design(
@@ -287,7 +360,7 @@ async def generate_detailed_design(
     add_txt = (engine.ws.root / "docs" / "ARCHITECTURE.md").read_text("utf-8") if (engine.ws.root / "docs" / "ARCHITECTURE.md").is_file() else ""
 
     req_hint = (
-        "\n".join(f"- {r.req_id} [{r.priority}] {r.title}: {r.statement}" for r in known_reqs)
+        "\n".join(f"- {r.identity} [{r.priority}] {r.title}: {r.statement}" for r in known_reqs)
         if known_reqs
         else "（当前 SRS 未显式列出结构化 REQ 编号，可按需自建或留空 req_ids）"
     )
@@ -321,17 +394,19 @@ async def generate_detailed_design(
                 # 单组详设只校验组内引用合法与接口 TC 闭环；单组工程（仅 1 个研发组）同时强制覆盖全部 P0 REQ
                 enforce_p0 = len(squads) <= 1
                 errors = validate_detailed_design(dd_obj, known_reqs, enforce_all_p0=enforce_p0)
+                if dd_obj.milestone_id != milestone_id or dd_obj.squad_id != squad_id:
+                    errors.append("详细设计的里程碑或研发组与请求范围不一致")
             except ValidationError as exc:
                 errors = [str(exc)]
 
         if dd_obj is not None and not errors:
-            json_out = engine.ws.state_dir / "design" / milestone_id / f"{squad_id}.json"
-            json_out.parent.mkdir(parents=True, exist_ok=True)
-            json_out.write_text(json.dumps(dd_obj.model_dump(), ensure_ascii=False, indent=2), "utf-8")
-
+            json_out = detailed_design_json_path(engine.ws, milestone_id, squad_id)
             md_text = render_detailed_design_markdown(dd_obj, profile=engine.settings.doc_profile or "default")
-            rel_doc = f"docs/design/{squad_id}.md"
-            save_doc_version(engine, rel_doc, md_text, author="Architect", note=f"{milestone_id} 详细设计生成")
+            rel_doc = detailed_design_doc_path(milestone_id, squad_id)
+            with engine.db.transaction():
+                _save_snapshot(engine, json_out, json.dumps(dd_obj.model_dump(), ensure_ascii=False, indent=2),
+                               author="Architect", note=f"{milestone_id} 详细设计结构化快照", refresh_gates=False)
+                save_doc_version(engine, rel_doc, md_text, author="Architect", note=f"{milestone_id} 详细设计生成")
 
             tpl = load_template(engine.ws, engine.settings)
             dd_stage = next((s for s in tpl.stages if s.id == "detailed_design" and s.enabled), None)
@@ -358,7 +433,7 @@ async def generate_detailed_design(
     raise PlanningError(errors)
 
 
-def resolve_design_refs_snippet(ws_root: Path, design_refs: list[str], max_chars: int = 4000) -> str:
+def resolve_design_refs_snippet(ws_root: Path, design_refs: list[str], max_chars: int = 4000, *, milestone_id: str = "") -> str:
     """根据任务卡上的 design_refs（如 `design/backend.md#接口-createOrder`）提取对应设计章节片段。"""
     if not design_refs:
         return ""
@@ -368,6 +443,10 @@ def resolve_design_refs_snippet(ws_root: Path, design_refs: list[str], max_chars
         rel = file_part.strip().lstrip("/")
         if not rel.startswith("docs/"):
             rel = f"docs/{rel}"
+        if milestone_id and rel.startswith("docs/design/") and len(rel.split("/")) == 3:
+            scoped = detailed_design_doc_path(milestone_id, Path(rel).stem)
+            if (ws_root / scoped).is_file():
+                rel = scoped
         fp = (ws_root / rel).resolve()
         if not fp.is_relative_to(ws_root.resolve() / "docs") or not fp.is_file():
             chunks.append(f"- 引用 `{ref}`（文件尚未落盘）")

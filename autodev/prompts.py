@@ -725,6 +725,7 @@ def build_council_consensus_prompt(
 - `resolved_debates`：逐条说明如何裁决第 1 轮各方提出的分歧与问题（格式：`[争议点] → [最终裁决]`）。
 - `open_risks`：剩余需在开发/测试期持续盯防的风险点。
 - `contract_strategy`：公共契约如何定义、冻结、跨模块引用及版本演进策略。
+- `requirements` 与 `nfrs`：分别输出功能及非功能需求数组，每项包含 req_id、title、statement、priority、acceptance。编号稳定且唯一，验收判据须来自已确认要求，不得捏造；确无某类要求时输出空数组。
 - `adrs`：2～6 条结构化架构决策记录（`adr_id` 如 `ADR-001`、`title`、`decision`、`rationale`、`affected_squads`）。
 - `spec_markdown`：将写入仓库 `docs/PRD_SPEC.md` 的权威中文《产品与架构共识规格书》（语言清晰直白、避免晦涩行话；坚持规模匹配——小型项目保持轻量架构与命令行可跑通的自动化验收标准，将任何需人类真机试玩的事项明确标注为「交付后人工体验项」而非开发阻塞项）。
 """

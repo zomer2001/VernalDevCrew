@@ -440,6 +440,11 @@ class Engine:
                     self.db.meta_set("prd_vision", spec.product_vision)
                     self.set_status(ProjectStatus.SPECIFIED)
                     from autodev.process.runner import ensure_gate_record, load_template
+                    from autodev.docs_center.service import sync_standard_docs_from_artifacts
+
+                    generated_docs = sync_standard_docs_from_artifacts(self)
+                    if generated_docs:
+                        self.record_documents(generated_docs, "autodev: archive generated specification")
 
                     tpl = load_template(self.ws, self.settings)
                     req_stage = next((s for s in tpl.stages if s.id == "requirements" and s.enabled), None)
@@ -535,6 +540,11 @@ class Engine:
 
     def _sync_planning_gates(self) -> None:
         from autodev.process.runner import decide_gate, ensure_gate_record, load_template
+        from autodev.docs_center.service import sync_standard_docs_from_artifacts
+
+        generated_docs = sync_standard_docs_from_artifacts(self)
+        if generated_docs:
+            self.record_documents(generated_docs, "autodev: archive generated planning documents")
 
         tpl = load_template(self.ws, self.settings)
         arch_stage = next((s for s in tpl.stages if s.id == "architecture" and s.enabled), None)
@@ -1135,7 +1145,7 @@ class Engine:
 
     def _reserve_publication(self, milestone_id):
         from autodev.ci.service import ci_gate_enabled, list_ci_runs
-        from autodev.process.runner import is_gate_passed, load_template
+        from autodev.process.runner import blocking_document_gates, is_gate_passed, load_template
         from autodev.review.policy import effective_review_policy
         from autodev.review.service import current_milestone_candidate_ref, list_reviews
 
@@ -1160,6 +1170,9 @@ class Engine:
                 raise OpsError(f"{milestone_id} 当前候选尚未通过里程碑人工代码审查，禁止合入")
 
         tpl = load_template(self.ws, self.settings)
+        blocked = blocking_document_gates(self.db, tpl, milestone_id)
+        if blocked:
+            raise OpsError(f"当前文档版本尚未批准，禁止交付：{', '.join(blocked)}")
         if ci_gate_enabled(self):
             if not is_gate_passed(self.db, "milestone_ci", "milestone", milestone_id):
                 raise OpsError(f"{milestone_id} 尚未通过持续集成 (CI) 流水线门禁，禁止合入")

@@ -130,8 +130,8 @@ def test_milestone_review_plus_gitea_ci_opens_review_and_merges_cleanly(tmp_path
         tpl = load_builtin_template("standard")
         tpl.review_policy = "milestone"
         for s in tpl.stages:
-            if s.id == "detailed_design":
-                s.enabled = False
+            if s.id in {"requirements", "architecture", "detailed_design"}:
+                s.enabled = False  # These fixtures isolate CI and candidate review.
             if s.id == "testing":
                 s.gates = [g for g in s.gates if g.kind != "quality"]
         save_custom_template(ws, json.dumps(tpl.model_dump(), ensure_ascii=False))
@@ -462,8 +462,8 @@ def test_gitea_ci_publishes_real_isolated_branch_commit_and_workflow_and_execute
         tpl = load_builtin_template("standard")
         tpl.review_policy = "off"
         for s in tpl.stages:
-            if s.id == "detailed_design":
-                s.enabled = False
+            if s.id in {"requirements", "architecture", "detailed_design"}:
+                s.enabled = False  # These fixtures isolate CI and candidate review.
             if s.id == "testing":
                 s.gates = [g for g in s.gates if g.kind != "quality"]
         save_custom_template(ws, json.dumps(tpl.model_dump(), ensure_ascii=False))

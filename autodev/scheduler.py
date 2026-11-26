@@ -345,9 +345,11 @@ class Scheduler:
                 return
 
         # H3：若流程模板开启详细设计阻塞门禁，未通过前仅允许 bootstrap / contract 任务先行执行
-        from autodev.process.runner import ensure_gate_record, is_gate_passed, load_template
+        from autodev.process.runner import blocking_document_gates, ensure_gate_record, is_gate_passed, load_template
 
         tpl = load_template(self.ws, self.settings)
+        if any(g != "detailed_design_approval" for g in blocking_document_gates(self.db, tpl, milestone_id)):
+            return
         dd_stage = next((s for s in tpl.stages if s.id == "detailed_design" and s.enabled), None)
         if dd_stage and any(g.id == "detailed_design_approval" and g.blocking for g in dd_stage.gates):
             if not is_gate_passed(self.db, "detailed_design_approval", "milestone", milestone_id):

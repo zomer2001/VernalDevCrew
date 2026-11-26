@@ -158,7 +158,7 @@ def issue_extensions(issue_id: str, request: Request):
     eng = get_ctx(request).active_slot(request).engine
     tasks = [t for t in eng.db.list_tasks() if t.loopforge_issue_id == issue_id]
     return [{"task_id": t.task_id, "acceptance": t.acceptance_criteria,
-             "design": resolve_design_refs_snippet(eng.ws.root, t.design_refs),
+             "design": resolve_design_refs_snippet(eng.ws.root, t.design_refs, milestone_id=t.milestone_id),
              "reviews": [dict(r) for r in eng.db._query(
                  "SELECT review_id,round,status FROM code_reviews WHERE scope_type='task' AND scope_id=? ORDER BY round DESC",
                  (t.task_id,))]} for t in tasks]

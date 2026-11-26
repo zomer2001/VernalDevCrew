@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 from autodev.db import Database, now_iso
 from autodev.models import MilestoneStatus, ProjectStatus, TaskStatus
 from autodev.process.model import GateDef, ProcessTemplate, StageDef, StageState, StageView
+from autodev.process.targets import DOCUMENT_GATES, document_target, target_is_current
 
 if TYPE_CHECKING:
     from autodev.config import Settings, Workspace
@@ -126,9 +127,13 @@ def save_custom_template(ws: "Workspace", raw_yaml: str) -> ProcessTemplate:
     return tpl
 
 
-def _hydrate_gate_row(row: Any) -> dict[str, Any]:
+def _hydrate_gate_row(row: Any, db: Database | None = None) -> dict[str, Any]:
     d = dict(row)
     d["evidence"] = json.loads(d.pop("evidence_json", None) or "{}")
+    if db is not None and d["status"] in ("PENDING", "PASSED", "WAIVED") and not target_is_current(db, d):
+        d["decision_status"] = d.get("decision_status") or d["status"]
+        d["status"] = "STALE"
+        d["stale_reason"] = d.get("stale_reason") or "审批目标已变更、缺失或尚未归档"
     return d
 
 
@@ -160,7 +165,7 @@ def list_gate_records(
         params.append(scope_id)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = db._query(f"SELECT * FROM gate_records{where} ORDER BY record_id ASC", params)
-    return [_hydrate_gate_row(r) for r in rows]
+    return [_hydrate_gate_row(r, db) for r in rows]
 
 
 def latest_gate_record(db: Database, gate_id: str, scope_type: str, scope_id: str) -> dict[str, Any] | None:
@@ -168,7 +173,7 @@ def latest_gate_record(db: Database, gate_id: str, scope_type: str, scope_id: st
         "SELECT * FROM gate_records WHERE gate_id=? AND scope_type=? AND scope_id=? ORDER BY round DESC LIMIT 1",
         (gate_id, scope_type, scope_id),
     )
-    return _hydrate_gate_row(rows[0]) if rows else None
+    return _hydrate_gate_row(rows[0], db) if rows else None
 
 
 def ensure_gate_record(
@@ -184,25 +189,28 @@ def ensure_gate_record(
     force_new_round: bool = False,
 ) -> dict[str, Any]:
     """幂等创建或返回门禁记录。"""
-    latest = latest_gate_record(db, gate_id, scope_type, scope_id)
-    if latest is not None:
-        if latest["status"] == "PENDING":
-            return latest
-        if not force_new_round:
-            if latest["status"] in ("PASSED", "WAIVED"):
-                return latest
-            if latest["status"] == "FAILED" and not new_round_if_failed:
-                return latest
-        next_round = int(latest["round"]) + 1
-    else:
-        next_round = 1
-
     ts = now_iso()
     with db.transaction():
+        target = document_target(db, gate_id, scope_id)
+        rows = db._query("SELECT * FROM gate_records WHERE gate_id=? AND scope_type=? AND scope_id=? ORDER BY round DESC LIMIT 1",
+                         (gate_id, scope_type, scope_id))
+        latest = _hydrate_gate_row(rows[0]) if rows else None
+        if latest:
+            same_target = latest.get("target_sha", "") == target["target_sha"]
+            if same_target and not force_new_round:
+                if latest["status"] in ("PENDING", "PASSED", "WAIVED"):
+                    return _hydrate_gate_row(rows[0], db)
+                if latest["status"] == "FAILED" and not new_round_if_failed:
+                    return latest
+            if latest["status"] in ("PENDING", "PASSED", "WAIVED"):
+                db._exec("UPDATE gate_records SET decision_status=status, status='STALE', stale_reason=? WHERE record_id=?",
+                         ("审批目标已变更" if not same_target else "已发起新一轮评审", latest["record_id"]))
+        next_round = int(latest["round"]) + 1 if latest else 1
         cur = db._exec(
-            "INSERT INTO gate_records(stage_id, gate_id, kind, scope_type, scope_id, status, round, summary, evidence_json, created_at)"
-            " VALUES(?, ?, ?, ?, ?, 'PENDING', ?, ?, '{}', ?)",
-            (stage_id, gate_id, kind, scope_type, scope_id, next_round, summary, ts),
+            "INSERT INTO gate_records(stage_id, gate_id, kind, scope_type, scope_id, status, round, summary, evidence_json, created_at,"
+            " target_path, target_sha, target_version, target_snapshot_json) VALUES(?, ?, ?, ?, ?, 'PENDING', ?, ?, '{}', ?, ?, ?, ?, ?)",
+            (stage_id, gate_id, kind, scope_type, scope_id, next_round, summary, ts,
+             target["target_path"], target["target_sha"], target["target_version"], target["target_snapshot_json"]),
         )
         rec_id = int(cur.lastrowid)
     db.add_event(
@@ -215,9 +223,42 @@ def ensure_gate_record(
     return _hydrate_gate_row(rows[0])
 
 
+def refresh_document_gates(db: Database) -> None:
+    """Invalidate old targets and open a new round within the caller's snapshot transaction."""
+    rows = db._query("SELECT g.* FROM gate_records g JOIN (SELECT gate_id,scope_type,scope_id,MAX(round) AS r "
+                     "FROM gate_records GROUP BY gate_id,scope_type,scope_id) latest ON g.gate_id=latest.gate_id "
+                     "AND g.scope_type=latest.scope_type AND g.scope_id=latest.scope_id AND g.round=latest.r")
+    for row in rows:
+        if row["gate_id"] not in DOCUMENT_GATES:
+            continue
+        current = document_target(db, row["gate_id"], row["scope_id"])
+        if row["target_sha"] != current["target_sha"]:
+            ensure_gate_record(db, stage_id=row["stage_id"], gate_id=row["gate_id"], kind=row["kind"],
+                               scope_type=row["scope_type"], scope_id=row["scope_id"], summary="文档已有新修订，请重新审阅")
+
+
 def is_gate_passed(db: Database, gate_id: str, scope_type: str, scope_id: str) -> bool:
     rec = latest_gate_record(db, gate_id, scope_type, scope_id)
     return bool(rec and rec["status"] in ("PASSED", "WAIVED"))
+
+
+def blocking_document_gates(db: Database, template: ProcessTemplate, milestone_id: str) -> list[str]:
+    blocked = []
+    for stage in template.stages:
+        if not stage.enabled:
+            continue
+        for gate in stage.gates:
+            if gate.blocking and gate.id in DOCUMENT_GATES:
+                scope_id = milestone_id if gate.scope == "milestone" else "project"
+                # Legacy blueprints did not require an ADD document. Preserve that contract
+                # only when no document approval has ever been opened or materialized.
+                if (gate.id == "architecture_approval" and not stage.required_artifacts
+                        and latest_gate_record(db, gate.id, gate.scope, scope_id) is None
+                        and not document_target(db, gate.id, scope_id)["target_sha"]):
+                    continue
+                if not is_gate_passed(db, gate.id, gate.scope, scope_id):
+                    blocked.append(gate.id)
+    return blocked
 
 
 def is_stage_passed(
@@ -248,13 +289,15 @@ def decide_gate(
     actor: str = "owner",
     comment: str = "",
     expected_round: int | None = None,
+    expected_sha: str | None = None,
     evidence: dict[str, Any] | None = None,
     audit_project: str = "",
     actor_ip: str = "127.0.0.1",
 ) -> dict[str, Any]:
     from autodev.governance.audit import enqueue_decision
     with db.transaction():
-        out = _decide_gate(db, record_id, decision, actor=actor, comment=comment, expected_round=expected_round, evidence=evidence)
+        out = _decide_gate(db, record_id, decision, actor=actor, comment=comment, expected_round=expected_round,
+                           expected_sha=expected_sha, evidence=evidence)
         enqueue_decision(db, f"gate:{record_id}", actor=actor, actor_ip=actor_ip,
                          project=audit_project or db.path.parent.parent.name, action="gate.decided",
                          target=f"{out['gate_id']}#{record_id}", detail={"status": out["status"], "round": out["round"], "comment": comment})
@@ -269,6 +312,7 @@ def _decide_gate(
     actor: str = "owner",
     comment: str = "",
     expected_round: int | None = None,
+    expected_sha: str | None = None,
     evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     norm = decision.strip().lower()
@@ -283,6 +327,12 @@ def _decide_gate(
     if not rows:
         raise KeyError(f"门禁记录不存在：{record_id}")
     cur = _hydrate_gate_row(rows[0])
+
+    if expected_sha is not None and expected_sha != cur.get("target_sha", ""):
+        raise GateConflictError("审批内容版本已变更，请重新查看目标文档")
+    latest = latest_gate_record(db, cur["gate_id"], cur["scope_type"], cur["scope_id"])
+    if latest is None or latest["record_id"] != record_id or not target_is_current(db, cur):
+        raise GateConflictError("审批目标已变更或尚未归档，请重新查看当前版本")
 
     if expected_round is not None and int(cur["round"]) != int(expected_round):
         raise GateConflictError(f"门禁轮次已变更（当前第 {cur['round']} 轮，请求第 {expected_round} 轮）")
@@ -348,7 +398,7 @@ def _derive_single_stage(
         latest_by_scope[(rec["gate_id"], rec["scope_type"], rec["scope_id"])] = rec
 
     blocking_ids = {g.id for g in stage.gates if g.blocking}
-    pending_recs = [r for r in latest_by_scope.values() if r["status"] == "PENDING" and r["gate_id"] in blocking_ids]
+    pending_recs = [r for r in latest_by_scope.values() if r["status"] in ("PENDING", "STALE") and r["gate_id"] in blocking_ids]
     failed_recs = [r for r in latest_by_scope.values() if r["status"] == "FAILED" and r["gate_id"] in blocking_ids]
 
     sid = stage.id

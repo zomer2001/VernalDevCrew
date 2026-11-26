@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class TaskStatus(StrEnum):
@@ -94,6 +95,8 @@ class CouncilConsensus(_Strict):
     contract_strategy: str
     adrs: list[CouncilADR]
     spec_markdown: str
+    requirements: list[RequirementItem] = []
+    nfrs: list[RequirementItem] = []
 
 
 # ---------- 1B. 产品经理输出：PRD / SRS 规格补全 ----------
@@ -104,6 +107,19 @@ class RequirementItem(_Strict):
     statement: str
     priority: Literal["P0", "P1", "P2"] = "P1"
     acceptance: list[str] = []
+    feature_id: str = ""
+
+    @model_validator(mode="after")
+    def validate_identity(self):
+        if not self.req_id.strip() or self.req_id != self.req_id.strip():
+            raise ValueError("需求编号不得为空或带首尾空格")
+        if self.feature_id and (not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", self.feature_id) or ":" in self.req_id):
+            raise ValueError("feature_id 必须是单层范围标识，req_id 不得重复携带范围")
+        return self
+
+    @property
+    def identity(self) -> str:
+        return f"{self.feature_id}:{self.req_id}" if self.feature_id else self.req_id
 
 
 class ProductSpec(_Strict):
@@ -115,6 +131,15 @@ class ProductSpec(_Strict):
     spec_markdown: str
     requirements: list[RequirementItem] = []
     nfrs: list[RequirementItem] = []
+
+    @model_validator(mode="after")
+    def unique_requirement_ids(self):
+        seen = set()
+        for item in self.requirements + self.nfrs:
+            if not item.req_id.strip() or item.identity in seen:
+                raise ValueError(f"需求编号为空或重复：{item.identity}")
+            seen.add(item.identity)
+        return self
 
 
 # ---------- 1C. 架构师 / 研发组输出：详细设计规格（Detailed Design） ----------

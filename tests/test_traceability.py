@@ -55,6 +55,8 @@ def test_traceability_matrix_broken_links_export_and_p0_merge_gate(tmp_path: Pat
         tpl = load_builtin_template("feature")
         tpl.review_policy = "off"
         for s in tpl.stages:
+            if s.id in ("requirements", "architecture", "detailed_design"):
+                s.gates = []  # This test isolates trace coverage, not document approval.
             if s.id == "integration_delivery":
                 s.gates = [g for g in s.gates if g.kind != "ci"]
                 s.gates.append(GateDef(id="req_trace_p0", name="P0 需求测试覆盖门禁", kind="trace_coverage", scope="milestone", blocking=True))
@@ -99,7 +101,8 @@ def test_traceability_matrix_broken_links_export_and_p0_merge_gate(tmp_path: Pat
                 ),
             }
         )
-        eng.db.update_task("T-001", status=TaskStatus.APPROVED, artifact_digest=key1)
+        patch1 = ex.patch(eng.db.get_task("T-001"), {}, ex.get(key1), [])
+        eng.db.update_task("T-001", status=TaskStatus.APPROVED, artifact_digest=patch1)
         eng.db.meta_set("delivery:M1", key1)
         eng.db.meta_set("candidate_ref:M1", key1)
         eng.db.update_milestone("M1", status=MilestoneStatus.AWAITING_MERGE)
@@ -142,7 +145,8 @@ def test_traceability_matrix_broken_links_export_and_p0_merge_gate(tmp_path: Pat
                 ),
             }
         )
-        eng.db.update_task("T-001", status=TaskStatus.APPROVED, artifact_digest=key2)
+        patch2 = ex.patch(eng.db.get_task("T-001"), {}, ex.get(key2), [])
+        eng.db.update_task("T-001", status=TaskStatus.APPROVED, artifact_digest=patch2)
         eng.db.meta_set("delivery:M1", key2)
         eng.db.meta_set("candidate_ref:M1", key2)
 

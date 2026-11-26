@@ -25,7 +25,7 @@ def build_task_input_bundle(ws, db, task, *, decisions=None, source_root=None, f
     if task.design_refs or task.requirement_ids:
         from autodev.docs_center.service import resolve_design_refs_snippet
 
-        snippet = resolve_design_refs_snippet(ws_root, task.design_refs) if (ws_root and task.design_refs) else ""
+        snippet = resolve_design_refs_snippet(ws_root, task.design_refs, milestone_id=task.milestone_id) if (ws_root and task.design_refs) else ""
         req_line = f"- **关联需求编号**：{', '.join(task.requirement_ids)}（编写测试时请用 `@pytest.mark.req(\"REQ-xxx\")` 或注释标注对应需求 ID）\n" if task.requirement_ids else ""
         ref_line = f"- **关联详细设计引用**：{', '.join(task.design_refs)}\n" if task.design_refs else ""
         design_block = f"\n## 关联需求与详细设计约束\n\n{req_line}{ref_line}{snippet}\n"
@@ -51,7 +51,7 @@ def build_candidate_review_bundle(ws_root, task, diff, *, source_root=None):
     if ws_root and task.design_refs:
         from autodev.docs_center.service import resolve_design_refs_snippet
 
-        snip = resolve_design_refs_snippet(ws_root, task.design_refs)
+        snip = resolve_design_refs_snippet(ws_root, task.design_refs, milestone_id=task.milestone_id)
         if snip:
             design_sec = f"\n## 详细设计对照片段\n\n{snip}\n"
 

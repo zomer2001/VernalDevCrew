@@ -1,0 +1,28 @@
+P0 final regression, 2026-11-26
+Branch: codex/standard-delivery-p0
+Baseline: 210 passed
+New boundary probes: 20
+
+........................................................................ [ 31%]
+........................................................................ [ 62%]
+........................................................................ [ 93%]
+..............                                                           [100%]
+=============================== warnings summary ===============================
+../../.venv/lib/python3.14/site-packages/fastapi/testclient.py:1
+  /Users/zomeryang/Documents/春天/个人科研/lattice-mesh/.venv/lib/python3.14/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+230 passed, 1 warning in 87.93s (0:01:27)
+
+Additional checks: node --check (2 JavaScript files), bash -n, git diff --check, git apply --check.
+Review fixture API smoke: health, docs (4), gates (4), trace matrix returned HTTP 200 in-process.
+Actual port binding was blocked by the execution environment; browser and live harness acceptance remain pending.
+Original snapshot: 222 existing source files unchanged.
+
+UI acceptance follow-up, 2026-11-26
+node --test tests/test_governance_exports.mjs tests/test_timeline_switch.mjs: 2 passed
+pytest tests/test_traceability.py tests/test_ui_branding_and_settings_api.py::test_proxy_injects_brand_script_into_embedded_assistant_frames: 2 passed
+node --check autodev/server/static/js/governance.js: passed
+Live UI: edit, diff, DOCX export, approval v2, invalidation v3, latest pending v4: passed
+Live trace CSV/DOCX: both contain current-project-only REQ-777 after project-scope fix

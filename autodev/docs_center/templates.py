@@ -25,7 +25,7 @@ def render_srs_markdown(spec: ProductSpec, *, profile: str = "default", project_
     lines += ["", "## 3. 功能性需求规定（EARS）" if profile == "gbt8567" else "## 3. 功能需求清单 (REQ)", ""]
     if spec.requirements:
         for req in spec.requirements:
-            lines.append(f"### {req.req_id} [{req.priority}] {req.title}")
+            lines.append(f"### {req.identity} [{req.priority}] {req.title}")
             lines.append(f"- **规范表述**：{req.statement}")
             if req.acceptance:
                 lines.append("- **验收判据**：")
@@ -39,7 +39,9 @@ def render_srs_markdown(spec: ProductSpec, *, profile: str = "default", project_
     if spec.nfrs:
         lines += ["## 4. 非功能性需求与质量属性 (NFR)", ""]
         for nfr in spec.nfrs:
-            lines.append(f"- **{nfr.req_id} [{nfr.priority}] {nfr.title}**：{nfr.statement}")
+            lines.append(f"### {nfr.identity} [{nfr.priority}] {nfr.title}")
+            lines.append(nfr.statement)
+            lines.extend(f"- {criterion}" for criterion in nfr.acceptance)
         lines.append("")
 
     lines += ["## 5. 异常边界与错误码约定", ""]

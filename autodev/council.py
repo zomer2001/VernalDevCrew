@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from autodev import gitops
 from autodev.db import DocSlice, now_iso
 from autodev.ingest import summarize
-from autodev.models import CouncilConsensus, CouncilOpinion, ProjectStatus
+from autodev.models import CouncilConsensus, CouncilOpinion, ProductSpec, ProjectStatus
 from autodev.prompts import (
     PLANNER_FULLTEXT_BUDGET,
     build_council_consensus_prompt,
@@ -272,13 +272,18 @@ async def synthesize_council(
                     "error_conventions": [consensus.contract_strategy],
                     "global_acceptance_redlines": [f"{a.adr_id} {a.title}: {a.decision}" for a in consensus.adrs],
                     "spec_markdown": consensus.spec_markdown,
-                    "adrs": [a.model_dump() for a in consensus.adrs],
+                    "requirements": [r.model_dump() for r in consensus.requirements],
+                    "nfrs": [r.model_dump() for r in consensus.nfrs],
                 }
+                compat_prd = ProductSpec.model_validate(compat_prd).model_dump()
                 engine.ws.prd_json_path.write_text(json.dumps(compat_prd, ensure_ascii=False, indent=2), "utf-8")
                 engine.ws.prd_md_path.parent.mkdir(parents=True, exist_ok=True)
                 engine.ws.prd_md_path.write_text(consensus.spec_markdown.strip() + "\n", "utf-8")
+                from autodev.docs_center.service import sync_standard_docs_from_artifacts
+
+                generated_docs = sync_standard_docs_from_artifacts(engine)
                 engine.record_documents(
-                    ["docs/PRD_SPEC.md"],
+                    ["docs/PRD_SPEC.md", *generated_docs],
                     "autodev(council): publish architecture council consensus & ADRs",
                     author_name=ident["author_name"],
                     author_email=ident["author_email"],
@@ -300,8 +305,9 @@ async def synthesize_council(
                     from autodev.steering import sync_council_adrs_to_decisions
 
                     await sync_council_adrs_to_decisions(engine, consensus)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    engine.db.add_event("council.decision_sync_failed", str(exc), actor=ident["label"])
+                    raise
                 engine.db.add_event(
                     "council.consensus",
                     f"圆桌拍板完成：形成 {len(consensus.adrs)} 项 ADR 决策，裁决 {len(consensus.resolved_debates)} 项分歧",

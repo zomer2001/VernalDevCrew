@@ -37,7 +37,7 @@ async function renderDocsCenter(state, onRefresh) {
           (d) =>
             `<button type="button" class="review-file-btn ${d.path === _selectedPath ? "active" : ""}" data-doc-pick="${esc(d.path)}">
               <span>[${esc(d.kind)}] ${esc(d.path.replace(/^docs\//, ""))}</span>
-              <span class="muted">v${d.version}</span>
+              <span class="muted">v${d.version} · ${esc(({APPROVED: "已批准", STALE: "已变更待重审", DRAFT: "草稿"})[d.status] || d.status)}</span>
             </button>`
         )
         .join("")
@@ -118,7 +118,7 @@ async function renderDocsCenter(state, onRefresh) {
     try {
       await api(`/vernal-api/docs/${_selectedPath}`, {
         method: "PUT",
-        body: JSON.stringify({ content, note, actor: actorName() }),
+        body: JSON.stringify({ content, note, actor: actorName(), expected_sha: detail.content_sha }),
       });
       _editing = false;
       toast("已保存为新文档版本");

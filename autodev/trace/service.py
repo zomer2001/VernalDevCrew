@@ -12,6 +12,7 @@ from autodev.db import now_iso
 from autodev.docs_center.exporter import markdown_to_docx_bytes
 from autodev.models import TaskStatus
 from autodev.trace.scan import extract_requirements_from_sources, scan_workspace_tests
+from autodev.docs_center.paths import iter_detailed_design_json_paths
 
 if TYPE_CHECKING:
     from autodev.engine import Engine
@@ -22,12 +23,14 @@ def sync_requirements(engine: "Engine") -> list[dict[str, Any]]:
     extracted = extract_requirements_from_sources(engine)
     ts = now_iso()
     with engine.db.transaction():
+        # Parse and validate the complete source before retiring anything.
+        engine.db._exec("UPDATE requirements SET status='RETIRED', updated_at=? WHERE status='ACTIVE'", (ts,))
         for req in extracted:
             engine.db._exec(
                 "INSERT INTO requirements(req_id, title, priority, acceptance_json, source_section, status, updated_at)"
                 " VALUES(?, ?, ?, ?, ?, 'ACTIVE', ?)"
                 " ON CONFLICT(req_id) DO UPDATE SET title=excluded.title, priority=excluded.priority,"
-                " acceptance_json=excluded.acceptance_json, source_section=excluded.source_section, updated_at=excluded.updated_at",
+                " acceptance_json=excluded.acceptance_json, source_section=excluded.source_section, status='ACTIVE', updated_at=excluded.updated_at",
                 (
                     req["req_id"],
                     req["title"],
@@ -46,17 +49,22 @@ def sync_requirements(engine: "Engine") -> list[dict[str, Any]]:
     return out
 
 
-def _collect_design_links(engine: "Engine") -> dict[str, list[str]]:
+def _collect_design_links(engine: "Engine", milestone_id: str | None = None) -> dict[str, list[str]]:
     links: dict[str, list[str]] = {}
     design_dir = engine.ws.state_dir / "design"
     if not design_dir.is_dir():
         return links
-    for jf in sorted(design_dir.glob("*.json")):
+    for jf in iter_detailed_design_json_paths(engine.ws, milestone_id):
         try:
             spec = json.loads(jf.read_text("utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        mod = str(spec.get("module") or jf.stem)
+            if not isinstance(spec, dict):
+                raise ValueError("详设顶层必须是对象")
+        except (OSError, ValueError) as exc:
+            engine.db.add_event("trace.design_failed", f"{jf.relative_to(design_dir)}: {exc}", actor="TraceService")
+            raise ValueError(f"详设解析失败：{jf.name}") from exc
+        mod = str(spec.get("squad_id") or spec.get("module") or jf.stem)
+        if jf.parent != design_dir:
+            mod = f"{jf.parent.name}/{mod}"
         for iface in spec.get("interfaces") or []:
             if isinstance(iface, dict):
                 iname = str(iface.get("name") or iface.get("id") or "interface")

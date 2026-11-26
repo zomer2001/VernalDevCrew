@@ -517,6 +517,14 @@ class Database:
             return {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
         additions = {
+            "gate_records": {
+                "target_path": "TEXT NOT NULL DEFAULT ''",
+                "target_sha": "TEXT NOT NULL DEFAULT ''",
+                "target_version": "INTEGER NOT NULL DEFAULT 0",
+                "target_snapshot_json": "TEXT NOT NULL DEFAULT '[]'",
+                "decision_status": "TEXT NOT NULL DEFAULT ''",
+                "stale_reason": "TEXT NOT NULL DEFAULT ''",
+            },
             "link_codes": {"owner_id": "TEXT", "verified_at": "REAL NOT NULL DEFAULT 0"},
             "host_links": {"codex_login": "INTEGER NOT NULL DEFAULT 0", "owner_id": "TEXT",
                            "verified_at": "REAL NOT NULL DEFAULT 0", "revoked_at": "REAL", "expires_at": "REAL"},
