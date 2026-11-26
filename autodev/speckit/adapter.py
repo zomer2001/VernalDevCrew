@@ -69,6 +69,8 @@ async def run_step(engine, feature_id: str, step_name: str, preset_id: str = "ve
     schema_path.parent.mkdir(parents=True,exist_ok=True)
     schema = strict_json_schema(SpecStepResult)
     schema["properties"]["step"]["enum"] = [step_name]
+    schema["properties"]["clarifications"]["maxItems"] = 3 if step_name == "clarify" else 0
+    schema["properties"]["content"]["pattern"] = r"^\s*$" if step_name == "clarify" else r"\S"
     schema["x-vernal-step"] = step_name
     schema["x-vernal-task-schema"] = strict_json_schema(SpecTaskDraft)
     schema["x-vernal-artifact-path"] = source_path(feature_id,kind) if step_name != "clarify" else ""
@@ -81,8 +83,11 @@ async def run_step(engine, feature_id: str, step_name: str, preset_id: str = "ve
               + "\n" + "\n".join(context)
               + "\n用户输入资料：\n" + "\n".join(s.content for s in engine.db.list_slices() if s.slice_id != "PRD-S01")
               + "\n本次补充：\n" + instructions
-              + f"\n仅产出当前步骤 {step_name} 的结果，不执行下一步骤。content 放完整 Markdown 正文；"
-                "clarifications 和 findings 无内容时用空数组。不得修改已确认输入。")
+              + f"\n仅产出当前步骤 {step_name} 的结果，不执行下一步骤。"
+              + ("澄清步骤的 content 必须为空字符串，clarifications 至多三个问题。"
+                 if step_name == "clarify" else
+                 "content 放完整非空 Markdown 正文；clarifications 必须为空数组，本步骤不得发布澄清问题。未决事项可在正文中标记待确认，不替用户作答。")
+              + "findings 无内容时用空数组。不得修改已确认输入。")
     baseline = {"spec_sha":(latest(engine,feature_id) or {}).get("content_sha",""),
                 "contract_sha":contract_hash(engine), "compiled_task_hash":"", "asset_versions":assets["versions"]}
     token = PLANNING_BASELINE.set(baseline)

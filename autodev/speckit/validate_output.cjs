@@ -21,7 +21,10 @@ function validate(value, schema, where = "result") {
       if (name in props) validate(item, props[name], `${where}.${name}`);
     }
   }
-  if (Array.isArray(value)) value.forEach((item, i) => validate(item, schema.items || {}, `${where}[${i}]`));
+  if (Array.isArray(value)) {
+    if (value.length < (schema.minItems || 0) || ("maxItems" in schema && value.length > schema.maxItems)) throw Error(`${where}: 数组长度无效`);
+    value.forEach((item, i) => validate(item, schema.items || {}, `${where}[${i}]`));
+  }
   if (typeof value === "string" && (value.length < (schema.minLength || 0) ||
       (schema.pattern && !new RegExp(schema.pattern).test(value)))) throw Error(`${where}: 文本格式无效`);
 }

@@ -35,6 +35,8 @@ def validate(value, schema, path="result"):
             if key in props:
                 validate(item,props[key],f"{path}.{key}")
     if isinstance(value,list):
+        if len(value)<schema.get("minItems",0) or ("maxItems" in schema and len(value)>schema["maxItems"]):
+            raise ValueError(f"{path}: 数组长度无效")
         for i,item in enumerate(value):
             validate(item,schema.get("items",{}),f"{path}[{i}]")
     if isinstance(value,str):
