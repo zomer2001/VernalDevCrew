@@ -3,6 +3,7 @@ set -euo pipefail
 
 review_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 review_workspace="${VERNAL_REVIEW_WORKSPACE:-$review_root/workspaces/p2-review}"
+review_port="${VERNAL_REVIEW_PORT:-8790}"
 review_prepare_only=0
 review_fixture=0
 for review_arg in "$@"; do
@@ -23,6 +24,7 @@ fi
 cd "$review_root"
 export PYTHONPATH="$review_root${PYTHONPATH:+:$PYTHONPATH}"
 export VERNAL_DISABLE_AUTO_RESUME=1
+export VERNAL_PUBLIC_URL="${VERNAL_PUBLIC_URL:-http://127.0.0.1:$review_port}"
 
 "$review_python" - "$review_workspace" "$review_fixture" <<'PY'
 import sys
@@ -63,6 +65,7 @@ try:
         mission.update(assessment=assessment.model_dump(),route=triage.recommendation(assessment,triage.source_origin(engine)),actual_preset="vernal-lite",actual_process=load_template(engine.ws,engine.settings).id,prerequisites=[],assessed_input=triage.input_key(engine,mission))
         missions._store(engine,mission)
     print(f"P2 验收工作区：{root}")
+    print(f"执行机回调地址：{engine.settings.vernal_public_url}")
     if fixture:
         print(f"页面选择项目 {engine.settings.loopforge_project_id}，进入“继续需求交付”即可查看夹具。")
         print("已有规格和回答保持原样。不调用模型，不批准门禁，不启动研发任务。")
@@ -76,4 +79,4 @@ finally:
 PY
 
 if [[ "$review_prepare_only" == 1 ]]; then exit 0; fi
-exec "$review_python" -m autodev.cli serve --host 127.0.0.1 --port "${VERNAL_REVIEW_PORT:-8790}" --dir "$review_workspace"
+exec "$review_python" -m autodev.cli serve --host 127.0.0.1 --port "$review_port" --dir "$review_workspace"

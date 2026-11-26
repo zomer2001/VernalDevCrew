@@ -9,7 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class TaskStatus(StrEnum):
@@ -84,10 +84,10 @@ class HandoffBrief(_Strict):
 
 
 class ClarificationItem(_Strict):
-    question_key: str
+    question_key: str = Field(pattern=r"^Q-[0-9]{2,}$", description="稳定问题编号，例如 Q-01、Q-02；新问题不得复用已有编号")
     category: Literal["scope", "interface", "acceptance", "constraint", "non_goal"] = "scope"
     severity: Literal["BLOCKING", "DEFAULTED"] = "BLOCKING"
-    question: str
+    question: str = Field(min_length=1, pattern=r"\S")
     options: list[str] = []
     default_option: str = ""
     rationale: str = ""

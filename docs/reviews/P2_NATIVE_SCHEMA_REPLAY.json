@@ -1,0 +1,42 @@
+{
+  "source_sha256": "dd97494424d6e53099f856ee832783b77efee6a7b6199571e2468ef85eb2061c",
+  "checks": [
+    {
+      "runtime": "validate_output.py",
+      "case": "original-contract",
+      "exit_code": 0,
+      "passed": true
+    },
+    {
+      "runtime": "validate_output.py",
+      "case": "fixed-contract-rejects-original",
+      "exit_code": 1,
+      "passed": true
+    },
+    {
+      "runtime": "validate_output.py",
+      "case": "corrected-id-test-copy",
+      "exit_code": 0,
+      "passed": true
+    },
+    {
+      "runtime": "validate_output.cjs",
+      "case": "original-contract",
+      "exit_code": 0,
+      "passed": true
+    },
+    {
+      "runtime": "validate_output.cjs",
+      "case": "fixed-contract-rejects-original",
+      "exit_code": 1,
+      "passed": true
+    },
+    {
+      "runtime": "validate_output.cjs",
+      "case": "corrected-id-test-copy",
+      "exit_code": 0,
+      "passed": true
+    }
+  ],
+  "note": "编号修正仅用于临时回归副本，未写入真实项目，未替代真实模型重跑。"
+}

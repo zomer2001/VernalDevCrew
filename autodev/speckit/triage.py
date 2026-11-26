@@ -5,7 +5,7 @@ import asyncio
 import json
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from autodev.models import ClarificationItem, HandoffBrief, strict_json_schema
 from autodev.prompts_style import COMMUNICATION_STYLE, validate_public_text
@@ -122,7 +122,7 @@ async def assess(engine, mission: dict, *, actor: str) -> Assessment:
               "已有回答优先于旧正文。回答改变了正文中的范围或验收条目时，在 proposed_spec 返回更新后的完整规格，"
               "保留既有需求编号并消除已回答的占位项；不得改变其他已确认承诺。无需修改正文时返回空串。"
               "首次评估须生成 proposed_spec，遵守下列固定格式；未决处如实标明需要负责人确认，不虚构需求或测试结论。"
-              "所有列表无项时返回空数组。新问题使用未占用的 Q 编号。\n"
+              "所有列表无项时返回空数组。问题编号必须采用 Q-01、Q-02 格式，Q 后有连字符且数字至少两位；新问题使用未占用编号。\n"
               "以下上游指令仅作方法参考，不运行其脚本、分支、直接提问或步骤切换：\n"
               + (upstream / "commands/clarify.md").read_text("utf-8")
               + "\n" + (upstream / "commands/specify.md").read_text("utf-8")
@@ -163,6 +163,8 @@ async def assess(engine, mission: dict, *, actor: str) -> Assessment:
         return parsed
     except (Exception, asyncio.CancelledError) as exc:
         engine.db.finish_run(run_id, session_id="", exit_code=1, verdict="ERROR", summary_log=str(exc) or "执行取消", log_path=str(log_dir))
+        if isinstance(exc, ValidationError):
+            raise ValueError("需求评估结果未通过格式校验，未写入规格。原始结果和校验详情已保留在执行记录中。") from exc
         raise
     finally:
         PLANNING_BASELINE.reset(token)

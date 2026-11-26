@@ -54,3 +54,15 @@ def test_bound_review_fixture_preserves_answers_on_rerun(tmp_path):
         assert not engine.db._query("SELECT 1 FROM dispatch_records")
     finally:
         engine.db.close()
+
+
+def test_review_callback_follows_listen_port_and_preserves_explicit_url(tmp_path, monkeypatch):
+    monkeypatch.delenv("VERNAL_PUBLIC_URL", raising=False)
+    monkeypatch.setenv("VERNAL_REVIEW_PORT", "8791")
+    result = prepare(tmp_path / "callback-review")
+    assert result.returncode == 0, result.stderr
+    assert "执行机回调地址：http://127.0.0.1:8791" in result.stdout
+    monkeypatch.setenv("VERNAL_PUBLIC_URL", "https://review.example.test")
+    result = prepare(tmp_path / "callback-review")
+    assert result.returncode == 0, result.stderr
+    assert "执行机回调地址：https://review.example.test" in result.stdout
