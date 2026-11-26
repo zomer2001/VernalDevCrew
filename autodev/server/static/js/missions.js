@@ -25,6 +25,7 @@ export function renderMissions(data, refresh) {
   const mission=data.missions.find(m=>m.feature_id===selected);
   const feature=mission?.feature_id || "feature-"+Date.now().toString(36);
   const run=data.running || mission?.state==="RUNNING";
+  const showAssessment=mission?.route && (mission.state_before_running||mission.state)!=="NEEDS_ASSESSMENT";
   const blocking=(mission?.questions||[]).filter(q=>q.status==="OPEN" && q.severity==="BLOCKING");
   const defaults=(mission?.questions||[]).filter(q=>q.status==="AUTO_DEFAULTED");
   const source=data.features.find(f=>f.feature_id===feature)?.sources?.spec;
@@ -34,8 +35,8 @@ export function renderMissions(data, refresh) {
     <div class="mission-toolbar"><label>当前需求 <select id="mission-select"><option value="new">新增需求</option>${data.missions.map(m=>`<option value="${esc(m.feature_id)}" ${m.feature_id===selected?"selected":""}>${esc(m.brief.slice(0,42))}</option>`).join("")}</select></label><button class="btn btn-sm" id="mission-preflight">检查执行条件</button></div>
     ${!mission?`<label for="mission-intent">任务类型</label><select id="mission-intent">${Object.entries(intents).map(([k,v])=>`<option value="${k}" ${k===intent?"selected":""}>${v}</option>`).join("")}</select><label for="mission-brief">这次要完成什么</label><textarea id="mission-brief" rows="7" maxlength="50000" placeholder="说明目标、首版范围和验收方式。已有文档可在建项时附带。">${esc(draft)}</textarea><p class="muted">项目来源和执行池沿用当前项目设置，保存后再检查执行条件。</p><button class="btn btn-primary" id="mission-save">保存并评估需求</button>`:
     `<div class="mission-status" role="status">${esc(labels[mission.state]||mission.state)}${mission.spec_rev_no?` · 规格第 ${mission.spec_rev_no} 版`:""}</div><p>${esc(mission.brief)}</p>
-    ${mission.route?`<p class="muted">${{greenfield:"全新项目",existing_local:"已有本机代码",existing_git:"已有 Git 仓库"}[mission.route.source_origin]} · ${mission.route.clarity_level==="READY_LITE"?"局部轻量交付":mission.route.clarity_level==="NEEDS_CLARIFICATION"?"有待确认的交付边界":"标准交付"} · 风险${{low:"低",medium:"中",high:"高"}[mission.assessment.risk]}</p><p>${esc(mission.assessment.rationale)}</p>${mission.route.limitation?`<p class="muted">${esc(mission.route.limitation)}</p>`:""}`:""}
-    ${mission.route && mission.actual_process && mission.actual_process!==mission.route.process_template?`<p class="muted">本次评估推荐的流程与当前项目不同。项目继续保留已锁定的审批流程，建议不会自动覆盖既有设置。</p>`:""}
+    ${showAssessment?`<p class="muted">${{greenfield:"全新项目",existing_local:"已有本机代码",existing_git:"已有 Git 仓库"}[mission.route.source_origin]} · ${mission.route.clarity_level==="READY_LITE"?"局部轻量交付":mission.route.clarity_level==="NEEDS_CLARIFICATION"?"有待确认的交付边界":"标准交付"} · 风险${{low:"低",medium:"中",high:"高"}[mission.assessment.risk]}</p><p>${esc(mission.assessment.rationale)}</p>${mission.route.limitation?`<p class="muted">${esc(mission.route.limitation)}</p>`:""}`:""}
+    ${showAssessment && mission.actual_process && mission.actual_process!==mission.route.process_template?`<p class="muted">本次评估推荐的流程与当前项目不同。项目继续保留已锁定的审批流程，建议不会自动覆盖既有设置。</p>`:""}
     ${mission.last_error||mission.blocker?`<p role="alert">${esc(mission.last_error||mission.blocker)}</p>`:""}
     ${blocking.map(field).join("")}${blocking.length?`<button class="btn btn-primary" id="mission-answers" ${run?"disabled":""}>确认回答并继续</button>`:""}
     ${defaults.length?`<details><summary>已采用 ${defaults.length} 项低风险默认值，可修改</summary>${defaults.map(field).join("")}</details>`:""}
@@ -49,9 +50,15 @@ export function renderMissions(data, refresh) {
     <div id="mission-checks" aria-live="polite"></div><div id="mission-answer-revision" aria-live="polite"></div>`;
   const showChecks=value=>{if(!active())return;$("mission-checks").innerHTML=`<p><strong>${value.ready?"派发前配置检查通过":"执行条件尚未满足，需求已保留"}</strong></p><ul>${value.checks.map(c=>`<li>${c.ok?"已确认":"待处理"}：${esc(c.message)}</li>`).join("")}</ul><p class="muted">${esc(value.verification)}</p>`;};
   if(evidence)showChecks(evidence);
-  const showDiff=()=>{if(lastDiff?.feature===feature)$("mission-answer-revision").innerHTML=`<details open><summary>回答已保存为新修订 ${lastDiff.revision}</summary><pre class="mission-document">${esc(lastDiff.diff)}</pre></details>`;};showDiff();
+  const showDiff=()=>{if(lastDiff?.feature===feature)$("mission-answer-revision").innerHTML=`<details open><summary>回答已保存，以下为本次变更</summary><pre class="mission-document">${esc(lastDiff.diff)}</pre></details>`;};showDiff();
   mount.querySelectorAll("[data-prerequisite]").forEach(el=>{el.value=evidenceDrafts.get(feature+":"+el.dataset.prerequisite)||"";el.addEventListener("input",()=>evidenceDrafts.set(feature+":"+el.dataset.prerequisite,el.value));});
-  const action=fn=>async ev=>{if(!active())return;ev.currentTarget.disabled=true;try{await fn();}catch(err){if(active())toast(err.message);}finally{if(active())ev.currentTarget.disabled=false;}};
+  const action=fn=>async ev=>{
+    const button=ev.currentTarget;
+    if(!active()||!button||button.disabled)return;
+    button.disabled=true;
+    try{await fn();}catch(err){if(active())toast(err.message);}
+    finally{if(active())button.disabled=false;}
+  };
   const proceed=async()=>{const result=await api(`/vernal-api/missions/${encodeURIComponent(feature)}/continue`,{method:"POST",body:JSON.stringify({expected_revision:mission.revision})});if(!active())return;evidence=result.preflight;await refresh();};
   $("mission-select").addEventListener("change",ev=>{selected=ev.target.value;drafts.clear();evidence=null;refresh();});
   $("mission-refresh").addEventListener("click",()=>refresh());
@@ -66,7 +73,14 @@ export function renderMissions(data, refresh) {
   $("mission-continue")?.addEventListener("click",action(proceed));
   mount.querySelectorAll("[data-question],[data-supplement]").forEach(el=>el.addEventListener("input",()=>{const id=Number(el.dataset.question||el.dataset.supplement);drafts.set(id,{answer:$("mission-answer-"+id).value,supplement:$("mission-supplement-"+id).value});}));
   const submit=async questions=>{
-    const result=await api(`/vernal-api/missions/${encodeURIComponent(feature)}/answers`,{method:"POST",body:JSON.stringify({expected_rev_id:mission.spec_rev_id,answers:questions.map(q=>({clarify_id:q.clarify_id,answer:$("mission-answer-"+q.clarify_id).value,supplement:$("mission-supplement-"+q.clarify_id).value}))})});
+    const answers=questions.map(q=>{
+      const answer=$("mission-answer-"+q.clarify_id).value;
+      const supplement=$("mission-supplement-"+q.clarify_id).value;
+      if(!answer.trim())throw new Error("请先回答："+q.question);
+      if(answer.length>10000||supplement.length>10000)throw new Error("回答和补充说明各不能超过 10000 字");
+      return {clarify_id:q.clarify_id,answer,supplement};
+    });
+    const result=await api(`/vernal-api/missions/${encodeURIComponent(feature)}/answers`,{method:"POST",body:JSON.stringify({expected_rev_id:mission.spec_rev_id,answers})});
     if(!active())return;evidence=result.preflight||null;drafts.clear();lastDiff={feature,revision:result.spec_rev_id,diff:result.diff};if(result.continuation_error)toast("回答已保存，后续评估尚未启动："+result.continuation_error);await refresh();
     if(getActiveProjectId()===pid && selected===feature)showDiff();
   };

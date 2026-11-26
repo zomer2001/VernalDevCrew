@@ -568,9 +568,12 @@ function renderImplementationStage(stage, state, liveProgress) {
   `;
 }
 
-function renderNextActionBanner(liveProgress) {
-  const na = liveProgress?.next_action;
+function renderNextActionBanner(liveProgress, state) {
+  let na = liveProgress?.next_action;
   if (!na) return "";
+  if (na.action_kind === "start_plan" && (state.specifications_enabled || state.mission_count)) {
+    na = {...na, label:"继续需求与交付", hint:"进入需求面板，确认待回答问题、执行条件和当前规格，再按审批流程继续。", action_kind:"continue_mission"};
+  }
   const cls =
     na.bucket === "waiting_approval"
       ? "warn"
@@ -583,7 +586,9 @@ function renderNextActionBanner(liveProgress) {
             : "";
   const whoBadge = na.who === "human" ? "下一步由你操作" : na.who === "system" ? "系统执行中" : "已结束";
   let cta = "";
-  if (na.action_kind === "approve_plan") {
+  if (na.action_kind === "continue_mission") {
+    cta = `<button type="button" class="btn btn-primary btn-sm" data-vdd-jump-view="council">继续需求交付</button>`;
+  } else if (na.action_kind === "approve_plan") {
     cta = `<button type="button" class="btn btn-primary btn-sm" data-vdd-approve-start="1">批准并启动研发</button>`;
   } else if (na.action_kind === "approve_gate" && na.run_id) {
     cta = `<button type="button" class="btn btn-primary btn-sm" data-vdd-run="${esc(na.run_id)}">前往审批节点 ↗</button>`;
@@ -757,7 +762,7 @@ export function renderStageDrilldown(state, liveProgress, opts = {}) {
     html = renderImplementationStage(stageObj, state, liveProgress);
   }
 
-  card.innerHTML = renderNextActionBanner(liveProgress) + html;
+  card.innerHTML = renderNextActionBanner(liveProgress, state) + html;
 
   card.querySelector("[data-vdd-approve-start]")?.addEventListener("click", async (e) => {
     const b = e.currentTarget;
