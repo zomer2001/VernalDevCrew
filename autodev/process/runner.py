@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any
 from autodev.db import Database, now_iso
 from autodev.models import MilestoneStatus, ProjectStatus, TaskStatus
 from autodev.process.model import GateDef, ProcessTemplate, StageDef, StageState, StageView
-from autodev.process.targets import DOCUMENT_GATES, document_target, target_is_current
+from autodev.process.targets import DOCUMENT_GATES, document_target, evaluate_gate_record, target_is_current
 
 if TYPE_CHECKING:
     from autodev.config import Settings, Workspace
@@ -130,10 +130,36 @@ def save_custom_template(ws: "Workspace", raw_yaml: str) -> ProcessTemplate:
 def _hydrate_gate_row(row: Any, db: Database | None = None) -> dict[str, Any]:
     d = dict(row)
     d["evidence"] = json.loads(d.pop("evidence_json", None) or "{}")
-    if db is not None and d["status"] in ("PENDING", "PASSED", "WAIVED") and not target_is_current(db, d):
-        d["decision_status"] = d.get("decision_status") or d["status"]
-        d["status"] = "STALE"
-        d["stale_reason"] = d.get("stale_reason") or "审批目标已变更、缺失或尚未归档"
+    if db is None:
+        return d
+    if d["status"] in ("PENDING", "PASSED", "WAIVED"):
+        ev = evaluate_gate_record(db, d)
+        d["content_current"] = ev["content_current"]
+        d["ready_for_decision"] = ev["ready_for_decision"]
+        d["can_approve"] = ev["can_approve"]
+        d["approval_valid"] = ev["approval_valid"]
+        d["blockers"] = ev["blockers"]
+        if ev["affected_paths"]:
+            d["affected_paths"] = ev["affected_paths"]
+        if not ev["content_current"]:
+            d["decision_status"] = d.get("decision_status") or d["status"]
+            d["status"] = "STALE"
+            d["stale_reason"] = d.get("stale_reason") or ev["stale_reason"] or "审批目标已变更、缺失或尚未归档"
+            d["can_approve"] = False
+            d["approval_valid"] = False
+        elif d["status"] in ("PASSED", "WAIVED") and not ev["approval_valid"]:
+            d["decision_status"] = d.get("decision_status") or d["status"]
+            d["can_approve"] = False
+    else:
+        d["content_current"] = d["status"] != "STALE"
+        d["ready_for_decision"] = False
+        d["can_approve"] = False
+        d["approval_valid"] = False
+        d["blockers"] = (
+            [{"code": "TARGET_CHANGED", "message": d.get("stale_reason") or "审批目标已变更", "feature_id": ""}]
+            if d["status"] == "STALE"
+            else []
+        )
     return d
 
 
@@ -239,7 +265,7 @@ def refresh_document_gates(db: Database) -> None:
 
 def is_gate_passed(db: Database, gate_id: str, scope_type: str, scope_id: str) -> bool:
     rec = latest_gate_record(db, gate_id, scope_type, scope_id)
-    return bool(rec and rec["status"] in ("PASSED", "WAIVED"))
+    return bool(rec and rec["status"] in ("PASSED", "WAIVED") and rec.get("approval_valid", True))
 
 
 def blocking_document_gates(db: Database, template: ProcessTemplate, milestone_id: str) -> list[str]:
@@ -331,8 +357,15 @@ def _decide_gate(
     if expected_sha is not None and expected_sha != cur.get("target_sha", ""):
         raise GateConflictError("审批内容版本已变更，请重新查看目标文档")
     latest = latest_gate_record(db, cur["gate_id"], cur["scope_type"], cur["scope_id"])
-    if latest is None or latest["record_id"] != record_id or not target_is_current(db, cur):
-        raise GateConflictError("审批目标已变更或尚未归档，请重新查看当前版本")
+    is_latest = latest is not None and latest["record_id"] == record_id
+    if not is_latest:
+        raise GateConflictError("审批目标已变更或已有新一轮评审，请重新查看当前版本")
+    ev = evaluate_gate_record(db, cur, is_latest=True)
+    if not ev["content_current"]:
+        raise GateConflictError(ev["stale_reason"] or "审批目标已变更或尚未归档，请重新查看当前版本")
+    if target_status in ("PASSED", "WAIVED") and not ev["ready_for_decision"]:
+        msg = ev["blockers"][0]["message"] if ev["blockers"] else "审批前置条件尚未满足，不能批准"
+        raise GateConflictError(msg)
 
     if expected_round is not None and int(cur["round"]) != int(expected_round):
         raise GateConflictError(f"门禁轮次已变更（当前第 {cur['round']} 轮，请求第 {expected_round} 轮）")
@@ -405,7 +438,11 @@ def _derive_single_stage(
         latest_by_scope[(rec["gate_id"], rec["scope_type"], rec["scope_id"])] = rec
 
     blocking_ids = {g.id for g in stage.gates if g.blocking}
-    pending_recs = [r for r in latest_by_scope.values() if r["status"] in ("PENDING", "STALE") and r["gate_id"] in blocking_ids]
+    pending_recs = [
+        r for r in latest_by_scope.values()
+        if r["gate_id"] in blocking_ids
+        and (r["status"] in ("PENDING", "STALE") or (r["status"] in ("PASSED", "WAIVED") and not r.get("approval_valid", True)))
+    ]
     failed_recs = [r for r in latest_by_scope.values() if r["status"] == "FAILED" and r["gate_id"] in blocking_ids]
 
     sid = stage.id
@@ -505,7 +542,7 @@ def _derive_single_stage(
 
 def is_gate_passed_in_map(latest_map: dict[tuple[str, str, str], dict[str, Any]], gate_id: str, scope_type: str, scope_id: str) -> bool:
     rec = latest_map.get((gate_id, scope_type, scope_id))
-    return bool(rec and rec["status"] in ("PASSED", "WAIVED"))
+    return bool(rec and rec["status"] in ("PASSED", "WAIVED") and rec.get("approval_valid", True))
 
 
 def stage_status(db: Database, ws: "Workspace", template: ProcessTemplate) -> list[StageView]:

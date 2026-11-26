@@ -19,6 +19,88 @@ const CSS_STATUS = {
   SKIPPED: "",
 };
 
+const BLOCKER_GUIDANCE = {
+  TARGET_CHANGED: { text: "文档已有新版本，请审阅当前版本", actionLabel: "查看当前文档", actionView: "council" },
+  TARGET_MISSING: { text: "审批目标文档尚未归档，请先生成或归档文档", actionLabel: "打开文档中心", actionView: "council" },
+  FILE_MISSING_OR_DRIFTED: { text: "受影响文档缺失或存在未归档外部改动，请先修订或恢复", actionLabel: "进入文档修订/恢复", actionView: "council" },
+  OPEN_QUESTIONS: { text: "还有影响交付的关键问题未回答", actionLabel: "前往回答问题", actionView: "council" },
+  ASSESSMENT_PENDING: { text: "回答已保存，请重新评估整理规格后再审批", actionLabel: "前往需求面板", actionView: "council" },
+  ASSESSMENT_RUNNING: { text: "回答已保存，正在重新整理规格", actionLabel: "", actionView: "" },
+  CHECKLIST_RUNNING: { text: "规格质量检查正在进行，完成后可审阅批准", actionLabel: "", actionView: "" },
+  MISSION_RUNNING: { text: "当前需求流程正在运行，完成后可审阅批准", actionLabel: "", actionView: "" },
+  CHECKLIST_MISSING: { text: "当前版本尚未完成规格质量检查", actionLabel: "继续质量检查", actionView: "council" },
+  CHECKLIST_STALE: { text: "质量检查基于旧版本规格，请重新检查", actionLabel: "重新执行检查", actionView: "council" },
+  CHECKLIST_FINDINGS_MISSING: { text: "质量检查缺少结构化发现记录，请重新检查", actionLabel: "重新执行检查", actionView: "council" },
+  CHECKLIST_CRITICAL_FINDINGS: { text: "规格质量检查存在严重问题，请先修订规格", actionLabel: "查看发现并修订", actionView: "council" },
+  PREREQUISITES_UNVERIFIED: { text: "交付前置条件尚未提供核验依据", actionLabel: "补充核验依据", actionView: "council" },
+  CONSTITUTION_MISSING: { text: "尚未建立项目宪章", actionLabel: "前往需求面板", actionView: "council" },
+  PERMISSION_DENIED: { text: "材料已齐全，但当前账号缺少审批角色权限", actionLabel: "", actionView: "" },
+};
+
+export function describeGateState(rec) {
+  const blockers = Array.isArray(rec.blockers) ? rec.blockers : [];
+  const primary = blockers[0] || null;
+  const contentCurrent = rec.content_current !== undefined ? Boolean(rec.content_current) : rec.status !== "STALE";
+  const readyForDecision = rec.ready_for_decision !== undefined ? Boolean(rec.ready_for_decision) : rec.status === "PENDING";
+  const canApprove = rec.can_approve !== undefined ? Boolean(rec.can_approve) : rec.status === "PENDING" && contentCurrent && readyForDecision;
+  const canWaive = rec.can_waive !== undefined ? Boolean(rec.can_waive) : canApprove;
+  if (primary) {
+    const guide = BLOCKER_GUIDANCE[primary.code] || { text: primary.message || "尚不满足审批条件", actionLabel: "", actionView: "" };
+    const featureNote = primary.feature_id ? ` [${primary.feature_id}]` : "";
+    return {
+      contentCurrent,
+      readyForDecision,
+      canApprove,
+      canWaive,
+      code: primary.code || "",
+      detail: `${primary.message || guide.text}${featureNote && !(primary.message || "").includes(primary.feature_id) ? featureNote : ""}`,
+      actionLabel: guide.actionLabel,
+      actionView: guide.actionView,
+    };
+  }
+  if (!contentCurrent || rec.status === "STALE") {
+    return {
+      contentCurrent: false,
+      readyForDecision: false,
+      canApprove: false,
+      canWaive: false,
+      code: "TARGET_CHANGED",
+      detail: rec.stale_reason || "文档已有新版本，请审阅当前版本",
+      actionLabel: "进入文档修订/恢复",
+      actionView: "council",
+    };
+  }
+  return {
+    contentCurrent: true,
+    readyForDecision: true,
+    canApprove,
+    canWaive,
+    code: "READY",
+    detail: "当前版本已满足审批前置条件，可审阅批准",
+    actionLabel: "",
+    actionView: "",
+  };
+}
+
+export function renderPendingGateBanner(pendingGate) {
+  const rec = pendingGate.rec;
+  const info = describeGateState(rec);
+  const tagText = !info.contentCurrent ? "版本已变更" : info.canApprove ? "待审阅批准" : "等待前置条件";
+  const actionBtn = info.actionLabel && info.actionView
+    ? `<button type="button" class="btn btn-sm" data-gate-nav="${esc(info.actionView)}">${esc(info.actionLabel)}</button>`
+    : "";
+  return `<div class="inline-form" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)" data-gate-blocker-code="${esc(info.code)}">
+          <span class="tag warn">${esc(tagText)}</span>
+          <strong>${esc(pendingGate.gate.name)}</strong>
+          <span class="muted" style="font-size:12px">(${esc(rec.scope_type)}:${esc(rec.scope_id)})</span>
+          <span class="muted">评审版本 v${rec.target_version || 0} · ${esc(info.detail)}</span>
+          ${actionBtn}
+          <input id="quick-gate-comment" type="text" placeholder="签署评审意见（豁免必填）…" />
+          <button type="button" class="btn btn-primary btn-sm" ${info.canApprove ? "" : "disabled"} data-gate-decide="pass" data-gate-rec="${rec.record_id}" data-gate-round="${rec.round}" data-gate-sha="${esc(rec.target_sha || "")}">批准放行</button>
+          <button type="button" class="btn btn-sm" ${info.canWaive ? "" : "disabled"} data-gate-decide="waive" data-gate-rec="${rec.record_id}" data-gate-round="${rec.round}" data-gate-sha="${esc(rec.target_sha || "")}">记录豁免</button>
+        </div>`;
+}
+
 async function loadAndRenderPipeline(switchView, refresh) {
   const el = $("pipeline-stepper");
   if (!el) return;
@@ -45,7 +127,7 @@ async function loadAndRenderPipeline(switchView, refresh) {
           if (!latest.has(key) || latest.get(key).round < rec.round) latest.set(key, rec);
         }
         for (const rec of latest.values()) {
-          if (["PENDING", "STALE"].includes(rec.status)) {
+          if (["PENDING", "STALE"].includes(rec.status) || (["PASSED", "WAIVED"].includes(rec.status) && rec.approval_valid === false)) {
             pendingGates.push({ stage: s, gate: g, rec });
           }
         }
@@ -63,17 +145,7 @@ async function loadAndRenderPipeline(switchView, refresh) {
       })
       .join("");
 
-    const pendingBanner = pendingGates.length
-      ? `<div class="inline-form" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-          <span class="tag warn">当前阻塞门禁</span>
-          <strong>${esc(pendingGates[0].gate.name)}</strong>
-          <span class="muted" style="font-size:12px">(${esc(pendingGates[0].rec.scope_type)}:${esc(pendingGates[0].rec.scope_id)})</span>
-          <span class="muted">评审版本 v${pendingGates[0].rec.target_version || 0}${pendingGates[0].rec.status === "STALE" ? "，内容已变更，请先在文档中心归档或重新生成" : ""}</span>
-          <input id="quick-gate-comment" type="text" placeholder="签署评审意见（豁免必填）…" />
-          <button type="button" class="btn btn-primary btn-sm" ${pendingGates[0].rec.status === "STALE" ? "disabled" : ""} data-gate-decide="pass" data-gate-rec="${pendingGates[0].rec.record_id}" data-gate-round="${pendingGates[0].rec.round}" data-gate-sha="${esc(pendingGates[0].rec.target_sha || "")}">批准放行</button>
-          <button type="button" class="btn btn-sm" ${pendingGates[0].rec.status === "STALE" ? "disabled" : ""} data-gate-decide="waive" data-gate-rec="${pendingGates[0].rec.record_id}" data-gate-round="${pendingGates[0].rec.round}" data-gate-sha="${esc(pendingGates[0].rec.target_sha || "")}">记录豁免</button>
-        </div>`
-      : "";
+    const pendingBanner = pendingGates.length ? renderPendingGateBanner(pendingGates[0]) : "";
 
     el.innerHTML = `
       <div class="pipeline-stepper-head">
@@ -94,6 +166,12 @@ async function loadAndRenderPipeline(switchView, refresh) {
     });
 
     setProcessData(data);
+
+    el.querySelectorAll("[data-gate-nav]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        switchView?.(btn.dataset.gateNav);
+      });
+    });
 
     el.querySelectorAll("[data-gate-decide]").forEach((btn) => {
       btn.addEventListener("click", async () => {

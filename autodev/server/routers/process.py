@@ -37,12 +37,57 @@ class ProcessTemplateUpdateRequest(BaseModel):
     actor: str = "owner"
 
 
+def _overlay_gate_permissions(eng: Any, actor: str, pid: str, tpl: Any, rec: dict[str, Any]) -> dict[str, Any]:
+    """Overlay requester RBAC permissions onto material/process gate readiness without mutating DB."""
+    from autodev.governance import check_role_permission
+
+    out = dict(rec)
+    gate_def = next((g for s in tpl.stages for g in s.gates if g.id == out.get("gate_id")), None)
+    allowed_roles = tuple(
+        gate_def.approver_roles if (gate_def and gate_def.approver_roles) else ("admin", "architect", "reviewer")
+    )
+    out["required_roles"] = list(allowed_roles)
+
+    try:
+        check_role_permission(eng.db, actor, allowed_roles, project=pid)
+        has_approve_role = True
+    except PermissionError:
+        has_approve_role = False
+
+    try:
+        check_role_permission(eng.db, actor, ("admin",), project=pid)
+        has_waive_role = True
+    except PermissionError:
+        has_waive_role = False
+
+    material_ready = bool(out.get("ready_for_decision", out.get("status") == "PENDING"))
+    is_pending = out.get("status") == "PENDING"
+    out["can_approve"] = is_pending and material_ready and has_approve_role
+    out["can_waive"] = is_pending and material_ready and has_waive_role
+    blockers = list(out.get("blockers") or [])
+    if is_pending and material_ready and not has_approve_role:
+        blockers.append(
+            {
+                "code": "PERMISSION_DENIED",
+                "message": f"当前版本材料已齐全，但需要 {', '.join(allowed_roles)} 角色权限方可批准",
+                "feature_id": "",
+            }
+        )
+    out["blockers"] = blockers
+    return out
+
+
 @router.get("/vernal-api/process")
 async def api_get_process(request: Request) -> dict[str, Any]:
     slot = get_ctx(request).active_slot(request)
     eng = slot.engine
     tpl = load_template(eng.ws, eng.settings)
+    actor = effective_actor()
+    pid = eng.settings.loopforge_project_id or eng.ws.root.name
     stages = [s.model_dump() for s in stage_status(eng.db, eng.ws, tpl)]
+    for stage in stages:
+        for gate in stage.get("gates") or []:
+            gate["records"] = [_overlay_gate_permissions(eng, actor, pid, tpl, r) for r in gate.get("records") or []]
     needs_you = sum(int(s.get("pending_count") or 0) for s in stages if s.get("status") == "WAITING_GATE")
     return {
         "template": tpl.model_dump(),
@@ -55,7 +100,11 @@ async def api_get_process(request: Request) -> dict[str, Any]:
 @router.get("/vernal-api/gates")
 async def api_list_gates(request: Request, status: str = "") -> list[dict[str, Any]]:
     eng = get_ctx(request).active_slot(request).engine
-    return list_gate_records(eng.db, status=status.strip().upper() or None)
+    tpl = load_template(eng.ws, eng.settings)
+    actor = effective_actor()
+    pid = eng.settings.loopforge_project_id or eng.ws.root.name
+    rows = list_gate_records(eng.db, status=status.strip().upper() or None)
+    return [_overlay_gate_permissions(eng, actor, pid, tpl, r) for r in rows]
 
 
 @router.post("/vernal-api/gates/{record_id}/decide")

@@ -209,3 +209,150 @@ def test_standard_template_srs_and_detailed_design_hooks_and_stage_derivation(tm
         assert views_after["integration_delivery"] == "WAITING_GATE"
     finally:
         eng.db.close()
+
+
+def test_r3_distinguishes_content_currency_from_preconditions_and_blocks_bypass(tmp_path: Path) -> None:
+    """R3: checklist running, open questions, critical findings, missing metadata, prerequisites, RBAC, multi-feature."""
+    from autodev.config import Settings
+    from autodev.db import Database
+    from autodev.governance.rbac import upsert_member
+    from autodev.models import ClarificationItem
+    from autodev.process.runner import latest_gate_record, list_gate_records
+    from autodev.speckit import missions, service, triage
+    from test_speckit import BRIEF, SPEC, save
+
+    ws = init_workspace(tmp_path / "r3-gates", name="R3Gates", collaboration_mode="files")
+    settings = Settings(
+        collaboration_mode="files",
+        runtime_backend="loopforge",
+        loopforge_project_id="r3-proj",
+        loopforge_token="tok",
+        loopforge_url="http://lf.test",
+    )
+    eng = Engine(ws, settings=settings, harness=MockHarness())
+    try:
+        service.enable(eng, "vernal-core")
+        save(eng, "constitution", "# 项目宪章\n交付须有验收依据。\n")
+        mission = missions.save(eng, "001-alpha", "保存回答功能", "feature", 0, actor="owner")
+        save(eng, "spec", SPEC, "001-alpha")
+        assessment = triage.Assessment(
+            goal_clear=True,
+            scope_clear=True,
+            acceptance_clear=True,
+            local_impact=True,
+            change_type="feature",
+            risk="low",
+            rationale="目标清晰",
+            questions=[],
+            prerequisites=[],
+            experience_items=[],
+            proposed_spec=SPEC,
+            handoff_brief=BRIEF,
+        )
+        mission.update(
+            assessment=assessment.model_dump(),
+            route=triage.recommendation(assessment, "greenfield"),
+            assessed_input=triage.input_key(eng, mission),
+        )
+        missions._store(eng, mission)
+
+        # 1. Checklist running on the SAME spec -> status stays PENDING, content_current=True, can_approve=False, CHECKLIST_RUNNING
+        token = missions.reserve(eng, "001-alpha", mission["revision"])
+        missions._update_lease_step(eng, token, "checklist")
+        gate_before_rounds = len(list_gate_records(eng.db, gate_id="srs_approval"))
+        client = TestClient(create_app(eng, proxy_transport=_offline_transport()))
+        gates_running = client.get("/vernal-api/gates").json()
+        srs = [g for g in gates_running if g["gate_id"] == "srs_approval"][-1]
+        assert srs["status"] == "PENDING"
+        assert srs["content_current"] is True
+        assert srs["ready_for_decision"] is False
+        assert srs["can_approve"] is False
+        assert any(b["code"] == "CHECKLIST_RUNNING" for b in srs["blockers"])
+        # Read-only status query must not create extra rounds
+        assert len(list_gate_records(eng.db, gate_id="srs_approval")) == gate_before_rounds
+        # Direct HTTP POST while checklist running must be rejected with 409
+        r_running = client.post(
+            f"/vernal-api/gates/{srs['record_id']}/decide",
+            json={"decision": "pass", "expected_round": srs["round"], "expected_sha": srs["target_sha"]},
+        )
+        assert r_running.status_code == 409
+
+        # 2. Release lease; checklist exists with MISSING findings metadata -> cannot be treated as no issues
+        missions.release(eng, token)
+        check = save(eng, "checklist", "# 质量检查\n- [ ] CHK001 验收可测\n", "001-alpha")
+        assert len(list_gate_records(eng.db, gate_id="srs_approval")) == gate_before_rounds
+        srs_missing_meta = [g for g in client.get("/vernal-api/gates").json() if g["gate_id"] == "srs_approval"][-1]
+        assert srs_missing_meta["status"] == "PENDING" and srs_missing_meta["content_current"] is True
+        assert any(b["code"] == "CHECKLIST_FINDINGS_MISSING" for b in srs_missing_meta["blockers"])
+        assert client.post(
+            f"/vernal-api/gates/{srs_missing_meta['record_id']}/decide",
+            json={"decision": "pass", "expected_round": srs_missing_meta["round"], "expected_sha": srs_missing_meta["target_sha"]},
+        ).status_code == 409
+
+        # 3. CRITICAL finding -> still PENDING + content_current=True, blocked by CHECKLIST_CRITICAL_FINDINGS, direct POST 409
+        eng.db.meta_set(
+            f"speckit.analysis:{check['rev_id']}",
+            json.dumps([{"severity": "CRITICAL", "message": "缺少核心验收", "requirement_ids": ["REQ-001"]}], ensure_ascii=False),
+        )
+        srs_crit = [g for g in client.get("/vernal-api/gates").json() if g["gate_id"] == "srs_approval"][-1]
+        assert srs_crit["status"] == "PENDING" and srs_crit["content_current"] is True and srs_crit["can_approve"] is False
+        assert any(b["code"] == "CHECKLIST_CRITICAL_FINDINGS" for b in srs_crit["blockers"])
+        assert client.post(
+            f"/vernal-api/gates/{srs_crit['record_id']}/decide",
+            json={"decision": "pass", "expected_round": srs_crit["round"], "expected_sha": srs_crit["target_sha"]},
+        ).status_code == 409
+
+        # 4. Warning-only findings + multi-feature: second feature with OPEN question blocks project approval and names the feature
+        eng.db.meta_set(
+            f"speckit.analysis:{check['rev_id']}",
+            json.dumps([{"severity": "WARNING", "message": "建议补充提示", "requirement_ids": ["REQ-001"]}], ensure_ascii=False),
+        )
+        rev2 = save(eng, "spec", SPEC, "002-beta")
+        service.add_clarifications(
+            eng,
+            "002-beta",
+            rev2["rev_id"],
+            [ClarificationItem(question_key="Q-01", category="scope", severity="BLOCKING", question="是否导出？", options=["是", "否"])],
+            actor="owner",
+        )
+        srs_multi = [g for g in client.get("/vernal-api/gates").json() if g["gate_id"] == "srs_approval"][-1]
+        assert srs_multi["status"] == "PENDING" and srs_multi["content_current"] is True and srs_multi["can_approve"] is False
+        assert any(b["code"] == "OPEN_QUESTIONS" and b["feature_id"] == "002-beta" for b in srs_multi["blockers"])
+
+        # Answer 002-beta question -> now material is ready, test RBAC viewer permission overlay
+        q_beta = service.list_clarifications(eng, "002-beta")[0]
+        service.answer_clarification(eng, q_beta["clarify_id"], "否", expected_rev_id=rev2["rev_id"], actor="owner")
+        upsert_member(eng.db, "owner", "viewer", project="r3-proj")
+        srs_viewer = [g for g in client.get("/vernal-api/gates").json() if g["gate_id"] == "srs_approval"][-1]
+        assert srs_viewer["status"] == "PENDING" and srs_viewer["content_current"] is True
+        assert srs_viewer["ready_for_decision"] is True
+        assert srs_viewer["can_approve"] is False
+        assert any(b["code"] == "PERMISSION_DENIED" for b in srs_viewer["blockers"])
+        assert client.post(
+            f"/vernal-api/gates/{srs_viewer['record_id']}/decide",
+            json={"decision": "pass", "expected_round": srs_viewer["round"], "expected_sha": srs_viewer["target_sha"]},
+        ).status_code == 403
+
+        # Grant admin role -> same round succeeds without regenerating documents, and persists across DB reopen
+        upsert_member(eng.db, "owner", "admin", project="r3-proj")
+        srs_ready = [g for g in client.get("/vernal-api/gates").json() if g["gate_id"] == "srs_approval"][-1]
+        assert srs_ready["can_approve"] is True and srs_ready["can_waive"] is True
+        ok_resp = client.post(
+            f"/vernal-api/gates/{srs_ready['record_id']}/decide",
+            json={"decision": "pass", "comment": "审阅通过", "expected_round": srs_ready["round"], "expected_sha": srs_ready["target_sha"]},
+        )
+        assert ok_resp.status_code == 200
+        reopened = Database(eng.ws.db_path)
+        try:
+            rec_reopen = latest_gate_record(reopened, "srs_approval", "project", "project")
+            assert rec_reopen["status"] == "PASSED" and rec_reopen["approval_valid"] is True
+        finally:
+            reopened.close()
+
+        # External file edit invalidates approval and rejects stale approval submission
+        (eng.ws.root / "specs/001-alpha/spec.md").write_text("# tampered externally\n", "utf-8")
+        srs_drift = [g for g in client.get("/vernal-api/gates").json() if g["gate_id"] == "srs_approval"][-1]
+        assert srs_drift["status"] == "STALE" and srs_drift["content_current"] is False
+        assert any(b["code"] == "FILE_MISSING_OR_DRIFTED" for b in srs_drift["blockers"])
+    finally:
+        eng.db.close()

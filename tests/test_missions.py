@@ -285,3 +285,24 @@ def test_guided_launcher_saves_mission_without_starting_legacy_council(tmp_path)
                 assert data["missions"][0]["brief"]=="保存回答" and data["missions"][0]["state"]=="NEEDS_ASSESSMENT"
                 assert not data["running"] and not data["enabled"]
     finally:engine.db.close()
+
+
+def test_mission_view_does_not_claim_ready_when_checklist_has_critical_or_missing_metadata(project, monkeypatch):
+    responses(project, monkeypatch, [assessed()])
+    missions.save(project, "001-save", "保存回答", "feature", 0, actor="owner")
+    advance(project)
+    check = service.latest(project, "001-save", "checklist")
+    assert missions.view(project, missions.get(project, "001-save"))["state"] == "WAITING_APPROVAL"
+
+    project.db.meta_set(
+        f"speckit.analysis:{check['rev_id']}",
+        json.dumps([{"severity": "CRITICAL", "message": "验收不可测", "requirement_ids": ["REQ-001"]}], ensure_ascii=False),
+    )
+    v_crit = missions.view(project, missions.get(project, "001-save"))
+    assert v_crit["state"] == "CHECKLIST_BLOCKED"
+    assert any(b["code"] == "CHECKLIST_CRITICAL_FINDINGS" for b in v_crit["approval_blockers"])
+
+    project.db.meta_set(f"speckit.analysis:{check['rev_id']}", None)
+    v_missing = missions.view(project, missions.get(project, "001-save"))
+    assert v_missing["state"] == "CHECKLIST_BLOCKED"
+    assert any(b["code"] == "CHECKLIST_FINDINGS_MISSING" for b in v_missing["approval_blockers"])

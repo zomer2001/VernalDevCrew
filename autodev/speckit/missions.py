@@ -74,23 +74,124 @@ def assessment_current(engine, mission) -> bool:
     return bool(mission.get("assessment") and mission.get("assessed_input") == triage.input_key(engine, mission))
 
 
-def assert_ready_for_approval(engine):
-    for mission in all_missions(engine):
-        if not service.latest(engine, mission["feature_id"]):
+def approval_readiness(engine, *, feature_id: str | None = None) -> dict:
+    """Read-only approval precondition evaluation returning structured blockers without recursion."""
+    blockers: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(code: str, message: str, fid: str = "") -> None:
+        key = (code, fid)
+        if key not in seen:
+            seen.add(key)
+            blockers.append({"code": code, "message": message, "feature_id": fid})
+
+    # 1. Active mission lease or in-flight native dispatch blocks new approvals.
+    raw_lease = engine.db.meta_get("mission.lease")
+    if raw_lease:
+        try:
+            lease = json.loads(raw_lease)
+        except ValueError:
+            lease = {}
+        lease_feature = str(lease.get("feature") or "")
+        lease_step = str(lease.get("step") or "")
+        if not feature_id or not lease_feature or lease_feature == feature_id:
+            if lease_step == "checklist":
+                add("CHECKLIST_RUNNING", "规格质量检查正在进行，完成后可审阅批准", lease_feature)
+            elif lease_step in ("intake", "constitution"):
+                add("ASSESSMENT_RUNNING", "回答已保存，正在重新整理规格", lease_feature)
+            else:
+                add("MISSION_RUNNING", "当前需求流程仍在执行，完成后可审阅批准", lease_feature)
+
+    active_dispatches = engine.db._query(
+        "SELECT task_id, command_key FROM dispatch_records WHERE state IN ('DISPATCHING','QUEUED','RUNNING','NEEDS_CONFIRMATION')"
+    )
+    if active_dispatches and not raw_lease:
+        cmds = " ".join(f"{r['task_id'] or ''} {r['command_key'] or ''}" for r in active_dispatches)
+        if "checklist" in cmds:
+            add("CHECKLIST_RUNNING", "规格质量检查正在进行，完成后可审阅批准", feature_id or "")
+        elif "intake" in cmds:
+            add("ASSESSMENT_RUNNING", "需求评估正在进行，完成后可审阅批准", feature_id or "")
+        else:
+            add("MISSION_RUNNING", "仍有原生执行未结束或待确认，请核对后再审批", feature_id or "")
+
+    # 2. Constitution and blocking clarifications across Spec Kit features.
+    if service.enabled(engine):
+        constitution = service.latest(engine, "project", "constitution")
+        if not constitution:
+            add("CONSTITUTION_MISSING", "尚未建立项目宪章，不能批准规格", "project")
+        else:
+            try:
+                service.assert_source_current(engine, constitution)
+            except (ValueError, OSError):
+                add("FILE_MISSING_OR_DRIFTED", "项目宪章文件缺失或存在未归档改动，请先恢复或保存修订", "project")
+
+        q_sql = "SELECT feature_id, question_key FROM clarifications WHERE severity='BLOCKING' AND status='OPEN'"
+        q_params: tuple = ()
+        if feature_id:
+            q_sql += " AND feature_id=?"
+            q_params = (feature_id,)
+        open_qs = engine.db._query(q_sql + " ORDER BY feature_id, clarify_id", q_params)
+        by_feature: dict[str, list[str]] = {}
+        for row in open_qs:
+            by_feature.setdefault(str(row["feature_id"]), []).append(str(row["question_key"]))
+        for fid, keys in by_feature.items():
+            add("OPEN_QUESTIONS", f"功能 {fid} 还有影响交付的关键问题未回答（{', '.join(keys)}）", fid)
+
+    # 3. Mission-level assessment, prerequisites, and checklist readiness.
+    missions_list = [m for m in all_missions(engine) if not feature_id or m["feature_id"] == feature_id]
+    for mission in missions_list:
+        fid = mission["feature_id"]
+        spec_rev = service.latest(engine, fid)
+        if not spec_rev:
             continue
-        if not assessment_current(engine, mission):
-            raise service.SpecConflictError("需求回答或输入已变化，请先重新评估后审批")
-        feature = mission["feature_id"]
-        if not _source_current(engine, feature, "checklist"):
-            raise service.SpecConflictError("当前规格质量检查尚未完成")
-        check = service.latest(engine, feature, "checklist")
-        findings = engine.db.meta_get(f"speckit.analysis:{check['rev_id']}")
-        if findings is None or any(f["severity"] == "CRITICAL" for f in json.loads(findings)):
-            raise service.SpecConflictError("规格质量检查仍有严重问题，请修订后重新检查")
+        try:
+            service.assert_source_current(engine, spec_rev)
+        except (ValueError, OSError):
+            add("FILE_MISSING_OR_DRIFTED", f"功能 {fid} 的规格文件缺失或存在未归档改动，请先修订或恢复", fid)
+            continue
+        try:
+            curr_assess = assessment_current(engine, mission)
+        except (ValueError, OSError):
+            add("FILE_MISSING_OR_DRIFTED", f"功能 {fid} 的来源文件与已发布修订不一致，请先恢复或保存", fid)
+            continue
+        if not curr_assess:
+            add("ASSESSMENT_PENDING", f"功能 {fid} 的回答或需求输入已变化，请先重新评估整理规格后再审批", fid)
         if mission.get("prerequisites"):
-            unresolved = [p for p in mission["prerequisites"] if not mission.get("prerequisite_evidence", {}).get(p["key"])]
+            unresolved = [p["key"] for p in mission["prerequisites"] if not mission.get("prerequisite_evidence", {}).get(p["key"])]
             if unresolved:
-                raise service.SpecConflictError("交付前置条件尚未确认，不能批准开工")
+                add("PREREQUISITES_UNVERIFIED", f"功能 {fid} 的交付前置条件尚未提供核验依据（{', '.join(unresolved)}）", fid)
+        check = service.latest(engine, fid, "checklist")
+        if not check:
+            add("CHECKLIST_MISSING", f"功能 {fid} 当前版本尚未完成规格质量检查", fid)
+            continue
+        try:
+            checklist_curr = _source_current(engine, fid, "checklist")
+        except (ValueError, OSError):
+            add("FILE_MISSING_OR_DRIFTED", f"功能 {fid} 的质量检查文件缺失或存在未归档改动", fid)
+            continue
+        if not checklist_curr:
+            add("CHECKLIST_STALE", f"功能 {fid} 的质量检查基于旧版本规格，请重新执行质量检查", fid)
+            continue
+        raw_findings = engine.db.meta_get(f"speckit.analysis:{check['rev_id']}")
+        if raw_findings is None:
+            add("CHECKLIST_FINDINGS_MISSING", f"功能 {fid} 的质量检查缺少结构化发现记录，不能视为无问题", fid)
+            continue
+        try:
+            parsed_findings = json.loads(raw_findings)
+        except ValueError:
+            add("CHECKLIST_FINDINGS_MISSING", f"功能 {fid} 的质量检查发现记录损坏，请重新检查", fid)
+            continue
+        criticals = [f for f in parsed_findings if isinstance(f, dict) and f.get("severity") == "CRITICAL"]
+        if criticals:
+            add("CHECKLIST_CRITICAL_FINDINGS", f"功能 {fid} 的规格质量检查存在 {len(criticals)} 项严重问题（CRITICAL），请修订后重新检查", fid)
+
+    return {"ready": not blockers, "blockers": blockers}
+
+
+def assert_ready_for_approval(engine):
+    readiness = approval_readiness(engine)
+    if not readiness["ready"]:
+        raise service.SpecConflictError(readiness["blockers"][0]["message"])
 
 
 def view(engine, mission) -> dict:
@@ -99,6 +200,9 @@ def view(engine, mission) -> dict:
     result = {**mission, "spec_rev_id": (rev or {}).get("rev_id", 0), "spec_rev_no": (rev or {}).get("rev_no", 0),
               "questions": service.list_clarifications(engine, feature), "state": "NEEDS_ASSESSMENT"}
     result["prerequisites"] = [p for p in mission.get("prerequisites", []) if not mission.get("prerequisite_evidence", {}).get(p["key"])]
+    readiness = approval_readiness(engine, feature_id=feature)
+    result["approval_blockers"] = readiness["blockers"]
+    blocker_codes = {b["code"] for b in readiness["blockers"]}
     try:
         if any(q["status"] == "OPEN" and q["severity"] == "BLOCKING" for q in result["questions"]):
             result["state"] = "WAITING_ANSWERS"
@@ -107,6 +211,10 @@ def view(engine, mission) -> dict:
                 result["state"] = "WAITING_PREREQUISITES"
             elif not _source_current(engine, feature, "checklist"):
                 result["state"] = "NEEDS_CHECKLIST"
+            elif blocker_codes & {"CHECKLIST_CRITICAL_FINDINGS", "CHECKLIST_FINDINGS_MISSING"}:
+                result["state"] = "CHECKLIST_BLOCKED"
+                first = next(b for b in readiness["blockers"] if b["code"] in {"CHECKLIST_CRITICAL_FINDINGS", "CHECKLIST_FINDINGS_MISSING"})
+                result["blocker"] = first["message"]
             elif not is_gate_passed(engine.db, "srs_approval", "project", "project"):
                 result["state"] = "WAITING_APPROVAL"
             elif not _source_current(engine, feature, "analyze"):
@@ -140,6 +248,19 @@ def reserve(engine, feature, expected_revision):
         token = uuid4().hex
         engine.db.meta_set("mission.lease", json.dumps({"token": token, "feature": feature, "started_at": now_iso()}))
         return token
+
+
+def _update_lease_step(engine, token: str, step: str) -> None:
+    raw = engine.db.meta_get("mission.lease")
+    if not raw:
+        return
+    try:
+        lease = json.loads(raw)
+    except ValueError:
+        return
+    if lease.get("token") == token:
+        lease["step"] = step
+        engine.db.meta_set("mission.lease", json.dumps(lease, ensure_ascii=False))
 
 
 def release(engine, token):
@@ -206,6 +327,7 @@ async def advance(engine, feature, token, *, actor):
             if checkpoint.get("input") == key:
                 assessment = triage.Assessment.model_validate(checkpoint["result"])
             else:
+                _update_lease_step(engine, token, "intake")
                 assessment = await triage.assess(engine, mission, actor=actor)
                 mission["assessment_checkpoint"] = {"input": key, "result": assessment.model_dump()}
                 _store(engine, mission)
@@ -215,6 +337,7 @@ async def advance(engine, feature, token, *, actor):
                 service.enable(engine, route["available_preset"], actor=actor)
             lock, _ = assets.load_assets(engine)
             if not service.latest(engine, "project", "constitution"):
+                _update_lease_step(engine, token, "constitution")
                 await adapter.run_step(engine, feature, "constitution", lock["preset_id"], instructions=mission["brief"], actor=actor)
                 if triage.input_key(engine, mission, constitution_rev_id=0) != key:
                     raise service.SpecConflictError("生成项目约束期间输入已变化，请重新评估")
@@ -255,15 +378,20 @@ async def advance(engine, feature, token, *, actor):
         lock, _ = assets.load_assets(engine)
         instructions = mission["brief"] + "\n" + ("采用轻量规格与方案，最多两个工作包，免圆桌和独立详设。" if mission["route"]["clarity_level"] == "READY_LITE" else "保留标准流程门禁。")
         if not _source_current(engine, feature, "checklist"):
+            _update_lease_step(engine, token, "checklist")
             await adapter.run_step(engine, feature, "checklist", lock["preset_id"], instructions=instructions, actor=actor)
         check = service.latest(engine, feature, "checklist")
-        findings = json.loads(engine.db.meta_get(f"speckit.analysis:{check['rev_id']}") or "[]")
+        raw_findings = engine.db.meta_get(f"speckit.analysis:{check['rev_id']}")
+        if raw_findings is None:
+            raise ValueError("规格质量检查缺少发现元数据，不能视为无问题")
+        findings = json.loads(raw_findings)
         if any(f["severity"] == "CRITICAL" for f in findings):
             raise ValueError("规格质量检查发现严重问题，请在高级规格修订中修正，再继续")
         if not is_gate_passed(engine.db, "srs_approval", "project", "project"):
             return
         for kind in ("plan", "tasks", "analyze"):
             if not _source_current(engine, feature, kind):
+                _update_lease_step(engine, token, kind)
                 await adapter.run_step(engine, feature, kind, lock["preset_id"], instructions=instructions, actor=actor)
         compiler.compile_tasks(engine, feature)
     except (Exception, asyncio.CancelledError) as exc:

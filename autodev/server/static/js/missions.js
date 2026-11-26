@@ -1,6 +1,6 @@
 import { $, api, esc, toast, getActiveProjectId, root } from "./api.js";
 
-const labels = {NEEDS_ASSESSMENT:"待评估需求",WAITING_ANSWERS:"请确认以下关键问题",WAITING_PREREQUISITES:"先完成交付前置条件",NEEDS_CHECKLIST:"待检查规格质量",WAITING_APPROVAL:"规格已准备好，请审阅批准",NEEDS_PLAN:"需求已批准，可继续形成实施方案",READY_TO_PUBLISH:"工作包已准备好",PUBLISHED:"已纳入研发计划",RUNNING:"正在处理需求"};
+const labels = {NEEDS_ASSESSMENT:"待评估需求",WAITING_ANSWERS:"请确认以下关键问题",WAITING_PREREQUISITES:"先完成交付前置条件",NEEDS_CHECKLIST:"待检查规格质量",CHECKLIST_BLOCKED:"规格质量检查未通过，请先修订规格",WAITING_APPROVAL:"规格已准备好，请审阅批准",NEEDS_PLAN:"需求已批准，可继续形成实施方案",READY_TO_PUBLISH:"工作包已准备好",PUBLISHED:"已纳入研发计划",RUNNING:"正在处理需求"};
 const intents = {new_system:"全新系统",feature:"增量特性",bugfix:"缺陷修复",refactor:"重构加固",documentation:"逆向文档"};
 let project = "", selected = "", draft = "", intent = "feature", generation = 0, evidence = null;
 const drafts = new Map(), evidenceDrafts = new Map();
