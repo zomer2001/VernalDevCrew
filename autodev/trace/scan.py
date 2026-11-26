@@ -20,6 +20,16 @@ _TEST_FN_RE = re.compile(r"^\s*(?:async\s+)?def\s+(test_[A-Za-z0-9_]+)|^\s*func\
 
 def extract_requirements_from_sources(engine: "Engine") -> list[dict[str, Any]]:
     """Consume canonical requirement items; legacy names and standalone SRS remain readable."""
+    from autodev.speckit.service import enabled, current_specs
+    if enabled(engine):
+        from autodev.speckit.parser import parse_spec
+        result = []
+        for rev in current_specs(engine):
+            parsed = parse_spec(rev["content_text"], rev["feature_id"])
+            for req in parsed.requirements + parsed.nfrs:
+                result.append({"req_id":req.identity,"title":req.title,"priority":req.priority,
+                               "acceptance":req.acceptance,"source_section":f"{rev['rel_path']}@{rev['rev_no']}#{req.req_id}"})
+        return result
     by_id: dict[str, dict[str, Any]] = {}
 
     def add(item: dict[str, Any]) -> None:

@@ -83,6 +83,10 @@ def _stage_key_and_title(schema_path: Path, role: str) -> tuple[str, str]:
         stem = stem[: -len(".schema.json")]
     elif stem.endswith(".json"):
         stem = stem[: -len(".json")]
+    if stem.startswith("speckit_"):
+        from autodev.speckit.adapter import STEP_NAMES
+        step = stem.split("_", 2)[1]
+        return stem, STEP_NAMES.get(step, "整理功能交付资料")
     if (stem, role) in _STAGE_META:
         return _STAGE_META[(stem, role)]
     for (s_key, _r), pair in _STAGE_META.items():
@@ -110,7 +114,11 @@ def _collect_context_files(ws: Workspace, db: Database, settings: Settings) -> d
         files[rel] = text
         used += b
 
-    for single in (ws.root / "AGENTS.md", ws.prd_md_path):
+    spec_managed = db.meta_get("speckit.enabled") == "1"
+    source_docs = [ws.root / "AGENTS.md"]
+    if not spec_managed:
+        source_docs.append(ws.prd_md_path)
+    for single in source_docs:
         if single.is_file():
             try:
                 _add(single.relative_to(ws.root).as_posix(), single.read_text("utf-8", errors="replace"))
@@ -190,6 +198,8 @@ class LoopForgeHarness(Harness):
             if not self._assets_ready or self.settings.selected_pool == "public_docker":
                 await ensure_vernal_loopforge_assets(client, pid, self.settings)
                 self._assets_ready = True
+            from autodev.speckit.service import sync_rule
+            await sync_rule(self,client,pid)
             return pid, plan_workflow_id(pid, role)
 
     def _build_issue_description(
@@ -218,7 +228,7 @@ class LoopForgeHarness(Harness):
         bundle_path = (bdir / f"plan-{stage_key}.json").resolve()
         bundle_path.write_text(json.dumps({"files": bundle_files}, ensure_ascii=False), "utf-8")
 
-        need_extra_files = bool(ctx_files) and (
+        need_extra_files = stage_key.startswith("speckit_") or bool(ctx_files) and (
             "inputs/" in prompt or "docs/PRD_SPEC.md" in prompt or "已真实存在的代码" in prompt or "contracts/" in prompt
         )
         inline_candidate = (
@@ -281,6 +291,10 @@ class LoopForgeHarness(Harness):
             command = f"plan:{pid}:{stage_key}:{request_signature}"
             receipt, fresh = reserve(self.db, command, 1, 1, self.settings.selected_pool,
                                      "deployment-service", issue_id)
+            from autodev.speckit.adapter import PLANNING_BASELINE
+            from autodev.loopforge.dispatch import bind_baseline
+            if baseline := PLANNING_BASELINE.get():
+                bind_baseline(self.db, receipt, baseline)
             if not fresh:
                 run = await observe_task(self.db, receipt, client, timeout=self.settings.agent_timeout_sec)
                 return receipt["issue_id"], run
@@ -430,14 +444,11 @@ class LoopForgeHarness(Harness):
 
         def _mark_plan_dispatch(final_state: str) -> None:
             from autodev.db import now_iso
-            try:
-                self.db._exec(
-                    "UPDATE dispatch_records SET state=?, updated_at=? "
-                    "WHERE lf_run_id=? AND state IN ('DISPATCHING','QUEUED','RUNNING','NEEDS_CONFIRMATION')",
-                    (final_state, now_iso(), run_id),
-                )
-            except Exception:
-                pass
+            self.db._exec(
+                "UPDATE dispatch_records SET state=?, updated_at=? "
+                "WHERE lf_run_id=? AND state IN ('DISPATCHING','QUEUED','RUNNING','NEEDS_CONFIRMATION')",
+                (final_state, now_iso(), run_id),
+            )
 
         try:
             ok, run, msg = await poll_loopforge_run(

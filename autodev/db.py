@@ -351,6 +351,46 @@ CREATE TABLE IF NOT EXISTS doc_versions (
     UNIQUE(path, version)
 );
 
+CREATE TABLE IF NOT EXISTS spec_revisions (
+    rev_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    feature_id TEXT NOT NULL,
+    rev_no INTEGER NOT NULL,
+    source_kind TEXT NOT NULL,
+    rel_path TEXT NOT NULL,
+    content_sha TEXT NOT NULL,
+    content_version_id INTEGER NOT NULL REFERENCES doc_versions(id),
+    parent_rev_id INTEGER REFERENCES spec_revisions(rev_id),
+    preset_id TEXT NOT NULL,
+    preset_version TEXT NOT NULL,
+    speckit_version TEXT NOT NULL,
+    input_sha TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'DRAFT',
+    approved_gate_id INTEGER,
+    author TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    handoff_brief_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    UNIQUE(feature_id, source_kind, rev_no)
+);
+CREATE TABLE IF NOT EXISTS clarifications (
+    clarify_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    feature_id TEXT NOT NULL,
+    spec_rev_id INTEGER NOT NULL REFERENCES spec_revisions(rev_id),
+    question_key TEXT NOT NULL,
+    category TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    question TEXT NOT NULL,
+    options_json TEXT NOT NULL DEFAULT '[]',
+    default_option TEXT NOT NULL DEFAULT '',
+    answer TEXT NOT NULL DEFAULT '',
+    rationale TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'OPEN',
+    answered_by TEXT NOT NULL DEFAULT '',
+    applied_rev_id INTEGER REFERENCES spec_revisions(rev_id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(feature_id, spec_rev_id, question_key)
+);
 CREATE TABLE IF NOT EXISTS doc_comments (
     comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT NOT NULL,
@@ -435,6 +475,14 @@ class Task:
     updated_at: str | None = None
     requirement_ids: list[str] = field(default_factory=list)
     design_refs: list[str] = field(default_factory=list)
+    feature_id: str = ""
+    spec_rev_id: int = 0
+    spec_sha: str = ""
+    plan_sha: str = ""
+    compiled_task_hash: str = ""
+    compiled_package_json: str = "{}"
+    task_key: str = ""
+    handoff_brief_json: str = "{}"
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -536,6 +584,14 @@ class Database:
                 "last_error": "TEXT",
             },
             "tasks": {
+                "feature_id": "TEXT NOT NULL DEFAULT ''",
+                "spec_rev_id": "INTEGER NOT NULL DEFAULT 0",
+                "spec_sha": "TEXT NOT NULL DEFAULT ''",
+                "plan_sha": "TEXT NOT NULL DEFAULT ''",
+                "compiled_task_hash": "TEXT NOT NULL DEFAULT ''",
+                "compiled_package_json": "TEXT NOT NULL DEFAULT '{}'",
+                "task_key": "TEXT NOT NULL DEFAULT ''",
+                "handoff_brief_json": "TEXT NOT NULL DEFAULT '{}'",
                 "source_checkpoint_id": "INTEGER",
                 "source_item_idx": "INTEGER",
                 "requirement_ids_json": "TEXT NOT NULL DEFAULT '[]'",
@@ -543,6 +599,12 @@ class Database:
                 "exec_seq": "INTEGER NOT NULL DEFAULT 0",
             },
             "milestone_deliveries": {"evidence_json": "TEXT NOT NULL DEFAULT '{}'"},
+            "dispatch_records": {
+                "spec_sha": "TEXT NOT NULL DEFAULT ''",
+                "contract_sha": "TEXT NOT NULL DEFAULT ''",
+                "compiled_task_hash": "TEXT NOT NULL DEFAULT ''",
+                "asset_versions_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
             "ci_runs": {
                 "candidate_ref": "TEXT NOT NULL DEFAULT ''",
                 "external_id": "TEXT NOT NULL DEFAULT ''",

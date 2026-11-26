@@ -47,6 +47,7 @@ from autodev.server.routers import (
     steering,
     tasks,
     trace,
+    speckit,
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -331,6 +332,8 @@ def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport
                             roles = ("admin",)
                         elif path in ("/vernal-api/agent/config", "/vernal-api/plan/approve", "/vernal-api/scheduler/start") or path.endswith(("/merge", "/restart")):
                             roles = ("admin", "architect", "developer") if path.endswith(("/start", "/restart")) else ("admin", "architect")
+                        if path.startswith("/vernal-api/specifications"):
+                            roles = ("admin", "architect", "developer")
                         if roles:
                             require_engineering_role(target_slot, user, native, roles, manage=manage)
                 if device:
@@ -364,6 +367,7 @@ def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport
         codeintel,
         trace,
         governance,
+        speckit,
     ):
         app.router.routes.extend(mod.router.routes)
 

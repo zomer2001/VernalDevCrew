@@ -276,26 +276,32 @@ async def synthesize_council(
                     "nfrs": [r.model_dump() for r in consensus.nfrs],
                 }
                 compat_prd = ProductSpec.model_validate(compat_prd).model_dump()
-                engine.ws.prd_json_path.write_text(json.dumps(compat_prd, ensure_ascii=False, indent=2), "utf-8")
-                engine.ws.prd_md_path.parent.mkdir(parents=True, exist_ok=True)
-                engine.ws.prd_md_path.write_text(consensus.spec_markdown.strip() + "\n", "utf-8")
+                managed = engine.db.meta_get("speckit.enabled") == "1"
+                if not managed:
+                    engine.ws.prd_json_path.write_text(json.dumps(compat_prd, ensure_ascii=False, indent=2), "utf-8")
+                    engine.ws.prd_md_path.parent.mkdir(parents=True, exist_ok=True)
+                    engine.ws.prd_md_path.write_text(consensus.spec_markdown.strip() + "\n", "utf-8")
                 from autodev.docs_center.service import sync_standard_docs_from_artifacts
 
                 generated_docs = sync_standard_docs_from_artifacts(engine)
                 engine.record_documents(
-                    ["docs/PRD_SPEC.md", *generated_docs],
+                    (["docs/PRD_SPEC.md"] if not managed else []) + generated_docs,
                     "autodev(council): publish architecture council consensus & ADRs",
                     author_name=ident["author_name"],
                     author_email=ident["author_email"],
                 )
+                source_text = consensus.spec_markdown
+                if managed:
+                    from autodev.speckit.service import product_spec
+                    source_text = product_spec(engine).spec_markdown
                 engine.db.upsert_slice(
                     DocSlice(
                         slice_id="PRD-S01",
-                        source_file="docs/PRD_SPEC.md",
+                        source_file="docs/SRS.md" if managed else "docs/PRD_SPEC.md",
                         heading_path="PRD_SPEC / 架构评审圆桌共识与 ADR 决策纪要",
-                        summary=summarize(consensus.spec_markdown),
-                        content=consensus.spec_markdown[:12_000],
-                        char_count=len(consensus.spec_markdown),
+                        summary=summarize(source_text),
+                        content=source_text[:12_000],
+                        char_count=len(source_text),
                     )
                 )
                 engine.db.meta_set("prd_vision", consensus.executive_summary)

@@ -348,6 +348,13 @@ def _decide_gate(
         "UPDATE gate_records SET status=?, actor=?, summary=?, evidence_json=?, decided_at=? WHERE record_id=? AND status='PENDING'",
         (target_status, actor, comment.strip() or cur.get("summary") or "", json.dumps(merged_ev, ensure_ascii=False), ts, record_id),
     )
+    if db.meta_get("speckit.enabled") == "1" and target_status in ("PASSED","WAIVED"):
+        snapshot_ids = [x["id"] for x in json.loads(cur["target_snapshot_json"])]
+        if snapshot_ids:
+            marks = ",".join("?" for _ in snapshot_ids)
+            db._exec(f"UPDATE spec_revisions SET status='APPROVED',approved_gate_id=? WHERE content_version_id IN ({marks}) "
+                     "AND rev_id IN (SELECT MAX(rev_id) FROM spec_revisions GROUP BY feature_id,source_kind)",
+                     (record_id,*snapshot_ids))
     ev_type = {"PASSED": "gate.passed", "FAILED": "gate.failed", "WAIVED": "gate.waived"}[target_status]
     db.add_event(
         ev_type,

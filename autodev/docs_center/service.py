@@ -32,8 +32,16 @@ class DocumentConflictError(ValueError):
     """The editor no longer holds the current document revision."""
 
 
+def is_readonly_projection(engine, canonical: str) -> bool:
+    return engine.db.meta_get("speckit.enabled") == "1" and canonical in (
+        "docs/SRS.md","docs/CONSTITUTION.md","docs/ARCHITECTURE.md","docs/PRD_SPEC.md")
+
+
 def load_product_spec(engine: "Engine") -> ProductSpec:
     """Read legacy ADR-bearing snapshots without modifying or discarding the original."""
+    from autodev.speckit.service import enabled, product_spec
+    if enabled(engine):
+        return product_spec(engine)
     data = json.loads(engine.ws.prd_json_path.read_text("utf-8"))
     if isinstance(data, dict) and "adrs" in data:
         data = {k: v for k, v in data.items() if k != "adrs"}
@@ -81,6 +89,9 @@ def save_doc_version(
     expected_sha: str | None = None,
 ) -> dict[str, Any]:
     full = _safe_doc_relpath(engine.ws.root, rel_path)
+    if engine.db.meta_get("speckit.enabled") == "1" and full.relative_to(engine.ws.root.resolve()).as_posix() in (
+            "docs/SRS.md", "docs/CONSTITUTION.md", "docs/ARCHITECTURE.md", "docs/PRD_SPEC.md"):
+        raise ValueError("本页为只读汇总，请修改对应功能规格或技术方案")
     version = _save_snapshot(engine, full, content, author=author, note=note, expected_sha=expected_sha)
     return get_doc(engine, full.relative_to(engine.ws.root.resolve()).as_posix(), version=version)
 
@@ -142,6 +153,8 @@ def list_docs(engine: "Engine") -> list[dict[str, Any]]:
     # Archive the whole group before rendering any approval badges.
     for path in [*iter_detailed_design_json_paths(engine.ws), *doc_paths]:
         rel = path.relative_to(engine.ws.root).as_posix()
+        if is_readonly_projection(engine,rel):
+            continue
         rows = engine.db._query("SELECT content_sha FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1", (rel,))
         if not rows or document_sha(path.read_text("utf-8")) != rows[0]["content_sha"]:
             _observe_document(engine, path)
@@ -175,6 +188,7 @@ def list_docs(engine: "Engine") -> list[dict[str, Any]]:
             items.append(
                 {
                     "path": rel,
+                    "readonly": is_readonly_projection(engine,rel),
                     "kind": kind,
                     "status": status,
                     "version": int(v_rows[0]["version"]) if v_rows else 1,
@@ -207,6 +221,11 @@ def get_doc(engine: "Engine", rel_path: str, *, version: int | None = None) -> d
             "SELECT * FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1",
             (canonical,),
         )
+        if is_readonly_projection(engine,canonical):
+            if not rows:
+                raise ValueError("汇总文档尚未发布，请从功能规格同步")
+            row = dict(rows[0])
+            content = row["content_text"]
         if not rows or document_sha(content) != rows[0]["content_sha"]:
             _observe_document(engine, full)
             latest = engine.db._query("SELECT version FROM doc_versions WHERE path=? ORDER BY version DESC LIMIT 1", (canonical,))[0]
@@ -220,6 +239,7 @@ def get_doc(engine: "Engine", rel_path: str, *, version: int | None = None) -> d
     ]
     return {
         "path": canonical,
+        "readonly": is_readonly_projection(engine,canonical),
         "kind": _classify_doc_kind(canonical),
         "version": ver,
         "content": content,
@@ -277,6 +297,16 @@ def add_doc_comment(engine: "Engine", rel_path: str, *, section: str = "", body:
 
 def sync_standard_docs_from_artifacts(engine: "Engine") -> list[str]:
     """将已有 PRD JSON / 圆桌共识 / 蓝图同步渲染为规范化 SRS.md、ARCHITECTURE.md 与 ADR 文档。"""
+    from autodev.speckit.service import enabled, project_documents
+    if enabled(engine):
+        written=project_documents(engine)
+        messages=[m for m in engine.db.list_council_messages() if m.get("kind")=="consensus"]
+        if messages:
+            for adr in CouncilConsensus.model_validate(messages[-1]["body"]).adrs:
+                path=f"docs/adr/{adr.adr_id}.md"
+                save_doc_version(engine,path,render_adr_madr(adr),author="Director",note=adr.title)
+                written.append(path)
+        return written
     profile = engine.settings.doc_profile or "default"
     proj_name = engine.db.meta_get("name", engine.ws.root.name) or engine.ws.root.name
     written: list[str] = []
@@ -333,6 +363,9 @@ def sync_standard_docs_from_artifacts(engine: "Engine") -> list[str]:
 
 
 def load_known_requirements(engine: "Engine") -> list[RequirementItem]:
+    if engine.db.meta_get("speckit.enabled") == "1":
+        spec = load_product_spec(engine)
+        return list(spec.requirements) + list(spec.nfrs)
     if not engine.ws.prd_json_path.is_file():
         return []
     try:

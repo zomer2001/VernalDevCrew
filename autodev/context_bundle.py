@@ -6,6 +6,21 @@ from pathlib import Path
 
 
 def build_task_input_bundle(ws, db, task, *, decisions=None, source_root=None, files=None):
+    specification = ""
+    if db is not None and db.meta_get("speckit.enabled") == "1":
+        from autodev.speckit.compiler import assert_package_current
+        assert_package_current(db,task)
+    if db is not None and getattr(task,"feature_id",""):
+        from autodev.speckit.compiler import assert_package_current
+        package = assert_package_current(db,task)
+        row = db._query("SELECT d.content_text FROM spec_revisions r JOIN doc_versions d ON d.id=r.content_version_id WHERE r.rev_id=?",
+                        (package.spec_rev_id,))[0]
+        specification = "\n## 已批准的功能规格\n" + row["content_text"]
+        for kind,feature in (("constitution","project"),("plan",task.feature_id)):
+            source=db._query("SELECT d.content_text FROM spec_revisions r JOIN doc_versions d ON d.id=r.content_version_id "
+                             "WHERE r.feature_id=? AND r.source_kind=? ORDER BY r.rev_no DESC LIMIT 1",(feature,kind))[0]
+            specification += "\n## " + ("项目宪章" if kind == "constitution" else "技术方案") + "\n" + source["content_text"]
+        specification += "\n<details><summary>版本诊断</summary>\n" + package.model_dump_json() + "\n</details>\n"
     ws_root = ws if isinstance(ws, Path) else getattr(ws, "root", None)
     if decisions is None and db is not None:
         decisions = db.list_decisions(active_only=True)
@@ -41,7 +56,7 @@ def build_task_input_bundle(ws, db, task, *, decisions=None, source_root=None, f
 
     from autodev.prompts import _decisions_block
     body = ("允许修改路径：" + ", ".join(task.allowed_paths) + "\n验收标准：\n" +
-            "\n".join(task.acceptance_criteria) + design_block + repomap_block + _decisions_block(decisions))
+            "\n".join(task.acceptance_criteria) + specification + design_block + repomap_block + _decisions_block(decisions))
     digest = hashlib.sha256(body.encode()).hexdigest()
     return f"\n## Vernal Task Input v1 · {digest}\n{body}\n"
 

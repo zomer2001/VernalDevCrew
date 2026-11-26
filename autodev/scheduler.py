@@ -122,6 +122,11 @@ class Scheduler:
                 raise OpsError("Git 交付需要绑定与本地 origin 对应的 LoopForge 仓库")
 
     async def run(self, watch: bool = False) -> ProjectStatus:
+        if self.db.meta_get("speckit.enabled") == "1":
+            from autodev.speckit.compiler import assert_package_current
+            for task in self.db.list_tasks():
+                if task.status not in (TaskStatus.MERGED,TaskStatus.CANCELLED):
+                    assert_package_current(self.db,task)
         self.check_runtime()
         if self.engine.status == ProjectStatus.PLANNED:
             raise OpsError("立项蓝图尚未批准，请先批准蓝图后再启动研发")

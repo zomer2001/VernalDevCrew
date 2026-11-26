@@ -70,6 +70,55 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class HandoffBrief(_Strict):
+    delivered: str
+    integration: str
+    boundaries: str
+    verification: str
+
+    @model_validator(mode="after")
+    def complete_brief(self):
+        if any(not value.strip() for value in self.model_dump().values()):
+            raise ValueError("交接便签的四个部分均须填写；未执行验证应明确说明")
+        return self
+
+
+class ClarificationItem(_Strict):
+    question_key: str
+    category: Literal["scope", "interface", "acceptance", "constraint", "non_goal"] = "scope"
+    severity: Literal["BLOCKING", "DEFAULTED"] = "BLOCKING"
+    question: str
+    options: list[str] = []
+    default_option: str = ""
+    rationale: str = ""
+
+    @model_validator(mode="after")
+    def valid_question(self):
+        if not re.fullmatch(r"Q-[0-9]{2,}", self.question_key) or not self.question.strip():
+            raise ValueError("澄清问题必须具有稳定编号和非空问题")
+        if len(set(self.options)) != len(self.options) or any(not s.strip() for s in self.options):
+            raise ValueError("澄清选项不得重复或为空")
+        if self.default_option and self.default_option not in self.options:
+            raise ValueError("默认选项必须属于选项列表")
+        if self.severity == "DEFAULTED" and (not self.default_option or not self.rationale.strip()):
+            raise ValueError("低风险默认选择必须有明确选项和依据")
+        return self
+
+
+class SpecFinding(_Strict):
+    severity: Literal["CRITICAL", "WARNING", "INFO"]
+    message: str
+    requirement_ids: list[str] = []
+
+
+class SpecStepResult(_Strict):
+    step: Literal["constitution", "specify", "clarify", "checklist", "plan", "tasks", "analyze"]
+    content: str
+    clarifications: list[ClarificationItem] = []
+    findings: list[SpecFinding] = []
+    handoff_brief: HandoffBrief
+
+
 # ---------- 1. 多智能体架构评审圆桌（Architecture Council） ----------
 
 class CouncilOpinion(_Strict):
@@ -205,6 +254,37 @@ class PlanTask(_Strict):
     design_refs: list[str] = []
 
 
+class SpecTaskDraft(_Strict):
+    task_key: str
+    package_key: str
+    milestone_id: str = "M1"
+    squad: str = "core"
+    module: str
+    role: TaskRole = "coder"
+    title: str
+    description: str
+    acceptance_criteria: list[str]
+    requirement_ids: list[str]
+    depends_on: list[str] = []
+    allowed_paths: list[str]
+    verify_cmds: list[str]
+
+
+class CompiledWorkPackage(_Strict):
+    task_key: str
+    source_task_keys: list[str]
+    feature_id: str
+    spec_rev_id: int
+    spec_sha: str
+    constitution_sha: str
+    plan_sha: str
+    tasks_sha: str
+    contract_sha: str
+    asset_versions: dict[str, str]
+    task: PlanTask
+    compiled_task_hash: str = ""
+
+
 class ProjectPlan(_Strict):
     summary: str
     tech_stack: str
@@ -276,6 +356,7 @@ class WorkerReport(_Strict):
     files_changed: list[str]
     tests_added: list[str]
     notes: str
+    handoff_brief: HandoffBrief | None = None
 
 
 class ReviewIssue(_Strict):
@@ -296,6 +377,7 @@ class ReviewVerdict(_Strict):
     summary: str
     criteria_check: list[CriterionCheck]
     blocking_issues: list[ReviewIssue]
+    handoff_brief: HandoffBrief | None = None
 
 
 SCHEMA_MODELS: dict[str, type[BaseModel]] = {

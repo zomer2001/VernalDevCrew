@@ -30,6 +30,15 @@ def document_target(db, gate_id: str, scope_id: str) -> dict:
         prefix = scoped
     else:
         selected = [r for r in rows if r["path"] == prefix]
+    if db.meta_get("speckit.enabled") == "1" and gate_id in ("srs_approval", "architecture_approval"):
+        kinds = ("spec", "constitution") if gate_id == "srs_approval" else ("plan", "spec", "constitution")
+        sources = db._query(
+            "SELECT r.content_version_id FROM spec_revisions r JOIN "
+            "(SELECT feature_id,source_kind,MAX(rev_no) n FROM spec_revisions GROUP BY feature_id,source_kind) l "
+            "ON r.feature_id=l.feature_id AND r.source_kind=l.source_kind AND r.rev_no=l.n "
+            f"WHERE r.source_kind IN ({','.join('?' for _ in kinds)})", kinds)
+        ids = {r["content_version_id"] for r in sources}
+        selected += [r for r in rows if r["id"] in ids]
     snapshots = [{"id": r["id"], "path": r["path"], "version": r["version"], "sha": r["content_sha"]} for r in selected]
     raw = json.dumps(snapshots, ensure_ascii=False, sort_keys=True)
     sha = (snapshots[0]["sha"] if len(snapshots) == 1 else hashlib.sha256(raw.encode()).hexdigest()) if snapshots else ""
@@ -40,6 +49,10 @@ def document_target(db, gate_id: str, scope_id: str) -> dict:
 def target_is_current(db, record: dict) -> bool:
     if record["gate_id"] not in DOCUMENT_GATES:
         return True
+    if db.meta_get("speckit.enabled") == "1" and record["gate_id"] in ("srs_approval", "architecture_approval"):
+        if (not db._query("SELECT 1 FROM spec_revisions WHERE source_kind='constitution' LIMIT 1")
+                or db._query("SELECT 1 FROM clarifications WHERE severity='BLOCKING' AND status='OPEN' LIMIT 1")):
+            return False
     current = document_target(db, record["gate_id"], record["scope_id"])
     if not record.get("target_sha") or record["target_sha"] != current["target_sha"]:
         return False

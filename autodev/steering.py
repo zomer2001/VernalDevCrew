@@ -103,7 +103,9 @@ async def _push_decisions_to_loopforge(engine: "Engine", version: int) -> bool:
         return False
     client = LoopForgeClient(s.loopforge_url, s.effective_loopforge_token())
     try:
-        await sync_decisions_rule(client, s.loopforge_project_id, engine.db.list_decisions(active_only=True), version=version)
+        from autodev.speckit.service import constitution_rule
+        await sync_decisions_rule(client, s.loopforge_project_id, engine.db.list_decisions(active_only=True), version=version,
+                                  constitution=constitution_rule(engine))
         return True
     except LoopForgeError:
         return False
@@ -463,6 +465,8 @@ async def reconcile_steering_checkpoint(engine: "Engine", checkpoint_id: int) ->
 
 
 async def apply_steering_plan(engine, checkpoint_id, plan, *, actor="owner"):
+    if engine.db.meta_get("speckit.enabled") == "1":
+        raise LoopForgeError("P1 规格项目请通过功能规格修订和工作包编译执行变更；运行中的转向变更在后续批次提供",409)
     db = engine.db
     try:
         with db.transaction():

@@ -196,6 +196,9 @@ async function renderDrawerTab() {
 
   if (drawer.tab === "verify") {
     const t = drawer.detail.task;
+    let briefs={};
+    try { briefs=JSON.parse(t.handoff_brief_json||"{}"); } catch { /* Older tasks have no handoff. */ }
+    const briefHtml=Object.entries(briefs).map(([node,brief])=>`<div class="card card-compact"><h4>${node==="implement"?"开发交接":"审查交接"}</h4>${Object.entries({delivered:"本次交付",integration:"接入方式",boundaries:"边界与限制",verification:"验证结果"}).map(([key,label])=>`<p><strong>${label}：</strong>${esc(brief[key])}</p>`).join("")}</div>`).join("");
     let qualHtml = "";
     try {
       const qRes = await api(`/vernal-api/tasks/${encodeURIComponent(drawer.taskId)}/quality`);
@@ -242,7 +245,7 @@ async function renderDrawerTab() {
         <div><strong>路径白名单：</strong><code>${esc((t.allowed_paths || []).join(", "))}</code></div>
         <div><strong>验证命令：</strong><code>${esc((t.verify_cmds || []).join(" && ") || "无")}</code></div>
       </div>
-      ${qualHtml}
+      ${briefHtml}${qualHtml}
       ${blocks || `<p class="muted">尚未产生门禁或审查记录。</p>`}
     `;
     return;

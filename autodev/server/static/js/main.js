@@ -548,14 +548,14 @@ function renderAll() {
   const sliceCount = state.slices ?? state.slices_count ?? 0;
   const uninitialized = state.workspace_initialized === false;
   const needsPlan = !uninitialized && ["CREATED", "INGESTED", "SPECIFIED"].includes(state.status);
-  const canPlanNow = needsPlan && !state.planning && (sliceCount > 0 || state.source_mode !== "scratch");
+  const canPlanNow = needsPlan && !state.planning && (state.specifications_enabled || sliceCount > 0 || state.source_mode !== "scratch");
   const isPlanned = state.status === "PLANNED" && !state.planning && !state.scheduler_running;
   const canStart = !state.scheduler_running && ["APPROVED", "RUNNING", "STALLED"].includes(state.status);
 
   $("btn-launcher-toggle")?.classList.toggle("btn-primary", uninitialized);
   const btnPlan = $("btn-plan");
   if (btnPlan) {
-    btnPlan.textContent = (state.milestones || []).length > 0 ? "重新立项" : "开始立项评审";
+    btnPlan.textContent = state.specifications_enabled ? "继续功能规格" : (state.milestones || []).length > 0 ? "重新立项" : "开始立项评审";
     btnPlan.classList.toggle("btn-primary", canPlanNow);
     btnPlan.classList.toggle("hidden", uninitialized || state.scheduler_running || isPlanned || state.status === "COMPLETED");
   }
@@ -631,6 +631,10 @@ $("btn-ingest")?.addEventListener("click", async () => {
 });
 
 async function triggerPlan(extra = "") {
+  if (state?.specifications_enabled) {
+    switchView("council");
+    return;
+  }
   if ((state?.milestones || []).length > 0) {
     if (!window.confirm("当前项目已生成研发蓝图，重新立项将覆盖未开始的拆解规划（如需局部变更建议使用「变更与评审」）。确认继续重新立项吗？")) {
       return;
@@ -1149,6 +1153,7 @@ $("collaboration-mode")?.addEventListener("change", async (event) => {
 Promise.allSettled([
   import("./pipeline.js").then((m) => m.initPipelineModule?.({ registerViewHooks, refresh, switchView })),
   import("./docs-center.js").then((m) => m.initDocsCenterModule?.({ registerViewHooks, refresh })),
+  import("./specifications.js").then((m) => m.initSpecificationsModule?.({ registerViewHooks, refresh })),
   import("./review.js").then((m) => m.initReviewModule?.({ registerViewHooks, refresh, openTaskDrawer })),
   import("./governance.js").then((m) => m.initGovernanceModule?.({ registerViewHooks, refresh })),
 ]).finally(() => {

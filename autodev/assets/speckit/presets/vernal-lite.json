@@ -1,0 +1,7 @@
+{
+  "id": "vernal-lite",
+  "version": "1.0.0",
+  "extends": "vernal-core",
+  "mode": "append",
+  "instructions": "面向局部低风险功能。规格与技术方案各控制在一页左右，通常编译成 1 至 2 个工作包。保留全部明确承诺与验收条件，不要求多组圆桌或多份重复详设。"
+}
