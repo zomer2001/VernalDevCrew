@@ -61,6 +61,14 @@ def main():
         for heading in ({"specify":["目标","用户场景","Non-Goals","需求"],"plan":["需求映射","接口与数据","实施边界","验证"]}.get(step,[])):
             if not re.search(r"^## " + re.escape(heading) + r"\s*\n\s*\S",text,re.M):
                 raise ValueError("文档缺少非空章节："+heading)
+        req_finding_ids = schema.get("x-vernal-require-findings-ids") or []
+        if step == "plan" and req_finding_ids:
+            m = re.search(r"^## 检查发现处理\s*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+            if not m or not m[1].strip():
+                raise ValueError("文档缺少非空章节：检查发现处理")
+            missing = [fid for fid in req_finding_ids if fid not in m[1]]
+            if missing:
+                raise ValueError("检查发现处理章节缺少质量发现标识：" + ", ".join(missing))
         if step=="specify" and not re.search(r"^### (?:REQ|NFR)-\d{3,} \[P[012]\] [^\n]+\n要求：[^\n]+\n验收：\n- \S",text,re.M):
             raise ValueError("规格缺少有效需求与验收条目")
         if step=="clarify" and (text.strip() or len(data["clarifications"])>3):

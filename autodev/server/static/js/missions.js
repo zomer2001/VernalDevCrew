@@ -28,7 +28,19 @@ export function renderMissions(data, refresh) {
   const showAssessment=mission?.route && (mission.state_before_running||mission.state)!=="NEEDS_ASSESSMENT";
   const blocking=(mission?.questions||[]).filter(q=>q.status==="OPEN" && q.severity==="BLOCKING");
   const defaults=(mission?.questions||[]).filter(q=>q.status==="AUTO_DEFAULTED");
-  const source=data.features.find(f=>f.feature_id===feature)?.sources?.spec;
+  const featObj=data.features.find(f=>f.feature_id===feature);
+  const source=featObj?.sources?.spec;
+  const qr=mission?.quality_review || featObj?.quality_review || null;
+  const renderFinding=f=>`<li><strong>[${esc(f.severity)}] ${esc(f.id||"")}</strong>${f.category?` (${esc(f.category)})`:""}：${esc(f.message)}${f.target?` <span class="muted">位置：${esc(f.target)}</span>`:""}</li>`;
+  const renderQualityReview=()=>{
+    if(!qr || (qr.status==="MISSING" && !(qr.history||[]).length))return "";
+    const c=qr.counts||{CRITICAL:0,WARNING:0,INFO:0,total:0};
+    const tag=qr.status==="STALE"?"（已过期）":qr.status==="MISSING_METADATA"?"（缺少发现记录）":"";
+    const summary=`质量检查结果${qr.checklist_rev_no?` · 第 ${qr.checklist_rev_no} 版`:""}${tag} · 严重 ${c.CRITICAL||0} / 提醒 ${c.WARNING||0} / 信息 ${c.INFO||0}`;
+    const currentList=(qr.findings||[]).length?`<ul>${qr.findings.map(renderFinding).join("")}</ul>`:`<p class="muted">${qr.metadata_present?"当前版本无未结质量发现。":"缺少结构化发现记录，不能视为无问题。"}</p>`;
+    const hist=(qr.history||[]).length?`<details class="quality-history"><summary>历史检查记录（${qr.history.length} 版）</summary>${qr.history.map(h=>`<div><p class="muted">第 ${h.rev_no} 版 · 严重 ${h.counts?.CRITICAL||0} / 提醒 ${h.counts?.WARNING||0} / 信息 ${h.counts?.INFO||0}</p>${(h.findings||[]).length?`<ul>${h.findings.map(renderFinding).join("")}</ul>`:`<p class="muted">无记录</p>`}</div>`).join("")}</details>`:"";
+    return `<details id="mission-quality-review"><summary>${esc(summary)}</summary><p class="muted">${esc(qr.next_action||"")}</p><div class="quality-current"><strong>当前版本发现</strong>${currentList}</div>${hist}</details>`;
+  };
   const field=q=>`<div class="mission-question"><label for="mission-answer-${q.clarify_id}">${esc(q.question)}</label><p class="muted">${esc(q.rationale)}</p>${q.options.length?`<select id="mission-answer-${q.clarify_id}" data-question="${q.clarify_id}"><option value="">请选择</option>${q.options.map(o=>`<option value="${esc(o)}" ${o===(drafts.get(q.clarify_id)?.answer||q.answer)?"selected":""}>${esc(o)}${o===q.default_option?"（有依据的推荐项）":""}</option>`).join("")}</select>`:`<input id="mission-answer-${q.clarify_id}" data-question="${q.clarify_id}" value="${esc(drafts.get(q.clarify_id)?.answer||q.answer||"")}">`}<label class="muted" for="mission-supplement-${q.clarify_id}">补充说明（可选）</label><textarea id="mission-supplement-${q.clarify_id}" data-supplement="${q.clarify_id}" rows="2">${esc(drafts.get(q.clarify_id)?.supplement||"")}</textarea>${q.status==="AUTO_DEFAULTED"?`<button class="btn btn-sm" data-default-save="${q.clarify_id}">更新此默认值</button>`:""}</div>`;
   mount.className="mission-panel";
   mount.innerHTML=`<header class="mission-head"><div><h2>需求与交付</h2><p class="muted">说明目标，确认必要决策，按批准的规格交付。</p></div><button id="mission-refresh" class="btn btn-sm">刷新进度</button></header>
@@ -42,6 +54,7 @@ export function renderMissions(data, refresh) {
     ${defaults.length?`<details><summary>已采用 ${defaults.length} 项低风险默认值，可修改</summary>${defaults.map(field).join("")}</details>`:""}
     ${(mission.prerequisites||[]).map(p=>`<div class="mission-question"><strong>${esc(p.description)}</strong><p>${esc(p.evidence_needed)}</p><label>负责人核验依据<input data-prerequisite="${esc(p.key)}" placeholder="写明实际检查结果或证据位置"></label><button class="btn btn-sm" data-evidence-save="${esc(p.key)}">记录核验依据</button></div>`).join("")}
     ${source?`<details><summary>审阅当前规格 · 第 ${source.rev_no} 版</summary><pre class="mission-document">${esc(source.content_text)}</pre></details>`:""}
+    ${renderQualityReview()}
     ${["NEEDS_ASSESSMENT","NEEDS_CHECKLIST","NEEDS_PLAN"].includes(mission.state)?`<button class="btn btn-primary" id="mission-continue" ${run?"disabled":""}>${mission.last_error?"从已保存步骤继续":"继续需求交付"}</button>`:""}
     ${mission.state==="WAITING_APPROVAL"?`<p>请到工作台的需求审批门审阅当前版本。批准后点击继续，自动生成方案、任务和一致性检查。</p><button class="btn" id="mission-home">打开工作台审批</button>`:""}
     ${mission.state==="READY_TO_PUBLISH"?`${mission.packages.map(p=>`<div class="mission-question"><strong>${esc(p.task.title)}</strong><p>${esc(p.task.acceptance_criteria.join("；"))}</p><p class="muted">修改范围：${esc(p.task.allowed_paths.join("、"))}</p></div>`).join("")}<button class="btn btn-primary" id="mission-publish">发布以上工作包</button>`:""}

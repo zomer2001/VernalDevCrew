@@ -282,6 +282,9 @@ class CompiledWorkPackage(_Strict):
     contract_sha: str
     asset_versions: dict[str, str]
     task: PlanTask
+    checklist_rev_id: int = 0
+    checklist_sha: str = ""
+    checklist_findings_sha: str = ""
     compiled_task_hash: str = ""
 
 

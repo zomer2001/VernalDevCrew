@@ -26,17 +26,7 @@ def verify_bundle(root: Path) -> dict:
     return manifest
 
 
-def pin_assets(engine, preset_id: str = "vernal-core") -> dict:
-    existing = engine.db.meta_get("speckit.assets")
-    if existing:
-        locked = json.loads(existing)
-        if locked["preset_id"] != preset_id:
-            raise ValueError("项目已锁定其他规格预设，需通过显式资产升级流程变更")
-        load_assets(engine)
-        return locked
-    manifest = verify_bundle(ASSET_ROOT)
-    if preset_id not in manifest["presets"]:
-        raise ValueError("当前仅支持 vernal-core 与 vernal-lite 预设")
+def _stage_bundle(engine, manifest: dict) -> str:
     key = digest_json(manifest)
     parent = engine.ws.state_dir / "speckit-assets"
     parent.mkdir(parents=True, exist_ok=True)
@@ -50,6 +40,21 @@ def pin_assets(engine, preset_id: str = "vernal-core") -> dict:
                 staged.rename(dest)
             except FileExistsError:
                 verify_bundle(dest)
+    return key
+
+
+def pin_assets(engine, preset_id: str = "vernal-core") -> dict:
+    existing = engine.db.meta_get("speckit.assets")
+    if existing:
+        locked = json.loads(existing)
+        if locked["preset_id"] != preset_id:
+            raise ValueError("项目已锁定其他规格预设，需通过显式资产升级流程变更")
+        load_assets(engine)
+        return locked
+    manifest = verify_bundle(ASSET_ROOT)
+    if preset_id not in manifest["presets"]:
+        raise ValueError("当前仅支持 vernal-core 与 vernal-lite 预设")
+    key = _stage_bundle(engine, manifest)
     locked = {"asset_sha": key, "speckit_version": manifest["speckit_version"],
               "upstream_commit": manifest["upstream_commit"], "preset_id": preset_id,
               "preset_version": manifest["presets"][preset_id]["version"]}
@@ -59,6 +64,57 @@ def pin_assets(engine, preset_id: str = "vernal-core") -> dict:
             raise ValueError("规格资产已被并发操作锁定，请刷新")
         engine.db.meta_set("speckit.assets", json.dumps(locked, ensure_ascii=False))
     return locked
+
+
+def upgrade_assets(engine, target_preset_id: str | None = None, *, actor: str = "owner", reason: str = "") -> dict:
+    """Explicitly lock a newer repository asset bundle or preset without mutating prior immutable locks."""
+    from autodev.db import now_iso
+    from .service import SpecConflictError
+
+    raw = engine.db.meta_get("speckit.assets")
+    if not raw:
+        raise ValueError("请先启用功能规格流程")
+    if engine.db.meta_get("mission.lease"):
+        raise SpecConflictError("需求流程正在执行，不能升级规格资产")
+    if engine.db._query("SELECT 1 FROM dispatch_records WHERE state IN ('DISPATCHING','QUEUED','RUNNING','NEEDS_CONFIRMATION')"):
+        raise SpecConflictError("仍有原生执行未结束，不能升级规格资产")
+    if any(t.status in ("IN_PROGRESS", "VERIFYING", "REVIEWING") for t in engine.db.list_tasks()):
+        raise SpecConflictError("仍有研发任务运行，不能升级规格资产")
+    previous, _ = load_assets(engine)
+    preset_id = target_preset_id or previous["preset_id"]
+    manifest = verify_bundle(ASSET_ROOT)
+    if preset_id not in manifest["presets"]:
+        raise ValueError("当前仅支持 vernal-core 与 vernal-lite 预设")
+    key = _stage_bundle(engine, manifest)
+    updated = {
+        "asset_sha": key,
+        "speckit_version": manifest["speckit_version"],
+        "upstream_commit": manifest["upstream_commit"],
+        "preset_id": preset_id,
+        "preset_version": manifest["presets"][preset_id]["version"],
+    }
+    if updated == previous:
+        return {"previous": previous, "current": updated, "changed": False}
+    with engine.db.transaction():
+        if json.loads(engine.db.meta_get("speckit.assets") or "{}") != previous:
+            raise SpecConflictError("规格资产锁定状态已变化，请刷新后重试")
+        history = json.loads(engine.db.meta_get("speckit.assets.history") or "[]")
+        history.append({
+            "from": previous,
+            "to": updated,
+            "actor": actor,
+            "reason": reason.strip(),
+            "at": now_iso(),
+        })
+        engine.db.meta_set("speckit.assets", json.dumps(updated, ensure_ascii=False))
+        engine.db.meta_set("speckit.assets.history", json.dumps(history, ensure_ascii=False))
+        engine.db.add_event(
+            "speckit.assets_upgraded",
+            f"规格资产已显式升级：{previous['preset_id']}@{previous['preset_version']} -> {updated['preset_id']}@{updated['preset_version']}",
+            actor=actor,
+            payload={"from": previous, "to": updated, "reason": reason.strip()},
+        )
+    return {"previous": previous, "current": updated, "changed": True}
 
 
 def load_assets(engine) -> tuple[dict, Path]:

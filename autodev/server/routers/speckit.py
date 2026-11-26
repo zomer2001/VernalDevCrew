@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from autodev.server.deps import effective_actor, get_ctx
-from autodev.speckit import adapter, compiler, service, missions, preflight
+from autodev.speckit import adapter, assets, compiler, service, missions, preflight
 from autodev.speckit.assets import load_assets
 
 router=APIRouter()
@@ -16,6 +16,11 @@ router=APIRouter()
 class EnableRequest(BaseModel):
     preset_id: Literal["vernal-core","vernal-lite"] = "vernal-core"
     migrate: bool = False
+
+
+class UpgradeAssetsRequest(BaseModel):
+    preset_id: Literal["vernal-core","vernal-lite"] | None = None
+    reason: str = Field(default="", max_length=500)
 
 
 class StepRequest(BaseModel):
@@ -76,6 +81,7 @@ def state(request: Request):
             feature=spec["feature_id"]
             features.append({"feature_id":feature,"sources":{k:service.latest(eng,feature,k) for k in ("spec","plan","tasks","checklist","analyze")},
                              "clarifications":service.list_clarifications(eng,feature),
+                             "quality_review":service.quality_review(eng,feature),
                              "last_step":json.loads(eng.db.meta_get(f"speckit.last_step:{feature}") or "null")})
         return {"enabled":True,"assets":lock,"features":features,"missions":intake,
                 "constitution":service.latest(eng,"project","constitution"),
@@ -89,6 +95,15 @@ def enable(req: EnableRequest,request: Request):
     try:
         return service.enable(_engine(request,write=True),req.preset_id,migrate=req.migrate,actor=effective_actor())
     except (ValueError,OSError) as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/vernal-api/specifications/upgrade-assets")
+def upgrade_assets_route(req: UpgradeAssetsRequest, request: Request):
+    try:
+        _idle(request)
+        return assets.upgrade_assets(_engine(request, write=True), req.preset_id, actor=effective_actor(), reason=req.reason)
+    except (ValueError, OSError) as exc:
         raise _error(exc) from exc
 
 

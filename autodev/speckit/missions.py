@@ -202,6 +202,7 @@ def view(engine, mission) -> dict:
     result["prerequisites"] = [p for p in mission.get("prerequisites", []) if not mission.get("prerequisite_evidence", {}).get(p["key"])]
     readiness = approval_readiness(engine, feature_id=feature)
     result["approval_blockers"] = readiness["blockers"]
+    result["quality_review"] = service.quality_review(engine, feature) if service.enabled(engine) else None
     blocker_codes = {b["code"] for b in readiness["blockers"]}
     try:
         if any(q["status"] == "OPEN" and q["severity"] == "BLOCKING" for q in result["questions"]):

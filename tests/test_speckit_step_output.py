@@ -52,3 +52,37 @@ def test_dispatched_step_contract_rejects_cross_step_output(eng, tmp_path, monke
     assert not service.list_clarifications(eng, "001-save")
     if step == "constitution":
         assert service.latest(eng, "project", "constitution")["content_text"] == value["content"]
+
+
+@pytest.mark.parametrize("runtime", ["python", "node"])
+def test_plan_validator_requires_findings_handling_table_when_checklist_has_findings(tmp_path, runtime):
+    executable = sys.executable if runtime == "python" else shutil.which("node")
+    if not executable:
+        pytest.skip("Node is unavailable")
+    validator = Path(__file__).parents[1] / "autodev/speckit" / ("validate_output.py" if runtime == "python" else "validate_output.cjs")
+    workspace = tmp_path / f"plan-findings-{runtime}"
+    workspace.mkdir()
+    from autodev.models import SpecStepResult, strict_json_schema
+    schema = strict_json_schema(SpecStepResult)
+    schema["properties"]["step"]["enum"] = ["plan"]
+    schema["properties"]["clarifications"]["maxItems"] = 0
+    schema["x-vernal-step"] = "plan"
+    schema["x-vernal-artifact-path"] = "specs/001-save/plan.md"
+    schema["x-vernal-require-findings-ids"] = ["CHK-5-01", "CHK-5-02"]
+    (workspace / ".vernal-schema.json").write_text(json.dumps(schema, ensure_ascii=False), "utf-8")
+
+    base_plan = "# 技术方案\n\n## 需求映射\n- REQ-001\n\n## 接口与数据\n- save\n\n## 实施边界\n- src/app.py\n\n## 验证\n- pytest\n"
+    payload = dict(step="plan", content=base_plan, clarifications=[], findings=[], handoff_brief=BRIEF)
+    (workspace / "vernal-result.json").write_text(json.dumps(payload, ensure_ascii=False), "utf-8")
+    res_missing_sec = subprocess.run([executable, str(validator)], cwd=workspace, capture_output=True, text=True, timeout=10)
+    assert res_missing_sec.returncode != 0 and "检查发现处理" in res_missing_sec.stderr
+
+    partial_plan = base_plan + "\n## 检查发现处理\n| 发现标识 | 处理位置 | 验证方式 | 是否需规格变更 |\n| --- | --- | --- | --- |\n| CHK-5-01 | 接口与数据 | pytest | 否 |\n"
+    (workspace / "vernal-result.json").write_text(json.dumps({**payload, "content": partial_plan}, ensure_ascii=False), "utf-8")
+    res_missing_id = subprocess.run([executable, str(validator)], cwd=workspace, capture_output=True, text=True, timeout=10)
+    assert res_missing_id.returncode != 0 and "CHK-5-02" in res_missing_id.stderr
+
+    full_plan = partial_plan + "| CHK-5-02 | 验证 | pytest | 否 |\n"
+    (workspace / "vernal-result.json").write_text(json.dumps({**payload, "content": full_plan}, ensure_ascii=False), "utf-8")
+    res_ok = subprocess.run([executable, str(validator)], cwd=workspace, capture_output=True, text=True, timeout=10)
+    assert res_ok.returncode == 0, res_ok.stderr

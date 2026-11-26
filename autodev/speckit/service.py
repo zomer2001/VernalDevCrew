@@ -84,16 +84,156 @@ def restore_source(engine,feature_id: str,kind: str,*,expected_rev_id: int,actor
         return {"restored":rev["rel_path"],"backup_path":backup}
 
 
+def checklist_findings_digest(engine, rev_id: int) -> str:
+    """Stable digest of structured checklist findings; distinguishes missing metadata from empty findings."""
+    raw = engine.db.meta_get(f"speckit.analysis:{rev_id}")
+    if raw is None:
+        return "__MISSING__"
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return "__CORRUPT__"
+    if not isinstance(parsed, list):
+        return "__CORRUPT__"
+    return digest_json(parsed)
+
+
+def _format_quality_entry(engine, rev: dict, *, is_current: bool) -> dict:
+    raw = engine.db.meta_get(f"speckit.analysis:{rev['rev_id']}")
+    metadata_present = False
+    findings: list[dict] = []
+    findings_sha = "__MISSING__"
+    if raw is not None:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                metadata_present = True
+                findings_sha = digest_json(parsed)
+                for idx, item in enumerate(parsed, start=1):
+                    if not isinstance(item, dict):
+                        continue
+                    target = str(item.get("target") or "")
+                    message = str(item.get("message") or "")
+                    explicit_reqs = [str(r) for r in (item.get("requirement_ids") or []) if str(r).strip()]
+                    extracted_reqs = re.findall(r"\b(?:REQ|NFR)-\d{3,}\b", f"{target} {message}")
+                    req_ids = list(dict.fromkeys(explicit_reqs + extracted_reqs))
+                    findings.append({
+                        "id": f"CHK-{rev['rev_id']}-{idx:02d}",
+                        "checklist_rev_id": rev["rev_id"],
+                        "index": idx,
+                        "severity": str(item.get("severity") or "INFO"),
+                        "category": str(item.get("category") or ""),
+                        "message": message,
+                        "target": target,
+                        "requirement_ids": req_ids,
+                    })
+        except ValueError:
+            metadata_present = False
+            findings_sha = "__CORRUPT__"
+    counts = {
+        "CRITICAL": sum(1 for f in findings if f["severity"] == "CRITICAL"),
+        "WARNING": sum(1 for f in findings if f["severity"] == "WARNING"),
+        "INFO": sum(1 for f in findings if f["severity"] == "INFO"),
+        "total": len(findings),
+    }
+    return {
+        "rev_id": rev["rev_id"],
+        "rev_no": rev["rev_no"],
+        "content_sha": rev["content_sha"],
+        "status": rev["status"],
+        "created_at": rev["created_at"],
+        "is_current": is_current and metadata_present,
+        "metadata_present": metadata_present,
+        "findings_sha": findings_sha,
+        "counts": counts,
+        "findings": findings,
+    }
+
+
+def quality_review(engine, feature_id: str) -> dict:
+    """Return immutable structured quality findings for the feature, independent of last_step."""
+    source_path(feature_id, "checklist")
+    latest_spec = latest(engine, feature_id, "spec")
+    rows = [dict(r) for r in engine.db._query(
+        "SELECT r.*,d.content_text FROM spec_revisions r JOIN doc_versions d ON d.id=r.content_version_id "
+        "WHERE r.feature_id=? AND r.source_kind='checklist' ORDER BY r.rev_no DESC",
+        (feature_id,),
+    )]
+    spec_rev_id = (latest_spec or {}).get("rev_id", 0)
+    spec_rev_no = (latest_spec or {}).get("rev_no", 0)
+    if not rows:
+        return {
+            "feature_id": feature_id,
+            "status": "MISSING",
+            "is_current": False,
+            "is_stale": False,
+            "metadata_present": False,
+            "checklist_rev_id": 0,
+            "checklist_rev_no": 0,
+            "checklist_sha": "",
+            "findings_sha": "",
+            "spec_rev_id": spec_rev_id,
+            "spec_rev_no": spec_rev_no,
+            "counts": {"CRITICAL": 0, "WARNING": 0, "INFO": 0, "total": 0},
+            "findings": [],
+            "next_action": "请对当前规格执行质量检查",
+            "history": [],
+        }
+    head = rows[0]
+    try:
+        assert_source_current(engine, head)
+        source_ok = head["status"] != "STALE" and head["input_sha"] == input_fingerprint(engine, feature_id, "checklist")
+    except (ValueError, OSError):
+        source_ok = False
+    head_entry = _format_quality_entry(engine, head, is_current=source_ok)
+    history = [_format_quality_entry(engine, r, is_current=False) for r in rows[1:]]
+    if not head_entry["metadata_present"]:
+        status = "MISSING_METADATA"
+        next_action = "质量检查缺少结构化发现记录，不能视为无问题，请重新执行质量检查"
+    elif not source_ok:
+        status = "STALE"
+        next_action = "质量检查基于旧版本规格，请重新执行质量检查"
+    else:
+        status = "CURRENT"
+        if head_entry["counts"]["CRITICAL"] > 0:
+            next_action = f"存在 {head_entry['counts']['CRITICAL']} 项严重问题，请先修订规格并重新检查"
+        elif head_entry["counts"]["WARNING"] > 0:
+            next_action = f"存在 {head_entry['counts']['WARNING']} 项提醒，后续技术方案与一致性检查将逐条落实处理"
+        else:
+            next_action = "当前规格质量检查通过，无阻塞问题"
+    return {
+        "feature_id": feature_id,
+        "status": status,
+        "is_current": status == "CURRENT",
+        "is_stale": status == "STALE",
+        "metadata_present": head_entry["metadata_present"],
+        "checklist_rev_id": head_entry["rev_id"],
+        "checklist_rev_no": head_entry["rev_no"],
+        "checklist_sha": head_entry["content_sha"],
+        "findings_sha": head_entry["findings_sha"],
+        "spec_rev_id": spec_rev_id,
+        "spec_rev_no": spec_rev_no,
+        "counts": head_entry["counts"],
+        "findings": head_entry["findings"],
+        "next_action": next_action,
+        "history": history,
+    }
+
+
 def input_fingerprint(engine, feature_id: str, kind: str) -> str:
-    chain = {"constitution": [], "spec": ["constitution"], "plan": ["constitution", "spec"],
-             "tasks": ["constitution", "spec", "plan"], "checklist": ["constitution", "spec"],
-             "analyze": ["constitution", "spec", "plan", "tasks"]}[kind]
+    chain = {"constitution": [], "spec": ["constitution"], "checklist": ["constitution", "spec"],
+             "plan": ["constitution", "spec", "checklist"],
+             "tasks": ["constitution", "spec", "checklist", "plan"],
+             "analyze": ["constitution", "spec", "checklist", "plan", "tasks"]}[kind]
     versions = {}
     for dep in chain:
         rev = latest(engine, feature_id, dep)
         if rev:
             assert_source_current(engine, rev)
-            versions[dep] = [rev["rev_id"], rev["content_sha"]]
+            if dep == "checklist":
+                versions[dep] = [rev["rev_id"], rev["content_sha"], checklist_findings_digest(engine, rev["rev_id"])]
+            else:
+                versions[dep] = [rev["rev_id"], rev["content_sha"]]
     return digest_json(versions)
 
 
@@ -148,7 +288,7 @@ def project_documents(engine) -> list[str]:
 
 def publish_revision(engine, feature_id: str, kind: str, content: str, *, expected_rev_id: int,
                      author: str = "owner", summary: str = "人工修订", input_sha: str | None = None,
-                     handoff: HandoffBrief | None = None) -> dict:
+                     handoff: HandoffBrief | None = None, findings: list[dict] | None = None) -> dict:
     path = source_path(feature_id, kind)
     feature_id = "project" if kind == "constitution" else feature_id
     if not enabled(engine):
@@ -167,6 +307,14 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
         from .parser import section
         if any(not section(content,h) for h in ("需求映射","接口与数据","实施边界","验证")):
             raise ValueError("技术方案必须包含需求映射、接口与数据、实施边界和验证章节")
+        qr = quality_review(engine, feature_id)
+        if qr["is_current"] and qr["findings"]:
+            handling = section(content, "检查发现处理")
+            if not handling:
+                raise ValueError("当前质量检查存在未结发现，技术方案必须包含「## 检查发现处理」章节")
+            missing_ids = [f["id"] for f in qr["findings"] if f["id"] not in handling]
+            if missing_ids:
+                raise ValueError("技术方案「检查发现处理」缺少以下质量发现标识：" + ", ".join(missing_ids))
     with engine.db.transaction():
         active_sql = "SELECT 1 FROM tasks WHERE status IN ('IN_PROGRESS','VERIFYING','REVIEWING')"
         if kind != "constitution":
@@ -183,7 +331,10 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
         actual_input = input_fingerprint(engine, feature_id, kind)
         if input_sha is not None and input_sha != actual_input:
             raise SpecConflictError("生成期间上游规格已变化，旧结果已拒收")
-        if old and old["content_sha"] == document_sha(content) and old["input_sha"] == actual_input:
+        same_findings = True
+        if kind in ("checklist", "analyze") and findings is not None and old:
+            same_findings = checklist_findings_digest(engine, old["rev_id"]) == digest_json(findings)
+        if old and old["content_sha"] == document_sha(content) and old["input_sha"] == actual_input and same_findings:
             assert_source_current(engine, old)
             return old
         snap = _snapshot(engine, path, content, author=author, summary=summary)
@@ -195,11 +346,16 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
             (feature_id,rev_no,kind,path,snap["content_sha"],snap["id"],old["rev_id"] if old else None,
              assets["preset_id"],assets["preset_version"],assets["speckit_version"],actual_input,author,summary,
              handoff.model_dump_json() if handoff else "{}",now_iso()))
+        new_rev_id = int(cursor.lastrowid)
+        if kind in ("checklist", "analyze") and findings is not None:
+            engine.db.meta_set(f"speckit.analysis:{new_rev_id}", json.dumps(findings, ensure_ascii=False))
         if old:
             engine.db._exec("UPDATE spec_revisions SET status='STALE' WHERE rev_id=?", (old["rev_id"],))
         downstream = {"constitution": ["spec","plan","tasks","checklist","analyze"],
-                      "spec": ["plan","tasks","checklist","analyze"], "plan": ["tasks","analyze"],
-                      "tasks": ["analyze"], "checklist": [], "analyze": []}[kind]
+                      "spec": ["plan","tasks","checklist","analyze"],
+                      "checklist": ["plan","tasks","analyze"],
+                      "plan": ["tasks","analyze"],
+                      "tasks": ["analyze"], "analyze": []}[kind]
         if downstream:
             placeholders = ",".join("?" for _ in downstream)
             scope = "" if kind == "constitution" else " AND feature_id=?"
@@ -220,7 +376,7 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
                                scope_type="project",scope_id="project",summary="审阅当前功能技术方案")
         engine.db.add_event("speckit.revision_published", f"{feature_id} 的 {kind} 已保存修订 {rev_no}", actor=author)
         return dict(engine.db._query("SELECT r.*,d.content_text FROM spec_revisions r JOIN doc_versions d "
-                                     "ON d.id=r.content_version_id WHERE rev_id=?", (cursor.lastrowid,))[0])
+                                     "ON d.id=r.content_version_id WHERE rev_id=?", (new_rev_id,))[0])
 
 
 def add_clarifications(engine, feature_id: str, spec_rev_id: int, questions: list[ClarificationItem], *, actor: str) -> None:

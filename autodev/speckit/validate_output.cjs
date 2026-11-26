@@ -37,6 +37,17 @@ if (fs.existsSync(".vernal-schema.json")) {
   for(const heading of ({specify:["目标","用户场景","Non-Goals","需求"],plan:["需求映射","接口与数据","实施边界","验证"]}[step]||[])) {
     if(!new RegExp("^## "+heading+"\\s*\\n\\s*\\S","m").test(text)) throw Error("文档缺少非空章节："+heading);
   }
+  const reqFindingIds = Array.isArray(schema["x-vernal-require-findings-ids"]) ? schema["x-vernal-require-findings-ids"] : [];
+  if (step === "plan" && reqFindingIds.length) {
+    const start = text.match(/^## 检查发现处理\s*\n/m);
+    if (!start) throw Error("文档缺少非空章节：检查发现处理");
+    const rest = text.slice(start.index + start[0].length);
+    const nextIdx = rest.search(/^## /m);
+    const body = (nextIdx >= 0 ? rest.slice(0, nextIdx) : rest).trim();
+    if (!body) throw Error("文档缺少非空章节：检查发现处理");
+    const missing = reqFindingIds.filter(fid => !body.includes(fid));
+    if (missing.length) throw Error("检查发现处理章节缺少质量发现标识：" + missing.join(", "));
+  }
   if(step==="specify" && !/^### (?:REQ|NFR)-\d{3,} \[P[012]\] [^\n]+\n要求：[^\n]+\n验收：\n- \S/m.test(text)) throw Error("规格缺少有效需求与验收条目");
   if(step==="clarify" && (text.trim() || data.clarifications.length>3)) throw Error("澄清只返回至多三个问题，不改写正文");
   if(step==="tasks") {

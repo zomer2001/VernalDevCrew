@@ -18,17 +18,17 @@
     "upstream/v1.4.4/templates/commands/analyze.md": "bfd5a822d517f53d155e037535475bf94a6c6a7eeef801503b010832674ca686",
     "upstream/v1.4.4/templates/commands/checklist.md": "1192784f378fb977b408b72ca1bfb8fc55e129519f3f44bc5d0a7e152c480654",
     "upstream/v1.4.4/LICENSE": "2510b446bc1f0cf9702453075d20cd88631e20e5642658edb7325d9c1eb534f7",
-    "presets/vernal-core.json": "69589a48a05a6e34f638cf26e6c7cad981e0e9c6dab33296b8fe32e79cf8ffa9",
-    "presets/vernal-lite.json": "e91b9294a0248b494fc7e1b744c2b172f3768c69f997b448c128d20860a2e85d"
+    "presets/vernal-core.json": "16ba816a2dbf5c311e59d18b7880fff6c49a8c647131b75598004df06a703f52",
+    "presets/vernal-lite.json": "3264e02ab1775023f2c90a3b4b37922a46fe6530f06320f5b05aa063ad43e51b"
   },
   "presets": {
     "vernal-core": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "path": "presets/vernal-core.json",
       "mode": "append"
     },
     "vernal-lite": {
-      "version": "1.0.0",
+      "version": "1.1.0",
       "path": "presets/vernal-lite.json",
       "mode": "append"
     }

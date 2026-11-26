@@ -105,3 +105,37 @@ test("preflight restores its button after success or failure and prevents concur
     clearTimeout(toast._t);
   }
 });
+
+test("R4 quality review panel separates current and historical findings independently of last_step",()=>{
+  const el=dom();setActiveProjectId("qr-proj");
+  const data=state();
+  data.missions[0].state="WAITING_APPROVAL";
+  data.missions[0].quality_review={
+    feature_id:"f1",
+    status:"CURRENT",
+    is_current:true,
+    is_stale:false,
+    metadata_present:true,
+    checklist_rev_id:5,
+    checklist_rev_no:2,
+    counts:{CRITICAL:0,WARNING:2,INFO:0,total:2},
+    findings:[
+      {id:"CHK-5-01",severity:"WARNING",category:"feedback",target:"REQ-001",message:"保存反馈不明确 <img src=x>"},
+      {id:"CHK-5-02",severity:"WARNING",category:"nfr",target:"NFR-001",message:"兼容要求未登记到规格"}
+    ],
+    next_action:"存在 2 项提醒，后续技术方案与一致性检查将逐条落实处理",
+    history:[
+      {rev_id:2,rev_no:1,counts:{CRITICAL:1,WARNING:0,INFO:0,total:1},findings:[{id:"CHK-2-01",severity:"CRITICAL",category:"scope",target:"REQ-001",message:"历史严重问题"}]}
+    ]
+  };
+  data.features[0].last_step={step:"plan",findings:[]};
+  renderMissions(data,async()=>{});
+  const html=el.get("missions-mount").innerHTML;
+  assert.match(html,/id="mission-quality-review"/);
+  assert.match(html,/质量检查结果 · 第 2 版 · 严重 0 \/ 提醒 2 \/ 信息 0/);
+  assert.match(html,/CHK-5-01/);
+  assert.match(html,/CHK-5-02/);
+  assert.doesNotMatch(html,/<img src=x>/);
+  assert.match(html,/历史检查记录（1 版）/);
+  assert.match(html,/CHK-2-01/);
+});
