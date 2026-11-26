@@ -102,7 +102,21 @@ for cli in codex codebuddy opencode dsh claude; do
   else echo "==> $cli: 未检测到"; fi
 done
 
-[[ "${1:-}" != --probe ]] || exit 0
+if [[ "${1:-}" == --probe ]]; then
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  arch="$(uname -m)"
+  [[ "$arch" != aarch64 ]] || arch=arm64
+  [[ "$arch" != x86_64 ]] || arch=amd64
+  for bin_item in "$BIN_DIR/agentflow-runner" "$BIN_DIR/agentflow-gate-mcp-${os}-${arch}"; do
+    if [[ -x "$bin_item" ]]; then
+      digest="$(shasum -a 256 "$bin_item" 2>/dev/null | awk '{print $1}' || true)"
+      echo "==> binary: $(basename "$bin_item") sha256=${digest:-unknown}"
+    else
+      echo "==> binary: $(basename "$bin_item") 未下载"
+    fi
+  done
+  exit 0
+fi
 
 # 硬链接原子发布完整 PID，避免并行启动重复签发绑定码。
 pid_tmp="$(mktemp "$RUNNER_DIR/launcher.XXXXXX")"

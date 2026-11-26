@@ -148,6 +148,8 @@ def test_loopforge_harness_dispatches_auto_passes_reuses_issue_and_parses_result
                                 "status": "waiting",
                                 "attempt": 1,
                                 "reworkCount": 0,
+                                "exitCode": 0,
+                                "output": "已产出合法的 vernal-result.json",
                                 "error": "未收到 submit_gate_result",
                             }
                         },

@@ -520,3 +520,87 @@ def test_native_loopforge_gate_approval_syncs_back_to_vernal(tmp_path: Path) -> 
             assert "[D-03]" in box["rules"][decisions_rule_id("proj-s1")]["content"]
 
     eng.db.close()
+
+
+def test_steering_reconcile_enforces_shared_completion_policy(tmp_path: Path) -> None:
+    """Steering reconciliation must reject permission denials, missing artifacts, unknown nodes, and never auto-pass human_gate."""
+    box: dict = {}
+    transport = httpx.MockTransport(_make_steering_mock_lf(box))
+    real_async = httpx.AsyncClient
+    ws = init_workspace(tmp_path / "ws_steering_r1", name="SteeringPolicyApp", collaboration_mode="files")
+    eng = Engine(
+        ws,
+        settings=Settings(
+            collaboration_mode="files",
+            runtime_backend="loopforge",
+            loopforge_url="http://127.0.0.1:3100",
+            loopforge_token="tok_test",
+            loopforge_project_id="proj-s1",
+        ),
+    )
+    _seed_steering_project(eng)
+    app = create_app(eng, proxy_transport=transport)
+
+    with patch("autodev.loopforge.client.httpx.AsyncClient", lambda **kw: real_async(transport=transport)):
+        with TestClient(app, client=("127.0.0.1", 51103)) as client:
+            cp = client.post("/vernal-api/steering/start", json={"topic": "权限策略检查"}).json()["checkpoint"]
+            run_id = cp["loopforge_run_id"]
+
+            # 1) Explicit permission denial on agent node must NEVER call approve_run
+            box["runs"][run_id]["status"] = "waiting"
+            box["runs"][run_id]["nodes"] = {
+                "pm_opinion": {
+                    "status": "waiting_approval",
+                    "attempt": 1,
+                    "reworkCount": 0,
+                    "exitCode": 0,
+                    "error": "MCP tool call requires approval, but approval policy is never",
+                }
+            }
+            res1 = client.get("/vernal-api/steering").json()["checkpoints"][-1]
+            assert box["approvals"] == []
+            assert "审批策略" in (res1.get("last_error") or "")
+
+            # 2) Non-agent / unknown node type or missing required artifact must NEVER call approve_run
+            box["runs"][run_id]["nodes"] = {
+                "director_plan": {
+                    "status": "waiting_approval",
+                    "attempt": 1,
+                    "reworkCount": 0,
+                    "exitCode": 0,
+                    "error": "未收到 submit_gate_result",
+                },
+                "human_gate": {
+                    "status": "waiting_approval",
+                    "attempt": 1,
+                    "reworkCount": 0,
+                    "error": "submit_gate_result",
+                },
+            }
+            box["runs"][run_id]["artifacts"] = []
+            client.get("/vernal-api/steering")
+            assert box["approvals"] == []
+
+            # 3) Controlled recovery succeeds ONCE when current-turn required artifacts exist and stays idempotent
+            box["runs"][run_id]["nodes"] = {
+                "pm_opinion": {
+                    "status": "waiting_approval",
+                    "attempt": 1,
+                    "reworkCount": 0,
+                    "exitCode": 0,
+                    "error": "未收到 submit_gate_result",
+                }
+            }
+            box["runs"][run_id]["artifacts"] = [
+                {"id": "art-pm-1", "nodeId": "pm_opinion", "attempt": 1, "name": "opinion-pm.json", "content": '{"headline":"ok"}'}
+            ]
+            # Keep run in waiting on approve to test duplicate reconcile idempotency
+            orig_approve_override = []
+            client.get("/vernal-api/steering")
+            assert len(box["approvals"]) == 1
+            assert box["approvals"][0]["nodeId"] == "pm_opinion"
+            # Revert status back to waiting with same attempt/rework -> ledger must prevent duplicate approve_run
+            box["runs"][run_id]["status"] = "waiting"
+            client.get("/vernal-api/steering")
+            assert len(box["approvals"]) == 1
+    eng.db.close()

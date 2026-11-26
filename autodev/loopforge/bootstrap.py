@@ -390,7 +390,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
             "2. 严格在允许修改路径白名单内编写高质量、可运行的代码与测试，不得触碰未授权路径。\n"
             "3. 逐条执行所有「必跑验证命令」并修复任何报错，直到全部通过。\n"
             "4. 若为文件交接模式，将本次新增/修改的文件写入 `vernal-files.json`（格式 `{\"files\": {\"path\": \"content\"}}`）；若为 Git 模式，提交并推送到工作分支。\n"
-            "5. 结束回合前，若环境中存在 `submit_gate_result` MCP 工具，必须调用一次 `submit_gate_result`（参数 `decision=\"pass\"`, `reason=\"编码与自测通过\"`）提交节点结论。"
+            "5. 结束回合前，若环境中存在且允许调用 `submit_gate_result` MCP 工具，调用一次 `submit_gate_result`（参数 `decision=\"pass\"`, `reason=\"编码与自测通过\"`）；若被审批策略拒绝，如实记录受阻原因并正常退出，不得伪造终态。"
         ),
     }
 
@@ -427,7 +427,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
             "2. 检查改动文件是否全部位于允许修改路径白名单之内，且未破坏冻结契约。\n"
             "文件交付时用本工位的交付清单和复跑结果判定本节点。涉及原地回写的项目，在报告中把原目录验收列为后续平台交付检查。\n"
             "3. 将审查结论写入 `review-report.md`（首行写 `# PASS` 或 `# REJECT`，并附上核验依据）。\n"
-            "4. 结束回合前，必须调用一次 `submit_gate_result` MCP 工具：若通过传 `decision=\"pass\"`, `reason=\"契约与验收标准全部通过\"`；若不满足验收标准传 `decision=\"rework\"`, `reason=\"...\"`, `actionRequired=\"具体修复项\"`。"
+            "4. 结束回合前，若允许调用 `submit_gate_result` MCP 工具，调用一次：通过传 `decision=\"pass\"`, `reason=\"契约与验收标准全部通过\"`；不满足传 `decision=\"rework\"`, `reason=\"...\"`, `actionRequired=\"具体修复项\"`。若工具被审批策略拒绝，确保 `review-report.md` 已落盘并如实说明受阻原因。"
         ),
     }
     available = {s["slug"] for s in load_builtin_skills()}
@@ -505,7 +505,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
                 "1. 若需求正文给出了上下文还原命令，请先在当前工作目录执行该命令还原 `PLAN_PROMPT.md`、`inputs/` 与 `.vernal-schema.json`，再完整阅读 `PLAN_PROMPT.md`。\n"
                 "2. 严格按要求的 JSON Schema 生成唯一的 JSON 对象，并以 UTF-8 纯 JSON（不要包含 Markdown 代码块围栏）写入当前目录的 `vernal-result.json`。\n"
                 "3. 不要编写或提交无关的业务源码文件。\n"
-                "4. 结束回合前，若环境中存在 `submit_gate_result` MCP 工具，请调用一次 `submit_gate_result`（参数 `decision=\"pass\"`, `reason=\"已产出合法的 vernal-result.json\"`）。"
+                "4. 结束回合前，若环境中存在且允许调用 `submit_gate_result` MCP 工具，调用一次 `submit_gate_result`（参数 `decision=\"pass\"`, `reason=\"已产出合法的 vernal-result.json\"`）；若工具被审批策略拒绝，确保 `vernal-result.json` 已落盘并如实说明受阻原因后正常退出。"
             ),
         }
 
@@ -553,7 +553,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
                 "1. 若需求正文给出了上下文还原命令，先在当前目录执行该命令还原评审资料，再阅读需求正文中的【当前进展与议题】。\n"
                 f"2. 请确保目录 `opinions/` 存在，并将你的结构化意见以纯 UTF-8 JSON 写入 `{out_file}`，包含字段：\n"
                 '   `{"headline": "一句话核心判断", "keep": ["应保留的成果/规矩"], "change": ["建议修改的方向/规矩"], "rework_tasks": ["建议局部退回的任务ID"], "risks": ["关键风险"]}`。\n'
-                "3. 若存在 `submit_gate_result` MCP 工具，结束前调用 `submit_gate_result(decision=\"pass\", reason=\"已提交评审意见\")`。"
+                "3. 若存在且允许调用 `submit_gate_result` MCP 工具，结束前调用 `submit_gate_result(decision=\"pass\", reason=\"已提交评审意见\")`；若被审批策略拒绝，确保意见 JSON 已落盘并如实说明受阻原因。"
             ),
         }
 
@@ -606,7 +606,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
             "   - `cancel_tasks` (array)：因方向调整需关闭取消的未完成任务 ID 字符串数组，如 `[\"T-006\"]`；\n"
             "   - `new_tasks` (array)：需新增的任务卡，每项 `{\"milestone_id\": \"M1\", \"title\": \"人话标题\", \"description\": \"目标与细节\", \"role\": \"coder\", \"squad\": \"core\", \"depends_on\": [], \"allowed_paths\": [\"src/\"], \"verify_cmds\": [], \"acceptance_criteria\": [\"...\"]}`。\n"
             "2. 同时将面向人类阅读的简明变更说明写入 `steering-summary.md`。\n"
-            "3. 若存在 `submit_gate_result` MCP 工具，结束前调用 `submit_gate_result(decision=\"pass\", reason=\"已生成转向变更单\")`。"
+            "3. 若存在且允许调用 `submit_gate_result` MCP 工具，结束前调用 `submit_gate_result(decision=\"pass\", reason=\"已生成转向变更单\")`；若被审批策略拒绝，确保变更单与摘要文件已落盘并如实说明受阻原因。"
         ),
     }
 

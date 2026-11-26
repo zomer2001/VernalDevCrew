@@ -137,8 +137,8 @@ def test_local_services_bypass_host_proxy():
     assert use_environment_proxy("https://loopforge.example.com")
 
 
-def test_bridge_auto_passes_submit_gate_result_waiting_node(tmp_path, monkeypatch):
-    from autodev.loopforge.bridge import LoopForgeBridge
+def test_bridge_controlled_recovery_requires_current_turn_evidence_and_is_idempotent(tmp_path, monkeypatch):
+    from autodev.loopforge.bridge import LoopForgeBridge, poll_loopforge_run
 
     ws = init_workspace(tmp_path / "autopass", collaboration_mode="files")
     eng = Engine(ws)
@@ -149,24 +149,27 @@ def test_bridge_auto_passes_submit_gate_result_waiting_node(tmp_path, monkeypatc
     try:
         eng.db.save_plan(plan(), 3)
         eng.db.ensure_slots(1)
-        task = eng.db.get_task("T-001")
         eng.db.update_task("T-001", loopforge_issue_id="iss-1", loopforge_run_id="run-1")
 
         calls = []
-        states = [
-            {
-                "id": "run-1",
-                "status": "waiting",
-                "workflowSnapshot": {"nodes": [{"id": "implement", "type": "agent"}]},
-                "nodes": {
-                    "implement": {
-                        "status": "waiting_approval",
-                        "attempt": 1,
-                        "reworkCount": 0,
-                        "error": "未收到 submit_gate_result，恢复 CLI session 后仍未提交",
-                    }
-                },
+        waiting_state = {
+            "id": "run-1",
+            "status": "waiting",
+            "workflowSnapshot": {"nodes": [{"id": "implement", "type": "agent"}]},
+            "nodes": {
+                "implement": {
+                    "status": "waiting_approval",
+                    "attempt": 1,
+                    "reworkCount": 0,
+                    "exitCode": 0,
+                    "output": "编码与自测通过",
+                    "error": "未收到 submit_gate_result，恢复 CLI session 后仍未提交",
+                }
             },
+        }
+        states = [
+            waiting_state,
+            waiting_state,  # duplicate callback observation must remain idempotent
             {"id": "run-1", "status": "succeeded", "nodes": {"implement": {"status": "succeeded"}}},
         ]
 
@@ -174,16 +177,133 @@ def test_bridge_auto_passes_submit_gate_result_waiting_node(tmp_path, monkeypatc
             return states.pop(0)
 
         async def fake_approve(_, rid, comment="", node_id=""):
-            calls.append((rid, node_id))
+            calls.append((rid, node_id, comment))
             return {"ok": True}
 
         monkeypatch.setattr(LoopForgeClient, "get_run", fake_get_run)
         monkeypatch.setattr(LoopForgeClient, "approve_run", fake_approve)
         ok, _ = asyncio.run(LoopForgeBridge(eng.settings, eng.db).execute_task(eng.db.get_task("T-001"), "组", "slot-1", asyncio.Event()))
         assert ok is True
-        assert calls == [("run-1", "implement")]
+        assert len(calls) == 1 and calls[0][:2] == ("run-1", "implement")
+        assert "attempt=1" in calls[0][2] and "rework=0" in calls[0][2]
+
+        # Simulated restart: a fresh poll with the same DB must not re-approve the same turn or a stale earlier turn.
+        stale_client = LoopForgeClient("http://lf.test")
+        stale_client.get_run = AsyncMock(side_effect=[
+            waiting_state,
+            {**waiting_state, "nodes": {"implement": {**waiting_state["nodes"]["implement"], "attempt": 0}}},
+            {"id": "run-1", "status": "succeeded", "nodes": {"implement": {"status": "succeeded"}}},
+        ])
+        stale_client.approve_run = AsyncMock()
+        ok2, _, _ = asyncio.run(poll_loopforge_run(stale_client, "run-1", poll_interval=0, db=eng.db))
+        assert ok2 is True
+        assert stale_client.approve_run.await_count == 0
     finally:
         eng.db.close()
+
+
+@pytest.mark.parametrize(
+    ("case_name", "wf_node", "node_state", "artifacts", "expect_block"),
+    [
+        (
+            "permission_denied_english",
+            {"id": "draft", "type": "agent"},
+            {"status": "waiting_approval", "attempt": 1, "reworkCount": 0, "exitCode": 0,
+             "error": "MCP tool call requires approval, but approval policy is never"},
+            [],
+            True,
+        ),
+        (
+            "permission_denied_chinese_output",
+            {"id": "draft", "type": "agent"},
+            {"status": "waiting_approval", "attempt": 1, "reworkCount": 0, "exitCode": 0,
+             "error": "未收到 submit_gate_result",
+             "output": "`pass` 终态提交被审批策略拒绝。`submit_gate_result` 要求审批，当前环境禁止审批"},
+            [],
+            True,
+        ),
+        (
+            "unknown_node_type",
+            {"id": "mystery", "type": "custom_gate"},
+            {"status": "waiting_approval", "attempt": 1, "reworkCount": 0, "exitCode": 0,
+             "error": "未收到 submit_gate_result"},
+            [],
+            False,
+        ),
+        (
+            "human_approval_gate",
+            {"id": "signoff", "type": "approval"},
+            {"status": "waiting_approval", "attempt": 1, "reworkCount": 0,
+             "error": "submit_gate_result"},
+            [],
+            False,
+        ),
+        (
+            "nonzero_exit_code",
+            {"id": "implement", "type": "agent"},
+            {"status": "waiting_approval", "attempt": 1, "reworkCount": 0, "exitCode": 2,
+             "error": "未收到 submit_gate_result"},
+            [],
+            False,
+        ),
+        (
+            "missing_required_artifact",
+            {"id": "draft", "type": "agent", "artifactOutputs": [{"name": "vernal-result.json", "required": True}]},
+            {"status": "waiting_approval", "attempt": 1, "reworkCount": 0, "exitCode": 0,
+             "error": "未收到 submit_gate_result"},
+            [],
+            False,
+        ),
+        (
+            "stale_previous_attempt_artifact",
+            {"id": "draft", "type": "agent", "artifactOutputs": [{"name": "vernal-result.json", "required": True}]},
+            {"status": "waiting_approval", "attempt": 2, "reworkCount": 0, "exitCode": 0,
+             "startedAt": "2026-11-26T08:10:00Z", "error": "未收到 submit_gate_result"},
+            [{"nodeId": "draft", "attempt": 1, "name": "vernal-result.json", "content": "{}", "createdAt": "2026-11-26T08:05:00Z"}],
+            False,
+        ),
+        (
+            "bare_error_string_without_evidence",
+            {"id": "implement", "type": "agent"},
+            {"status": "waiting_approval", "attempt": 1, "reworkCount": 0,
+             "error": "未收到 submit_gate_result"},
+            [],
+            False,
+        ),
+    ],
+)
+def test_poll_completion_policy_never_auto_approves_unsafe_states(case_name, wf_node, node_state, artifacts, expect_block):
+    from autodev.loopforge.bridge import poll_loopforge_run
+
+    nid = wf_node["id"]
+    waiting = {
+        "id": f"run-{case_name}",
+        "status": "waiting",
+        "workflowSnapshot": {"nodes": [wf_node]},
+        "nodes": {nid: node_state},
+        "artifacts": artifacts,
+    }
+    client = LoopForgeClient("http://lf.test")
+    if expect_block:
+        client.get_run = AsyncMock(return_value=waiting)
+    else:
+        stop = asyncio.Event()
+        calls = {"n": 0}
+        async def _get(_rid):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                stop.set()
+            return waiting
+        client.get_run = _get
+    client.approve_run = AsyncMock()
+    client.reject_run = AsyncMock()
+    ok, _, msg = asyncio.run(
+        poll_loopforge_run(client, waiting["id"], poll_interval=0, stop_event=None if expect_block else stop)
+    )
+    assert ok is False
+    assert client.approve_run.await_count == 0
+    if expect_block:
+        assert "审批策略" in msg or "权限" in msg
 
 
 @pytest.mark.parametrize(

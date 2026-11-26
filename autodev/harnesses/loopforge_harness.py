@@ -266,7 +266,7 @@ class LoopForgeHarness(Harness):
             "请先在当前工作区执行下面这行命令还原完整任务说明 `PLAN_PROMPT.md`、`.vernal-schema.json` 与只读上下文文件：\n"
             f"```bash\n{restore_cmd}\n```\n"
             "然后完整阅读 `PLAN_PROMPT.md`，按其中要求的 JSON Schema 将唯一的合法 JSON 对象写入当前目录的 `vernal-result.json`。\n"
-            "切勿修改无关业务源码；完成后若存在 `submit_gate_result` MCP 工具请调用一次 `decision=\"pass\"`。\n"
+            "切勿修改无关业务源码；完成后若环境中存在且被授权调用 `submit_gate_result` MCP 工具，调用一次 `decision=\"pass\"`；若审批策略拒绝该工具，请如实说明权限受阻并正常退出，不要重复试探或伪造终态。\n"
         )
 
     async def _dispatch_plan(
@@ -458,6 +458,7 @@ class LoopForgeHarness(Harness):
                 stop_event=self.stop_event,
                 timeout_sec=float(self.settings.agent_timeout_sec),
                 on_progress=_on_progress,
+                db=self.db,
             )
         except (asyncio.CancelledError, Exception):
             _mark_plan_dispatch("NEEDS_CONFIRMATION")

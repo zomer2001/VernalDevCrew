@@ -14,6 +14,7 @@ from autodev.db import now_iso
 from autodev.loopforge.bootstrap import classify_lane, ensure_vernal_loopforge_assets, lane_workflow_id, review_workflow_id, sync_decisions_rule
 from autodev.loopforge.bridge import build_restore_command, sign_context_sig
 from autodev.loopforge.client import LoopForgeClient, LoopForgeError
+from autodev.loopforge.completion import CompletionCategory, CompletionLedger, evaluate_waiting_node
 from autodev.models import ACTIVE_TASK_STATUSES, MilestoneStatus, ProjectStatus, TaskStatus
 
 if TYPE_CHECKING:
@@ -411,20 +412,44 @@ async def reconcile_steering_checkpoint(engine: "Engine", checkpoint_id: int) ->
         if isinstance(n, dict) and n.get("id")
     }
 
-    # 仅自动放行非 approval 节点的 submit_gate_result 卡点，绝不自动放行 human_gate
+    # 与主执行路径共用同一完成策略：明确权限拒绝、未知节点、缺失当轮产物和 human_gate 均绝不自动放行
+    permission_error = ""
     if st in ("waiting", "waiting_approval"):
-        for nid, nr in nodes.items():
+        ledger = CompletionLedger(db=engine.db, run_id=run_id)
+        for nid, nr in list(nodes.items()):
             if not isinstance(nr, dict) or nr.get("status") not in ("waiting", "waiting_approval"):
                 continue
-            ntype = str((wf_nodes.get(nid) or {}).get("type") or "")
-            if ntype != "approval" and nid != "human_gate" and "submit_gate_result" in str(nr.get("error") or ""):
-                try:
-                    await client.approve_run(run_id, comment="Vernal 自动放行非审批节点", node_id=nid)
-                    run = await client.get_run(run_id)
-                    st = str(run.get("status") or "")
-                    nodes = run.get("nodes") or {}
-                except LoopForgeError:
-                    pass
+            decision = await evaluate_waiting_node(client, run, nid, nr, wf_nodes.get(nid))
+            if decision.category == CompletionCategory.CALLBACK_PERMISSION_DENIED:
+                permission_error = decision.reason
+                engine.db.add_event(
+                    "steering.permission_denied",
+                    decision.reason,
+                    actor="VernalSteering",
+                    payload={"checkpoint_id": checkpoint_id, "run_id": run_id, "node_id": nid},
+                )
+                continue
+            if decision.action != "approve_recovery":
+                continue
+            dup_or_stale, _why = ledger.is_duplicate_or_stale(decision)
+            if dup_or_stale:
+                continue
+            try:
+                await client.approve_run(
+                    run_id,
+                    comment=(
+                        f"Vernal 转向受控恢复完成确认（node={nid} attempt={decision.attempt} "
+                        f"rework={decision.rework_count} digest={decision.artifact_digest} "
+                        f"key={decision.idempotency_key}）"
+                    ),
+                    node_id=nid,
+                )
+                ledger.record(decision)
+                run = await client.get_run(run_id)
+                st = str(run.get("status") or "")
+                nodes = run.get("nodes") or {}
+            except LoopForgeError:
+                pass
 
     opinions = dict(cp.get("opinions") or {})
     for slug in ("pm", "arch", "qa"):
@@ -444,6 +469,8 @@ async def reconcile_steering_checkpoint(engine: "Engine", checkpoint_id: int) ->
         ):
             return current
         fields = {"opinions": opinions}
+        if permission_error:
+            fields["last_error"] = permission_error
         if draft:
             digest = hashlib.sha256(json.dumps(draft, sort_keys=True).encode()).hexdigest()
             if digest != cp["draft_artifact_id"]:

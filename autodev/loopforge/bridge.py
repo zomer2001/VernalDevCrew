@@ -16,6 +16,7 @@ from autodev.db import Database, Task
 from autodev.harnesses.base import Usage
 from autodev.loopforge.bootstrap import classify_lane, ensure_local_git_workflow, ensure_vernal_loopforge_assets, lane_workflow_id
 from autodev.loopforge.client import LoopForgeClient, LoopForgeError
+from autodev.loopforge.completion import CompletionCategory, CompletionLedger, evaluate_waiting_node, is_review_node, read_review_verdict
 from autodev.models import TaskStatus
 from autodev.loopforge.protocol import FILE_DELIVERY_STAGES
 
@@ -145,15 +146,8 @@ def extract_run_text(run: dict[str, Any]) -> str:
 
 
 async def _review_verdict(client: LoopForgeClient, run: dict, node_id: str) -> tuple[str, str]:
-    try:
-        report = await client.named_artifact(run, "review-report.md", node_id=node_id)
-    except LoopForgeError as exc:
-        return "", str(exc)
-    heading, _, details = report.strip().partition("\n")
-    verdict = heading.strip()
-    if verdict not in {"# PASS", "# REJECT"}:
-        return "", "审查报告首行缺少 # PASS 或 # REJECT"
-    return verdict, details.strip()[:1200] or verdict
+    verdict, detail, _ = await read_review_verdict(client, run, node_id)
+    return verdict, detail
 
 
 async def poll_loopforge_run(
@@ -165,12 +159,13 @@ async def poll_loopforge_run(
     timeout_sec: float | None = None,
     on_progress: Callable[[str, str, dict[str, Any]], None] | None = None,
     on_auto_passed: Callable[[str, str], None] | None = None,
+    db: Database | None = None,
 ) -> tuple[bool, dict[str, Any], str]:
-    """统一轮询 LoopForge Run 直到终态，自动放行已完成 CLI 节点的 submit_gate_result 卡点。"""
+    """统一轮询 LoopForge Run 直到终态，按统一完成策略核对当前轮证据与幂等键。"""
     loop = asyncio.get_running_loop()
     deadline = (loop.time() + timeout_sec) if timeout_sec else None
     last_summary = ""
-    decided_gates: set[tuple[str, Any, Any]] = set()
+    ledger = CompletionLedger(db=db, run_id=run_id)
     latest_run: dict[str, Any] = {}
 
     while stop_event is None or not stop_event.is_set():
@@ -188,10 +183,7 @@ async def poll_loopforge_run(
             for n in ((run.get("workflowSnapshot") or {}).get("nodes") or [])
             if isinstance(n, dict) and n.get("id")
         }
-        reviews = {nid for nid, spec in wf_nodes.items() if any(
-            out.get("name") == "review-report.md" and out.get("required", True)
-            for out in spec.get("artifactOutputs") or [] if isinstance(out, dict)
-        )}
+        reviews = {nid for nid, spec in wf_nodes.items() if is_review_node(spec)}
         gate_note = ""
         active_nodes = [
             f"{nid}:{nr.get('status')}"
@@ -199,44 +191,55 @@ async def poll_loopforge_run(
             if isinstance(nr, dict) and nr.get("status") in ("running", "waiting", "waiting_approval")
         ]
 
-        # 非人工审批节点仅因 CLI 未回调 submit_gate_result 挂起时自动放行，交由后续确定性脚本/审查把关
-        if st == "waiting":
-            did_auto_pass = False
+        if st in ("waiting", "waiting_approval"):
+            did_advance = False
             for nid, nr in nodes.items():
                 if not isinstance(nr, dict) or nr.get("status") not in ("waiting", "waiting_approval"):
                     continue
-                ntype = str((wf_nodes.get(nid) or {}).get("type") or "")
-                nerr = str(nr.get("error") or "")
-                key = (nid, nr.get("attempt"), nr.get("reworkCount"))
-                if ntype == "agent" and "submit_gate_result" in nerr and key not in decided_gates:
-                    if nid in reviews:
-                        verdict, detail = await _review_verdict(client, run, nid)
-                        if not verdict:
-                            gate_note = f"。等待本轮独立审查报告。{detail}"
-                            continue
-                        if verdict == "# REJECT":
-                            gate_note = f"。独立审查要求返工。{detail[:220]}"
-                            try:
-                                await client.reject_run(run_id, reason=detail, node_id=nid,
-                                                        target_node=wf_nodes[nid].get("rejectTo", ""))
-                                decided_gates.add(key)
-                            except LoopForgeError as exc:
-                                gate_note += f"。提交返工失败。{exc}"
-                            continue
+                decision = await evaluate_waiting_node(client, run, nid, nr, wf_nodes.get(nid))
+                if decision.category == CompletionCategory.CALLBACK_PERMISSION_DENIED:
+                    if on_progress:
+                        on_progress(st, f"LoopForge [{st}] {decision.reason}", run)
+                    return False, run, decision.reason
+                if decision.action == "wait":
+                    if decision.category == CompletionCategory.ARTIFACT_INVALID and decision.reason:
+                        gate_note = f"。{decision.reason}"
+                    continue
+                dup_or_stale, _why = ledger.is_duplicate_or_stale(decision)
+                if dup_or_stale:
+                    continue
+                if decision.action == "reject_rework":
+                    gate_note = f"。独立审查要求返工。{decision.reason[:220]}"
+                    try:
+                        await client.reject_run(
+                            run_id,
+                            reason=decision.reason,
+                            node_id=nid,
+                            target_node=decision.reject_target,
+                        )
+                        ledger.record(decision)
+                    except LoopForgeError as exc:
+                        gate_note += f"。提交返工失败。{exc}"
+                    continue
+                if decision.action == "approve_recovery":
                     try:
                         await client.approve_run(
                             run_id,
-                            comment="Vernal 自动放行已完成 CLI 回合（submit_gate_result 兜底）",
+                            comment=(
+                                f"Vernal 受控恢复完成确认（node={nid} attempt={decision.attempt} "
+                                f"rework={decision.rework_count} digest={decision.artifact_digest} "
+                                f"key={decision.idempotency_key}）"
+                            ),
                             node_id=nid,
                         )
-                        decided_gates.add(key)
+                        ledger.record(decision)
                         if on_auto_passed:
                             on_auto_passed(nid, "")
-                        did_auto_pass = True
+                        did_advance = True
                     except LoopForgeError as exc:
                         if on_auto_passed:
                             on_auto_passed(nid, str(exc))
-            if did_auto_pass:
+            if did_advance:
                 await asyncio.sleep(min(1.0, poll_interval))
                 continue
 
@@ -739,6 +742,7 @@ class LoopForgeBridge:
             timeout_sec=float(self.settings.agent_timeout_sec),
             on_progress=_on_progress,
             on_auto_passed=_on_auto_passed,
+            db=self.db,
         )
         if ok and task.feature_id:
             from autodev.speckit.compiler import assert_package_current
