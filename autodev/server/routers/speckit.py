@@ -194,8 +194,12 @@ class MissionRequest(BaseModel):
     expected_revision: int = Field(default=0,ge=0)
 
 
-class ContinueRequest(BaseModel):
+class RevisionGuard(BaseModel):
     expected_revision: int = Field(ge=1)
+
+
+class ContinueRequest(RevisionGuard):
+    retry_failed: bool = False
 
 
 class MissionAnswer(BaseModel):
@@ -209,12 +213,12 @@ class MissionAnswers(BaseModel):
     answers: list[MissionAnswer] = Field(min_length=1,max_length=3)
 
 
-class PrerequisiteEvidence(ContinueRequest):
+class PrerequisiteEvidence(RevisionGuard):
     key: str
     evidence: str = Field(min_length=1,max_length=10000)
 
 
-class ConvertProfileRequest(ContinueRequest):
+class ConvertProfileRequest(RevisionGuard):
     target_preset: Literal["vernal-core", "vernal-lite"]
     target_process: Literal["standard", "quick-prototype", "feature", "bugfix"]
     reason: str = Field(default="", max_length=500)
@@ -246,14 +250,14 @@ def start_lite_delivery(ctx, slot, task_ids, *, bound=None):
     return True
 
 
-async def _continue(request,feature,revision):
+async def _continue(request,feature,revision, *, retry_failed=False):
     eng=_engine(request,write=True,continuing=True)
     ctx = get_ctx(request)
     slot = ctx.active_slot(request)
     if (slot.plan_task and not slot.plan_task.done()) or ctx.is_scheduler_running(slot):
         raise service.SpecConflictError("项目已有规划或执行任务")
     mission = missions.get(eng, feature)
-    if mission and mission["revision"] == revision and mission.get("lite_revisions"):
+    if not retry_failed and mission and mission["revision"] == revision and mission.get("lite_revisions"):
         frozen = [t.task_id for t in eng.db.list_tasks() if t.feature_id == feature]
         if len(frozen) == 1:
             bound = asyncio.get_running_loop().create_future()
@@ -267,7 +271,8 @@ async def _continue(request,feature,revision):
     check = await preflight.inspect(eng)
     if not check["ready"]:
         return {"started": False, "preflight": check}
-    return {**await reconciler.start(eng, feature, revision, actor=effective_actor()), "preflight": check}
+    result = await reconciler.start(eng, feature, revision, actor=effective_actor(), retry_failed=retry_failed)
+    return {**result, "preflight": check}
 
 
 @router.get("/vernal-api/missions/preflight")
@@ -287,7 +292,7 @@ def mission_save(req: MissionRequest,request: Request):
 @router.post("/vernal-api/missions/{feature}/continue")
 async def mission_continue(feature: str,req: ContinueRequest,request: Request):
     try:
-        return await _continue(request,feature,req.expected_revision)
+        return await _continue(request, feature, req.expected_revision, retry_failed=req.retry_failed)
     except (ValueError,OSError) as exc:
         raise _error(exc) from exc
 

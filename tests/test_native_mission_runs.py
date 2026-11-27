@@ -202,6 +202,52 @@ def test_terminal_failures_do_not_publish_or_dispatch_again(project, monkeypatch
     assert len(runs) == 1 and not service.latest(project, "example")
 
 
+def test_continue_retries_only_the_latest_terminal_failure(project, monkeypatch):
+    service.enable(project, "vernal-core")
+    mission = missions.save(project, "example", "保存记录", "feature", 0, actor="owner")
+    runs = mock_bundles(project, monkeypatch, lambda _: dict(assessed(), constitution_markdown="验收依据"))
+
+    async def ready(_):
+        return {"ready": True}
+
+    monkeypatch.setattr(preflight, "inspect", ready)
+    with TestClient(create_app(project)) as web:
+        def proceed(**options):
+            return web.post("/vernal-api/missions/example/continue",
+                            json={"expected_revision": mission["revision"], **options})
+
+        assert proceed(retry_failed=True).status_code == 409
+        first = proceed().json()["run_id"]
+        runs[first]["status"] = "failed"
+        assert web.post("/vernal-api/missions/recover").is_success
+        assert proceed().status_code == 409
+        assert proceed(retry_failed=False).status_code == 409
+
+        # A terminal local receipt alone cannot prove a native Run has stopped.
+        runs[first]["status"] = "waiting"
+        assert proceed(retry_failed=True).status_code == 409
+        assert list(runs) == [first]
+        runs[first]["status"] = "failed"
+        second = proceed(retry_failed=True).json()["run_id"]
+        assert second != first
+        assert proceed(retry_failed=True).json()["run_id"] == second
+
+        runs[second]["status"] = "cancelled"
+        assert web.post("/vernal-api/missions/recover").is_success
+        assert proceed().status_code == 409
+        third = proceed(retry_failed=True).json()["run_id"]
+        assert web.post("/vernal-api/missions/recover").is_success
+        assert proceed(retry_failed=True).status_code == 409
+        assert list(runs) == [first, second, third]
+
+    rows = project.db._query("SELECT attempt_no, command_key, lf_run_id, state FROM dispatch_records ORDER BY dispatch_id")
+    key = rows[0]["command_key"]
+    assert [tuple(row) for row in rows] == [
+        (1, key, first, "FAILED"), (2, key + ":attempt:2", second, "FAILED"),
+        (3, key + ":attempt:3", third, "FINISHED"),
+    ]
+
+
 def test_concurrent_reconcilers_share_one_workspace_lease(project, monkeypatch):
     service.enable(project, "vernal-core")
     missions.save(project, "example", "保存记录", "feature", 0, actor="owner")

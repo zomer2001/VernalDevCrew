@@ -43,7 +43,35 @@ def _finish(engine, receipt, display, category, message, *, run=None, diagnostic
                                                       "failure_category": category})
 
 
-async def start(engine, feature, revision, *, actor):
+async def _failed_planning_receipt(engine, feature):
+    rows = engine.db._query(
+        "SELECT * FROM dispatch_records WHERE feature_id=? AND stage IN ('lite_bundle','std_spec','std_plan') "
+        "ORDER BY dispatch_id DESC LIMIT 1", (feature,))
+    if not rows or rows[0]["state"] != "FAILED":
+        raise service.SpecConflictError("仅可重试最近一次已失败的规划")
+    receipt = dict(rows[0])
+    if not receipt["issue_id"]:
+        return receipt  # No native dispatch took place.
+    try:
+        client = receipt_client(engine, receipt)
+        rid = receipt["lf_run_id"]
+        if not rid and receipt["lf_task_id"]:
+            task = await client.get_task(receipt["lf_task_id"])
+            if task.get("id") != receipt["lf_task_id"] or task.get("issueId") != receipt["issue_id"]:
+                raise service.SpecConflictError("原生 Task 与失败收据不匹配")
+            rid = task.get("runId")
+            if not rid and task.get("status") in ("failed", "cancelled"):
+                return receipt
+        if rid:
+            run = await owned_run(engine, client, receipt, rid)
+            if run.get("status") in ("succeeded", "failed", "cancelled"):
+                return receipt
+    except LoopForgeError as exc:
+        raise service.SpecConflictError("无法核对原生执行状态，请稍后再试") from exc
+    raise service.SpecConflictError("尚未确认上次原生执行已结束")
+
+
+async def start(engine, feature, revision, *, actor, retry_failed=False):
     db = engine.db
     mission = missions.get(engine, feature)
     if not mission or mission["revision"] != revision:
@@ -57,6 +85,7 @@ async def start(engine, feature, revision, *, actor):
         raise service.SpecConflictError(mission.get("last_error") or "派发请求已登记，正在核对原生回执")
     try:
         with _lease(engine):
+            previous = await _failed_planning_receipt(engine, feature) if retry_failed else None
             with db.transaction():
                 missions.assert_idle(engine)
                 mission = missions.get(engine, feature)
@@ -68,14 +97,17 @@ async def start(engine, feature, revision, *, actor):
                 baseline = missions.planning_inputs(engine, mission)
                 prompt, schema, role = adapter.planning_request(engine, mission, stage)
                 key = f"mission:{feature}:{stage}:{baseline}"
-                receipt, fresh = dispatch.reserve(db, f"plan:{engine.settings.loopforge_project_id}:{feature}:{stage}", 0, 1, "", actor, command=key)
-                if not fresh and receipt["state"] == "FAILED" and not receipt["issue_id"]:
-                    # An explicit continue may repeat preflight when no native dispatch took place.
-                    dispatch.record(db, receipt, "DISPATCHING")
-                    fresh = True
+                attempt = 1
+                if previous:
+                    if previous["stage"] != stage or previous["expected_baseline_sha"] != baseline:
+                        raise service.SpecConflictError("规划输入已变化，请按当前版本继续")
+                    attempt = previous["attempt_no"] + 1
+                    key += f":attempt:{attempt}"
+                receipt, fresh = dispatch.reserve(db, f"plan:{engine.settings.loopforge_project_id}:{feature}:{stage}",
+                                                  0, attempt, "", actor, command=key)
                 if not fresh:
                     if receipt["state"] == "FAILED":
-                        raise service.SpecConflictError(mission.get("last_error") or "该输入的原生执行已失败，请核对记录并修订输入")
+                        raise service.SpecConflictError(mission.get("last_error") or "该输入的原生执行已失败，请核对记录后显式重试")
                     return {"started": False, "run_id": receipt["lf_run_id"]}
                 receipt.update(feature_id=feature, stage=stage, expected_baseline_sha=baseline)
                 db._exec("UPDATE dispatch_records SET feature_id=?,stage=?,expected_baseline_sha=? WHERE dispatch_id=?",
@@ -83,7 +115,7 @@ async def start(engine, feature, revision, *, actor):
                 dispatch.bind_baseline(db, receipt, {"spec_sha": (service.latest(engine, feature) or {}).get("content_sha", ""),
                     "contract_sha": compiler.contract_hash(engine), "asset_versions": assets.generation_baseline(engine)["assets"]})
                 mission.update(active_dispatch_id=receipt["dispatch_id"], native_display="RUNNING", failure_category=None,
-                               last_error="", run_id="", local_run_id=db.start_run(f"_speckit_{feature}_{stage}", 1,
+                               last_error="", run_id="", local_run_id=db.start_run(f"_speckit_{feature}_{stage}", attempt,
                                                                                 "SPEC_KIT", engine.harness.name))
                 missions._store(engine, mission)
             try:
