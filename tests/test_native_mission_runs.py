@@ -104,6 +104,7 @@ def test_service_restart_collects_run_once_without_dispatch(project, monkeypatch
     run = dict(id="run-R", projectId="mission-test", issueId="issue-I", status="running",
                nodes={"draft_spec": {"status": "running", "reworkCount": 1}}, workflowSnapshot=wf)
     assets, posts = {}, []
+    read_status = 200
     monkeypatch.setattr(project.settings, "effective_loopforge_token", lambda: "request-session-token")
     def native(req):
         path = req.url.path
@@ -130,6 +131,8 @@ def test_service_restart_collects_run_once_without_dispatch(project, monkeypatch
             data = {"id": "queued-T", "issueId": "issue-I", "runId": "run-R"}
         elif path == "/api/runs/run-R":
             assert req.headers["authorization"] == "Bearer " + project.settings.service_token()
+            if read_status != 200:
+                return httpx.Response(read_status, json={"error": "authentication required"})
             data = run
         else: data = {}
         return httpx.Response(200, json=data)
@@ -149,7 +152,15 @@ def test_service_restart_collects_run_once_without_dispatch(project, monkeypatch
         assert web.app.state.ctx.active_slot().plan_task is None
         assert web.post("/vernal-api/missions/recover").is_success
         assert web.get("/vernal-api/specifications").json()["missions"][0]["display_state"] == "REWORKING"
+        read_status = 401 if queued else 403
+        assert web.post("/vernal-api/missions/recover").is_success
+        receipt, = project.db._query("SELECT dispatch_id,state FROM dispatch_records")
+        active = missions.get(project, "feature")
+        assert receipt["state"] == "RUNNING" and receipt["dispatch_id"] == active["active_dispatch_id"]
+        assert str(read_status) in active["last_error"]
+        assert web.post(endpoint, json={"expected_revision": mission["revision"]}).json()["run_id"] == "run-R"
     assert not service.latest(project, "feature")
+    read_status = 200
     run.update(status="succeeded", artifacts=native_result(stage, value, quality))
     reopened = Engine(project.ws, settings=project.settings)
     try:
@@ -169,10 +180,49 @@ def test_service_restart_collects_run_once_without_dispatch(project, monkeypatch
     finally:
         reopened.db.close()
 
+@pytest.mark.parametrize("changed", [False, True])
+def test_recover_old_auth_failure_uses_original_run_and_baseline(project, monkeypatch, changed):
+    from test_lite_bundle import bundle
+    mission = missions.save(project, "feature", "保存记录", "feature", 0, actor="owner")
+    runs = mock_bundles(project, monkeypatch, lambda _: bundle())
+    started = asyncio.run(reconciler.start(project, "feature", mission["revision"], actor="owner"))
+    receipt = dict(project.db._query("SELECT * FROM dispatch_records")[0])
+    reconciler._finish(project, receipt, "EXECUTION_FAILED", FailureCategory.ENV_OR_CONFLICT_BLOCKED,
+                       "authentication required")
+    if changed:
+        missions.save(project, "feature", "新增导出", "feature", mission["revision"], actor="owner")
+    slot = SimpleNamespace(engine=project)
+    for _ in range(2):
+        asyncio.run(reconciler.reconcile_once(None, slot, recover_auth=True))
+    attempt, = project.db._query("SELECT attempt_no,state,lf_run_id FROM dispatch_records")
+    assert tuple(attempt) == (1, "FAILED" if changed else "FINISHED", started["run_id"])
+    assert list(runs) == [started["run_id"]]
+    local, = project.db._query("SELECT session_id,verdict FROM task_runs")
+    assert tuple(local) == (started["run_id"], "ERROR" if changed else "PASS")
+    completed = project.db._query("SELECT 1 FROM events WHERE event_type='mission.completed'")
+    assert len(completed) == (0 if changed else 1)
+    if not changed:
+        assert missions.view(project, missions.get(project, "feature"))["state"] == "WAITING_APPROVAL"
+
+
+def test_delivery_poll_waits_for_read_access_to_the_same_run():
+    from autodev.loopforge.bridge import poll_loopforge_run
+
+    statuses = iter([401, 403, 200])
+    def native(request):
+        assert request.method == "GET" and request.url.path == "/api/runs/run-R"
+        return httpx.Response(next(statuses), json={"id": "run-R", "status": "succeeded"})
+
+    client = LoopForgeClient("http://test", transport=httpx.MockTransport(native))
+    success, run, _ = asyncio.run(poll_loopforge_run(client, "run-R", poll_interval=0, timeout_sec=5))
+    assert success and run["id"] == "run-R"
+
+
 @pytest.mark.parametrize("fault,display,category", [
     ("exhausted", "REWORK_EXHAUSTED", FailureCategory.ARTIFACT_DEFECT),
     ("old_turn", "EXECUTION_FAILED", FailureCategory.ARTIFACT_DEFECT),
     ("unrelated_issue", "EXECUTION_FAILED", FailureCategory.ENV_OR_CONFLICT_BLOCKED),
+    ("unrelated_project", "EXECUTION_FAILED", FailureCategory.ENV_OR_CONFLICT_BLOCKED),
     ("denied", "EXECUTION_FAILED", FailureCategory.ENV_OR_CONFLICT_BLOCKED),
 ])
 def test_terminal_failures_do_not_publish_or_dispatch_again(project, monkeypatch, fault, display, category):
@@ -187,6 +237,8 @@ def test_terminal_failures_do_not_publish_or_dispatch_again(project, monkeypatch
             run["nodes"] = {"quality_check": {"reworkCount": 1, "attempt": 2, "status": "succeeded"}}
         elif fault == "unrelated_issue":
             run["issueId"] = "another-issue"
+        elif fault == "unrelated_project":
+            run["projectId"] = "another-project"
         elif fault == "exhausted":
             run.update(status="failed", nodes={"validate_spec": {"status":"failed", "reworkCount":2, "error":"缺少 P0"}})
         else:
@@ -297,11 +349,14 @@ def test_delivery_reconciler_binds_queued_run_and_waits_for_terminal(project, mo
                      "WHERE dispatch_id=?", (package.compiled_task_hash, receipt["dispatch_id"]))
     native = dict(id="R", status="running", projectId=project.settings.loopforge_project_id, issueId="issue",
                   nodes={"implement": {"status": "running", "reworkCount": 1}})
+    read_status = 401
     def remote(req):
         assert req.method == "GET"
         if req.url.path == "/api/tasks/accepted":
             return httpx.Response(200, json={"id": "accepted", "issueId": "issue", "runId": "R"})
         assert req.url.path == "/api/runs/R"
+        if read_status != 200:
+            return httpx.Response(read_status, json={"error": "authentication required"})
         return httpx.Response(200, json=native)
     client = LoopForgeClient("http://test", transport=httpx.MockTransport(remote))
     monkeypatch.setattr(reconciler, "receipt_client", lambda *_: client)
@@ -309,6 +364,10 @@ def test_delivery_reconciler_binds_queued_run_and_waits_for_terminal(project, mo
     monkeypatch.setattr(routes, "start_lite_delivery", lambda ctx, slot, ids: calls.append(ids))
     slot = SimpleNamespace(engine=project)
     ctx = SimpleNamespace(is_scheduler_running=lambda _: bool(calls))
+    asyncio.run(reconciler.reconcile_once(ctx, slot))
+    receipt_state, = project.db._query("SELECT state FROM dispatch_records WHERE stage='lite_delivery'")
+    assert receipt_state["state"] == "RUNNING" and not calls
+    read_status = 200
     asyncio.run(reconciler.reconcile_once(ctx, slot))
     assert missions.view(project, missions.get(project, "feature"))["display_state"] == "REWORKING"
     assert not calls

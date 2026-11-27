@@ -397,7 +397,7 @@ async def mission_recover(request: Request):
         from autodev.governance import check_role_permission
         check_role_permission(eng.db,effective_actor(),("admin", "architect", "developer"),
                               project=eng.settings.loopforge_project_id or eng.ws.root.name)
-        await reconciler.reconcile_once(ctx, slot)
+        await reconciler.reconcile_once(ctx, slot, recover_auth=True)
         return {"recovered":True}
     except PermissionError as exc:
         raise HTTPException(403,detail=str(exc)) from exc

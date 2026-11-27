@@ -17,7 +17,7 @@ from autodev.config import Settings
 from autodev.db import Database, Task
 from autodev.harnesses.base import Usage
 from autodev.loopforge.bootstrap import classify_lane, ensure_local_git_workflow, ensure_vernal_loopforge_assets, lane_workflow_id
-from autodev.loopforge.client import LoopForgeClient, LoopForgeError
+from autodev.loopforge.client import LoopForgeClient, LoopForgeError, ReadAccessError
 from autodev.loopforge.completion import CompletionCategory, CompletionLedger, evaluate_waiting_node, is_review_node, read_review_verdict
 from autodev.models import TaskStatus
 from autodev.loopforge.protocol import FILE_DELIVERY_STAGES, native_progress
@@ -323,6 +323,13 @@ async def poll_loopforge_run(
             return False, latest_run, f"LoopForge Run {run_id} 执行超时 ({int(timeout_sec or 0)}s)"
         try:
             run = await client.get_run(run_id)
+        except ReadAccessError as exc:
+            summary = f"后台身份暂时无法读取执行状态（HTTP {exc.status_code}），已保留派发记录。"
+            if on_progress and summary != last_summary:
+                on_progress("running", summary, latest_run)
+            last_summary = summary
+            await asyncio.sleep(poll_interval)
+            continue
         except LoopForgeError as exc:
             _finalize_timing("poll_error")
             return False, latest_run, f"查询 LoopForge Run {run_id} 失败：{exc}"

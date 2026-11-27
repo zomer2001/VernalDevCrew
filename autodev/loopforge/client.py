@@ -57,6 +57,10 @@ class MissingArtifactError(LoopForgeError):
     """The index for this native Run has no matching artifact from the requested turn."""
 
 
+class ReadAccessError(LoopForgeError):
+    """The server denied an observation. The execution outcome is still unknown."""
+
+
 def run_project_id(run: dict) -> str:
     context = run.get("executionContext") or {}
     stamped, flat = context.get("projectId"), run.get("projectId")
@@ -112,7 +116,8 @@ class LoopForgeClient:
             data = {"text": resp.text}
         if resp.status_code >= 400:
             err = data.get("error") if isinstance(data, dict) else resp.text
-            raise LoopForgeError(str(err or f"HTTP {resp.status_code}"), status_code=resp.status_code)
+            error = ReadAccessError if method == "GET" and resp.status_code in (401, 403) else LoopForgeError
+            raise error(str(err or f"HTTP {resp.status_code}"), status_code=resp.status_code)
         return data
 
     async def health(self) -> tuple[bool, dict[str, Any]]:

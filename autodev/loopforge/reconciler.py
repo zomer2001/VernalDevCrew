@@ -9,7 +9,7 @@ from autodev import public_pool
 from autodev.engine import OpsError
 from autodev.loopforge import dispatch
 from autodev.loopforge.bridge import extract_run_usage, reconcile_waiting_nodes
-from autodev.loopforge.client import LoopForgeClient, LoopForgeError, MissingArtifactError
+from autodev.loopforge.client import LoopForgeClient, LoopForgeError, MissingArtifactError, ReadAccessError
 from autodev.loopforge.completion import CompletionLedger
 from autodev.loopforge.protocol import FailureCategory, native_progress
 from autodev.scheduler import _FileLock
@@ -241,16 +241,58 @@ async def accept_plan_result(engine, receipt, mission, run, client):
         _finish(engine, receipt, None, None, "", run=run)
 
 
-async def reconcile_once(ctx, slot):
+def _restore_legacy_auth_receipts(engine):
+    """Reattach a previously closed observation to its original attempt under the workspace lease."""
+    db = engine.db
+    restored = []
+    with db.transaction():
+        for mission in missions.all_missions(engine):
+            rid, feature = mission.get("run_id"), mission["feature_id"]
+            if (not rid or mission.get("active_dispatch_id") or mission.get("last_error") != "authentication required"
+                    or mission.get("failure_category") != FailureCategory.ENV_OR_CONFLICT_BLOCKED):
+                continue
+            rows = db._query("SELECT * FROM dispatch_records WHERE feature_id=? ORDER BY dispatch_id DESC LIMIT 1", (feature,))
+            if not rows:
+                continue
+            receipt = dict(rows[0])
+            if (receipt["state"] != "FAILED" or receipt["lf_run_id"] != rid or not receipt["issue_id"]
+                    or receipt["stage"] not in ("lite_bundle", "std_spec", "std_plan")):
+                continue
+            local = db._query("SELECT run_id FROM task_runs WHERE task_id=? AND session_id=? AND attempt_no=? "
+                              "AND stage='SPEC_KIT' AND verdict='ERROR' AND summary_log=?",
+                              (f"_speckit_{feature}_{receipt['stage']}", rid, receipt["attempt_no"], mission["last_error"]))
+            if len(local) != 1:
+                continue
+            try:
+                missions.assert_idle(engine)
+                if missions.planning_inputs(engine, mission) != receipt["expected_baseline_sha"]:
+                    continue
+            except service.SpecConflictError:
+                continue
+            local_id = local[0]["run_id"]
+            db._exec("UPDATE task_runs SET finished_at=NULL, exit_code=NULL, verdict=NULL, summary_log=NULL WHERE run_id=?",
+                     (local_id,))
+            dispatch.record(db, receipt, "RUNNING")
+            mission.update(active_dispatch_id=receipt["dispatch_id"], local_run_id=local_id,
+                           native_display="RUNNING", failure_category=None, last_error="")
+            missions._store(engine, mission)
+            db.add_event("mission.reconciliation_resumed", "已恢复核对原规划运行", actor="system", payload={"run_id": rid})
+            restored.append(receipt)
+    return restored
+
+
+async def reconcile_once(ctx, slot, *, recover_auth=False):
     engine = slot.engine
     rows = engine.db._query("SELECT * FROM dispatch_records WHERE stage!='' "
                             "AND state IN ('DISPATCHING','QUEUED','RUNNING') ORDER BY dispatch_id")
     legacy = engine.db._query("SELECT 1 FROM dispatch_records WHERE stage='' AND state='NEEDS_CONFIRMATION' "
                               "AND task_id LIKE 'plan:%' AND lf_run_id!='' LIMIT 1")
-    if not rows and not legacy:
+    if not rows and not legacy and not recover_auth:
         return
     try:
         with _lease(engine):
+            if recover_auth:
+                rows = [*rows, *_restore_legacy_auth_receipts(engine)]
             if legacy:
                 await dispatch.reconcile_completed_plans(engine.db, engine.settings.loopforge_project_id,
                                                          ctx.lf_client(slot), "system")
@@ -272,6 +314,10 @@ async def reconcile_once(ctx, slot):
                     continue
                 try:
                     await reconcile_plan(engine, receipt)
+                except ReadAccessError as exc:
+                    missions.record_progress(engine, receipt["feature_id"], receipt["lf_run_id"], "RUNNING",
+                                             FailureCategory.ENV_OR_CONFLICT_BLOCKED,
+                                             f"后台身份暂时无法读取执行状态（HTTP {exc.status_code}），已保留派发记录。")
                 except LoopForgeError as exc:
                     if exc.status_code not in (401, 403, 404, 409, 422):
                         continue  # A failed observation does not imply a failed Run.
@@ -319,6 +365,8 @@ async def reconcile_delivery(ctx, slot, receipt):
         if run["status"] in ("succeeded", "failed", "cancelled"):
             # Reuse candidate verification, current-turn evidence, CI and human signoff under the delivery lock.
             start_lite_delivery(ctx, slot, [task.task_id])
+    except ReadAccessError:
+        return  # Keep observing the same accepted delivery using its original pool identity.
     except (LoopForgeError, service.SpecConflictError) as exc:
         if isinstance(exc, LoopForgeError) and exc.status_code not in (401, 403, 404, 409, 422):
             return
@@ -330,10 +378,12 @@ async def reconcile_delivery(ctx, slot, receipt):
 
 
 async def serve(ctx):
+    startup = True
     while True:
         for slot in list(ctx.all_slots):
             try:
-                await reconcile_once(ctx, slot)
+                await reconcile_once(ctx, slot, recover_auth=startup)
             except Exception:
                 log.exception("Failed to reconcile project %s", slot.project_key)
+        startup = False
         await asyncio.sleep(2.5)
