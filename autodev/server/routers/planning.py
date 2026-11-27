@@ -189,6 +189,10 @@ def start_slot_scheduler(ctx, slot, *, watch: bool = True) -> bool:
     if ctx.is_scheduler_running(slot):
         return False
     eng = slot.engine
+    from .speckit import start_lite_delivery
+    active = [t.task_id for t in eng.db.list_tasks() if t.status not in ("MERGED", "CANCELLED")]
+    if start_lite_delivery(ctx, slot, active):
+        return True
     sched = Scheduler(eng)
     sched.check_runtime()
     slot.scheduler = sched

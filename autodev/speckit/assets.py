@@ -115,8 +115,6 @@ def upgrade_assets(engine, target_preset_id: str | None = None, *, actor: str = 
     raw = engine.db.meta_get("speckit.assets")
     if not raw:
         raise ValueError("请先启用功能规格流程")
-    if engine.db.meta_get("mission.lease"):
-        raise SpecConflictError("需求流程正在执行，不能升级规格资产")
     if engine.db._query("SELECT 1 FROM dispatch_records WHERE state IN ('DISPATCHING','QUEUED','RUNNING','NEEDS_CONFIRMATION')"):
         raise SpecConflictError("仍有原生执行未结束，不能升级规格资产")
     if any(t.status in ("IN_PROGRESS", "VERIFYING", "REVIEWING") for t in engine.db.list_tasks()):

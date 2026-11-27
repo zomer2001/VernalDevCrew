@@ -254,6 +254,7 @@ echo "==> 正在通过 Docker 启动 Vernal 统一平台（宿主机免装 Pytho
   export VERNAL_PUBLIC_URL="${VERNAL_PUBLIC_URL:-http://${public_host}:${PORT}}"
   # 默认仅挂载项目工作区目录，不暴露整个用户主目录；需原地接管外部目录时显式传 VERNAL_HOST_PROJECTS_DIR=~/你的代码目录
   export VERNAL_HOST_PROJECTS_DIR="${PROJECTS_DIR:-${VERNAL_HOST_PROJECTS_DIR:-$ROOT/workspaces}}"
+  export VERNAL_HOST_WORKSPACES_DIR="$ROOT/workspaces"
   "$ROOT/deploy/loopforge/build-sandbox.sh" || echo "公用沙箱构建失败，个人 Runner 仍可使用" >&2
   "$ROOT/deploy/loopforge/ensure-gitea.sh" || echo "Gitea 尚未就绪，请在体检中查看服务状态" >&2
   # Read on the host so the gateway UID need not read the mode-0600 Mac file.

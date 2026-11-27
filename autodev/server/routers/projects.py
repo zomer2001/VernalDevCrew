@@ -252,14 +252,8 @@ async def _finalize_launched_project(
             from autodev.speckit import missions, preflight
             check = await preflight.inspect(new_eng)
             if check["ready"]:
-                lease = missions.reserve(new_eng, mission["feature_id"], mission["revision"])
-                mission_actor = effective_actor(actor)
-                async def _guided():
-                    try:
-                        await missions.advance(new_eng, mission["feature_id"], lease, actor=mission_actor)
-                    except Exception:
-                        pass
-                slot.plan_task = ctx.start_background(slot, "_mission", _guided())
+                from autodev.loopforge.reconciler import start
+                await start(new_eng, mission["feature_id"], mission["revision"], actor=effective_actor(actor))
             else:
                 new_eng.db.add_event("mission.preflight_blocked", "目标已保存，执行资源未就绪，请在需求面板查看", actor=effective_actor(actor))
         elif not guided_delivery and start_council and slices > 0 and not needs_wish:

@@ -10,11 +10,11 @@ from fastapi.testclient import TestClient
 from autodev.engine import Engine, init_workspace
 from autodev.config import Settings
 from autodev.models import ClarificationItem
+from autodev.loopforge import dispatch, reconciler
 from autodev.process.runner import GateConflictError, load_template, is_gate_passed
 from autodev.server.app import create_app
-from autodev.speckit import adapter, compiler, missions, preflight, service, triage
-from autodev.speckit.parser import render_tasks
-from test_speckit import SPEC, PLAN, BRIEF, approve, draft, save
+from autodev.speckit import compiler, missions, preflight, service, triage, execution
+from test_speckit import SPEC, PLAN, BRIEF, approve, work_packages
 
 
 def assessed(**changes):
@@ -31,32 +31,123 @@ def project(tmp_path):
     engine.db.close()
 
 
-def responses(engine,monkeypatch,assessments):
-    calls=[]
-    values=iter(assessments)
-    async def run(prompt,*,schema_path,**kwargs):
-        step=schema_path.name.split("_",2)[1]
-        calls.append(step)
-        if step=="intake":
-            result=next(values)
-        else:
-            content={"constitution":"# 项目宪章\n交付必须有可复跑依据。", "checklist":"# 质量检查\n验收条件明确。",
-                     "plan":PLAN,"tasks":render_tasks([draft()]),"analyze":"# 一致性检查\n全部需求已覆盖。"}[step]
-            result=dict(step=step,content=content,clarifications=[],findings=[],handoff_brief=BRIEF)
-        return SimpleNamespace(ok=True,structured=result,session_id="model-run",usage=SimpleNamespace(input_tokens=1,cached_tokens=0,output_tokens=1,reasoning_tokens=0))
-    monkeypatch.setattr(engine.harness,"run_structured_readonly",run)
+def review_result(stage):
+    return dict(step="checklist" if stage == "std_spec" else "analyze", content="# 独立审查\n验收依据完整。",
+                findings=[], clarifications=[], work_packages=[], handoff_brief=BRIEF)
+
+
+def native_result(stage, data, review=None):
+    validator = {"std_spec": "validate_spec", "std_plan": "validate_and_compile",
+                 "lite_bundle": "validate_lite_bundle"}[stage]
+    artifacts = [dict(nodeId=validator, name="vernal-result.json", content=json.dumps(data))]
+    if stage != "lite_bundle":
+        node = "quality_check" if stage == "std_spec" else "consistency_review"
+        artifacts.extend([dict(nodeId=node, name="vernal-quality.json", content=json.dumps(review or review_result(stage))),
+                          dict(nodeId=node, name="review-report.md", content="# PASS\n已核对需求与验收。")])
+    return artifacts
+
+
+def mock_bundles(engine, monkeypatch, output):
+    from autodev.loopforge.client import LoopForgeClient
+    runs = {}
+    async def submit(receipt, prompt, schema, role):
+        rid = "run-" + str(receipt["dispatch_id"])
+        issue = "issue-" + rid
+        runs[rid] = dict(id=rid, issueId=issue, projectId=engine.settings.loopforge_project_id, status="succeeded",
+                         artifacts=native_result(receipt["stage"], output(receipt["stage"])))
+        dispatch.record(engine.db, receipt, "RUNNING", issue_id=issue, lf_run_id=rid)
+        return rid
+    client = LoopForgeClient("http://lf.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json=runs[req.url.path.split("/")[-1]])))
+    monkeypatch.setattr(engine.harness, "dispatch_bundle", submit)
+    monkeypatch.setattr(reconciler, "receipt_client", lambda *_: client)
+    return runs
+
+
+def responses(engine, monkeypatch, assessments, *, lite=False):
+    if not lite and not service.enabled(engine):
+        service.enable(engine, "vernal-core")
+    calls = []
+    values = iter(assessments)
+    def output(stage):
+        calls.append(stage)
+        if stage == "lite_bundle":
+            from test_lite_bundle import bundle
+            return bundle()
+        if stage == "std_spec":
+            value = dict(next(values), constitution_markdown="# 项目宪章\n交付必须有可复跑依据。")
+            value["proposed_spec"] = value["proposed_spec"] or SPEC
+            return value
+        return dict(plan_markdown=PLAN, work_packages=work_packages(), handoff_brief=BRIEF)
+    mock_bundles(engine, monkeypatch, output)
     return calls
 
 
-def advance(engine,feature="001-save"):
-    mission=missions.get(engine,feature)
-    asyncio.run(missions.advance(engine,feature,missions.reserve(engine,feature,mission["revision"]),actor="owner"))
+def advance(engine, feature="001-save"):
+    mission = missions.get(engine, feature)
+    async def run():
+        await reconciler.start(engine, feature, mission["revision"], actor="owner")
+        await reconciler.reconcile_once(None, SimpleNamespace(engine=engine))
+    asyncio.run(run())
+    if error := missions.get(engine, feature).get("last_error"):
+        raise ValueError(error)
+
+
+def test_planning_stream_is_scoped_and_cursor_resets_when_run_changes(project, monkeypatch):
+    from autodev.server.routers import speckit as routes
+    missions.save(project, "001-save", "保存回答", "feature", 0, actor="owner")
+    execution.record(project.db, "001-save", {"run_id": "run-2", "step": "tasks", "role": "director"})
+    execution.record(project.db, "other", {"run_id": "run-3", "step": "plan"})
+    seen = []
+
+    async def project_run(rid, pid):
+        assert rid == "run-2" and pid == project.settings.loopforge_project_id
+        return {"status": "running", "nodes": {"draft": {"status": "running", "model": "sol"}}}
+
+    async def logs(rid, **kwargs):
+        seen.append(kwargs["after"])
+        return {"logs": [{"id": "event-1", "sequence": 3, "body": "检查任务", "attributes": {"category": "tool"},
+                          "context": {"nodeId": "draft", "attempt": 2}}], "hasMore": False}
+
+    lf = SimpleNamespace(project_run=project_run, get_run_logs=logs)
+    monkeypatch.setattr(routes, "_engine", lambda request: project)
+    monkeypatch.setattr(routes, "get_ctx", lambda request: SimpleNamespace(active_slot=lambda _: None, lf_client=lambda _: lf))
+    result = asyncio.run(routes.mission_stream("001-save", None, after=50, cursor_run_id="run-1"))
+    assert seen == [0] and result["after"] == 3
+    assert len(result["runs"]) == 1 and result["nodes"][0]["items"][0]["body"] == "检查任务"
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(routes.mission_stream("001-save", None, run_id="run-3", after=0))
+    assert exc.value.status_code == 404
+
+
+def test_completed_plan_reconciles_only_matching_native_receipt(project):
+    pid = project.settings.loopforge_project_id
+    receipts = {}
+    for case in ("success", "waiting", "wrong-issue", "failed"):
+        receipt, _ = dispatch.reserve(project.db, f"plan:{pid}:{case}", 1, 1, "local_runner",
+                                      "test", "issue-" + case, "run-" + case)
+        dispatch.record(project.db, receipt, "NEEDS_CONFIRMATION")
+        receipts[case] = receipt["dispatch_id"]
+
+    async def project_run(rid, project_id):
+        assert project_id == pid
+        case = rid.removeprefix("run-")
+        return {"id": rid, "status": {"waiting": "waiting", "failed": "failed"}.get(case, "succeeded"),
+                "executionContext": {"issueId": "other" if case == "wrong-issue" else "issue-" + case}}
+
+    for _ in range(2):
+        asyncio.run(dispatch.reconcile_completed_plans(project.db, pid, SimpleNamespace(project_run=project_run), "owner"))
+    for case, dispatch_id in receipts.items():
+        row = project.db._query("SELECT state FROM dispatch_records WHERE dispatch_id=?", (dispatch_id,))[0]
+        assert row["state"] == ("FINISHED" if case == "success" else "NEEDS_CONFIRMATION")
+    assert len(project.db._query("SELECT 1 FROM events WHERE event_type='dispatch.reconciled'")) == 1
 
 
 @pytest.mark.parametrize("mode,origin",[("scratch","greenfield"),("local_folder","existing_local"),("git_repo","existing_git")])
 def test_source_and_clarity_are_independent_and_zero_questions_are_valid(project,monkeypatch,mode,origin):
     project.db.meta_set("source_mode",mode)
-    calls=responses(project,monkeypatch,[assessed()])
+    calls=responses(project,monkeypatch,[assessed()], lite=True)
     missions.save(project,"001-save","可靠保存回答，重新打开后仍可读取。","feature",0,actor="owner")
     advance(project)
     view=missions.view(project,missions.get(project,"001-save"))
@@ -64,7 +155,7 @@ def test_source_and_clarity_are_independent_and_zero_questions_are_valid(project
     assert view["route"]["clarity_level"]=="READY_LITE" and view["questions"]==[]
     assert view["state"]=="WAITING_APPROVAL"
     assert view["actual_preset"]=="vernal-lite" and load_template(project.ws).id=="quick-prototype"
-    assert calls==["intake","constitution","checklist"]
+    assert calls==["lite_bundle"]
     assert not project.db.list_tasks() and not is_gate_passed(project.db,"srs_approval","project","project")
 
 
@@ -88,7 +179,7 @@ def test_answers_restart_reassessment_approval_and_frozen_publication(project,mo
         assert service.list_clarifications(reopened,"001-save")[0]["status"]=="ANSWERED"
     finally: reopened.db.close()
     advance(project)
-    assert calls==["intake","constitution","intake","checklist"]
+    assert calls==["std_spec","std_spec"]
     approve(project)
     advance(project)
     view=missions.view(project,missions.get(project,"001-save"))
@@ -126,25 +217,6 @@ def test_prerequisites_remain_blocking_until_evidence_and_new_assessment(project
     with pytest.raises(GateConflictError):approve(project)
     advance(project);approve(project)
     assert is_gate_passed(project.db,"srs_approval","project","project")
-
-
-def test_lease_cas_and_safe_recovery(project):
-    missions.save(project,"001-save","目标","feature",0,actor="owner")
-    token=missions.reserve(project,"001-save",1)
-    with pytest.raises(ValueError):missions.reserve(project,"001-save",1)
-    with pytest.raises(ValueError):missions.save(project,"001-save","新目标","feature",1,actor="owner")
-    missions.release(project,"wrong")
-    assert project.db.meta_get("mission.lease")
-    missions.recover(project,actor="owner")
-    assert not project.db.meta_get("mission.lease")
-    with pytest.raises(ValueError):missions.reserve(project,"001-save",2)
-    missions.release(project,token)
-    token=missions.reserve(project,"001-save",1)
-    from autodev.loopforge.dispatch import reserve
-    reserve(project.db,"pending-intake",1,1,"local_runner","owner","")
-    with pytest.raises(ValueError,match="原生执行"):
-        missions.recover(project,actor="owner")
-    assert project.db.meta_get("mission.lease")
 
 
 def test_preflight_never_provisions_or_exposes_credentials(project,monkeypatch):
@@ -192,25 +264,23 @@ def test_existing_custom_workflow_is_preserved(project,monkeypatch):
 
 
 def test_model_result_from_old_source_is_rejected(project,monkeypatch):
+    service.enable(project,"vernal-core")
     missions.save(project,"001-save","旧目标","feature",0,actor="owner")
-    async def run(*args,**kwargs):
+    def stale_result(stage):
         project.db.meta_set("source_mode","git_repo")
-        return SimpleNamespace(ok=True,structured=assessed(),session_id="old")
-    monkeypatch.setattr(project.harness,"run_structured_readonly",run)
+        return dict(assessed(), constitution_markdown="项目宪章")
+    mock_bundles(project, monkeypatch, stale_result)
     with pytest.raises(ValueError,match="旧结果"):
         advance(project)
-    assert not service.latest(project,"001-save") and not project.db.meta_get("mission.lease")
+    assert not service.latest(project,"001-save")
 
 
-def test_intake_uses_native_sop_dispatch_receipts_and_frozen_execution(project):
+def test_intake_uses_native_sop_dispatch_receipts_and_frozen_execution(project, monkeypatch):
     """Only the remote HTTP service is simulated; adapters and receipts are real."""
-    import re
     from autodev.harnesses.loopforge_harness import LoopForgeHarness
     from autodev.loopforge.client import LoopForgeClient
     from autodev.loopforge.bridge import LoopForgeBridge
     current={"step":"intake"};issues=[];runs=[];native_assets={}
-    outputs={"constitution":"# 项目宪章\n交付必须有验收依据。", "checklist":"# 规格检查\n验收条件明确。", "plan":PLAN,
-             "tasks":render_tasks([draft()]),"analyze":"# 一致性检查\n全部需求已覆盖。"}
     def handler(req):
         p=req.url.path
         if p=="/api/runners":return httpx.Response(200,json=[{"id":"runner-test","status":"online","isDefault":True,"runtimes":[{"provider":"codex"}]}])
@@ -224,8 +294,8 @@ def test_intake_uses_native_sop_dispatch_receipts_and_frozen_execution(project):
         if p.endswith("/publish"):return httpx.Response(200,json={"status":"published"})
         if p=="/api/issues" and req.method=="POST":
             body=json.loads(req.content);issues.append(body)
-            match=re.search(r"speckit_([a-z]+)_",body.get("description",""))
-            if match:current["step"]=match[1]
+            if "std-" in body["workflowId"]:
+                current["step"]="std_spec" if "-std-spec-" in body["workflowId"] else "std_plan"
             return httpx.Response(201,json={"id":f"i{len(issues)}",**body})
         if p.endswith("/dispatch"):
             rid=f"run-{len(runs)+1}";runs.append((rid,current["step"]))
@@ -235,19 +305,25 @@ def test_intake_uses_native_sop_dispatch_receipts_and_frozen_execution(project):
             if step=="execute":
                 artifacts=[{"name":"handoff-brief.json","nodeId":node,"content":json.dumps(BRIEF)} for node in ("implement","review")]
             else:
-                value=assessed() if step=="intake" else dict(step=step,content=outputs[step],clarifications=[],findings=[],handoff_brief=BRIEF)
-                artifacts=[{"name":"vernal-result.json","content":json.dumps(value)}]
-            return httpx.Response(200,json={"id":p.rsplit("/",1)[-1],"status":"succeeded","artifacts":artifacts})
+                value = dict(assessed(), constitution_markdown="# 项目宪章\n保留验收依据。") if step == "std_spec" else dict(
+                    plan_markdown=PLAN, work_packages=work_packages(), handoff_brief=BRIEF)
+                artifacts = native_result(step, value)
+            index = p.rsplit("-",1)[-1]
+            return httpx.Response(200,json={"id":p.rsplit("/",1)[-1],"projectId":project.settings.loopforge_project_id,
+                                           "issueId":"i"+index,"status":"succeeded","artifacts":artifacts})
         return httpx.Response(200,json={})
     client=LoopForgeClient(project.settings.loopforge_url,project.settings.loopforge_token,transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(reconciler, "receipt_client", lambda *_: client)
     project._harness=LoopForgeHarness(project.settings,project.db,project.ws,poll_interval=.001,client=client)
+    service.enable(project,"vernal-core")
     missions.save(project,"001-save","实现回答保存，重启后可重新读取。","feature",0,actor="owner")
     advance(project);approve(project);advance(project)
     packages=compiler.compile_tasks(project,"001-save")
     ids=compiler.publish_tasks(project,"001-save",expected_hashes=[p.compiled_task_hash for p in packages],actor="owner")
     project.approve_plan()
     receipts=[dict(r) for r in project.db._query("SELECT * FROM dispatch_records")]
-    assert len(receipts)==6 and all(r["lf_run_id"] and r["asset_versions_json"]!="{}" for r in receipts)
+    assert [r["stage"] for r in receipts] == ["std_spec", "std_plan"]
+    assert len(receipts)==2 and all(r["lf_run_id"] and r["asset_versions_json"]!="{}" for r in receipts)
     assert receipts[-1]["spec_sha"]==packages[0].spec_sha
     bridge=LoopForgeBridge(project.settings,project.db);bridge.client=client;bridge.selected_execution=("host_link",client)
     current["step"]="execute"
@@ -257,7 +333,7 @@ def test_intake_uses_native_sop_dispatch_receipts_and_frozen_execution(project):
 
 
 def test_answer_can_reconcile_requirement_text_but_cannot_erase_user_confirmation(project,monkeypatch):
-    q=dict(question_key="Q-01",category="scope",severity="BLOCKING",question="保存多久？",options=["30天","永久"])
+    q=ClarificationItem(question_key="Q-01",category="scope",severity="BLOCKING",question="保存多久？",options=["30天","永久"]).model_dump()
     first={**assessed(),"questions":[q],"scope_clear":False}
     updated=SPEC.replace("可靠保存用户回答。","保存用户回答 30 天。")+"\n## 澄清 Q-01 · 1\n模型试图替换的内容\n"
     responses(project,monkeypatch,[first,{**assessed(),"proposed_spec":updated}])

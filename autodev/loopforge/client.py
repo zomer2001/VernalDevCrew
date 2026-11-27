@@ -53,6 +53,10 @@ class LoopForgeError(RuntimeError):
         super().__init__(message)
 
 
+class MissingArtifactError(LoopForgeError):
+    """The index for this native Run has no matching artifact from the requested turn."""
+
+
 def run_project_id(run: dict) -> str:
     context = run.get("executionContext") or {}
     stamped, flat = context.get("projectId"), run.get("projectId")
@@ -441,13 +445,15 @@ class LoopForgeClient:
                     return json.dumps(result, ensure_ascii=False)
                 if isinstance(result, str) and result:
                     return result
-        raise LoopForgeError(f"Run {run.get('id', '')} 未提供声明的交付文件 {filename}")
+        raise MissingArtifactError(f"Run {run.get('id', '')} 未提供声明的交付文件 {filename}", 422)
 
     async def get_run_diff(self, run_id: str) -> Any:
         return await self._req("GET", f"/api/runs/{run_id}/workspace/diff")
 
-    async def get_run_logs(self, run_id: str) -> Any:
-        return await self._req("GET", f"/api/runs/{run_id}/logs")
+    async def get_run_logs(self, run_id: str, *, after: int | None = None, limit: int = 200) -> Any:
+        if after is None:
+            return await self._req("GET", f"/api/runs/{run_id}/logs")
+        return await self._req("GET", f"/api/runs/{run_id}/logs", params={"after": after, "limit": limit})
 
     async def get_analytics(self, project_id: str = "") -> dict[str, Any]:
         data = await self._req("GET", "/api/analytics", params={"projectId": project_id} if project_id else None)

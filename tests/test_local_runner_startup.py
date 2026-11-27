@@ -83,6 +83,47 @@ def test_runner_waits_for_login_and_uses_discovered_cli(tmp_path):
         marker.touch()
 
 
+def test_codex_gate_permission_is_scoped_to_trusted_runner_copy(tmp_path):
+    deploy = tmp_path.resolve() / "test deployment"
+    bin_dir = deploy / "bin"
+    bin_dir.mkdir(parents=True)
+    wrapper = bin_dir / "codex"
+    wrapper.symlink_to(Path(__file__).resolve().parents[1] / "deploy/loopforge/runner-codex.sh")
+    arch = {"x86_64": "amd64"}.get(os.uname().machine, os.uname().machine)
+    trusted = bin_dir / f"agentflow-gate-mcp-darwin-{arch}"
+    trusted.write_bytes(b"test helper")
+    trusted.chmod(0o700)
+    workspace = deploy / ".runner/workspaces/runs/run-1/workspace"
+    staged = workspace / ".agentflow/config/pm/gate-mcp"
+    staged.parent.mkdir(parents=True)
+    shutil.copy2(trusted, staged)
+    # Capture argv at exec without loading real personal credentials or invoking a model.
+    capture = tmp_path / "record.sh"
+    capture.write_text('function exec() { printf "%s\\n" "$@"; exit 0; }\n')
+    args = ["exec", "--json", "-c", 'mcp_servers.agentflow-gate.command=".agentflow/config/pm/gate-mcp"', "-"]
+
+    def recorded(cwd):
+        result = subprocess.run([wrapper, *args], cwd=cwd, env={**os.environ, "BASH_ENV": str(capture)},
+                                check=True, capture_output=True, text=True)
+        return result.stdout.splitlines()[1:]
+
+    assert recorded(workspace) == [
+        "-c", 'mcp_servers.agentflow-gate.tools.submit_gate_result.approval_mode="approve"',
+        *args[:3], f'mcp_servers.agentflow-gate.command="{trusted}"', "-",
+    ]
+    assert recorded(deploy) == args
+    original = list(args)
+    args[4:4] = ["-c", args[3]]
+    assert recorded(workspace) == args
+    args[:] = original
+    staged.unlink()
+    staged.symlink_to(trusted)
+    assert recorded(workspace) == args
+    staged.unlink()
+    staged.write_bytes(b"modified")
+    assert recorded(workspace) == args
+
+
 def test_only_launcher_can_bind_through_docker_gateway(tmp_path, monkeypatch):
     ws = init_workspace(tmp_path / "workspace", collaboration_mode="files")
     eng = Engine(ws, settings=Settings(loopforge_token="test-token", collaboration_mode="files"))

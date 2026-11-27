@@ -18,6 +18,10 @@ def source_path(feature_id: str, kind: str) -> str:
     return ".specify/memory/constitution.md" if kind == "constitution" else f"{folder}/{kind}.md"
 
 
+def tasks_json_path(feature_id: str) -> str:
+    return f"{feature_spec_dir(feature_id)}/tasks.json"
+
+
 def safe_path(root: Path, relative: str) -> Path:
     rel = Path(relative)
     if rel.is_absolute() or not rel.parts or any(p in ("..", ".git", ".autodev") for p in rel.parts):

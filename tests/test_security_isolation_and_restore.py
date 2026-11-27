@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from autodev.config import Settings
@@ -24,6 +25,33 @@ from autodev.harnesses.loopforge_harness import LoopForgeHarness
 from autodev.loopforge.bootstrap import build_vernal_agents, plan_workflow_id
 from autodev.loopforge.bridge import build_restore_command, sign_context_sig
 from autodev.server.app import create_app
+
+
+@pytest.mark.parametrize("node_only", [False, True])
+def test_restore_uses_explicit_host_workspace_alias_without_network(tmp_path, monkeypatch, node_only):
+    import os
+    import shutil
+
+    host = tmp_path / "本机 工作区's"
+    bundle = host / "demo/.autodev/baselines/plan-review.json"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_text(json.dumps({"files": {"PLAN_PROMPT.md": "同一份批准资料"}}, ensure_ascii=False))
+    monkeypatch.setenv("VERNAL_HOST_WORKSPACES_DIR", str(host))
+    cmd = build_restore_command("/app/workspaces/demo/.autodev/baselines/plan-review.json",
+                                "http://127.0.0.1:1/must-not-be-used", nested_key="files")
+    work = tmp_path / "runner"
+    work.mkdir()
+    env = dict(os.environ)
+    if node_only:
+        bins = tmp_path / "node-only"
+        bins.mkdir()
+        (bins / "node").symlink_to(shutil.which("node"))
+        env["PATH"] = str(bins)
+    result = subprocess.run(["/bin/sh", "-c", cmd], cwd=work, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert (work / "PLAN_PROMPT.md").read_text() == "同一份批准资料"
+    for unmapped in ("/app/elsewhere/context.json", "/app/workspaces/../elsewhere/context.json"):
+        assert str(host) not in build_restore_command(unmapped, "http://127.0.0.1:1/unused")
 
 
 def test_restore_command_executes_cleanly_in_real_shell_with_special_chars(tmp_path: Path) -> None:
@@ -588,6 +616,8 @@ def test_existing_published_legacy_sop_upgrades_and_keeps_user_customizations(tm
     pid = "proj-legacy"
     # 1. 旧版已发布规划 SOP：validate 节点为旧版 Python 脚本，同时用户手工把 draft.maxAttempts 改成了 5
     legacy_plan = build_plan_workflow(pid, sandbox_id="local", role="director")
+    legacy_plan["nodes"] = [n for n in legacy_plan["nodes"] if n["id"] != "prepare"]
+    legacy_plan["edges"] = [e for e in legacy_plan["edges"] if e["source"] != "prepare"]
     legacy_plan["revision"] = 3
     legacy_plan["nodes"][0]["maxAttempts"] = 5
     legacy_plan["nodes"][1]["scriptLanguage"] = "python"

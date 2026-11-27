@@ -18,7 +18,7 @@ package_images() (
   mkdir -p "$release/deploy/loopforge"
   cp "$ROOT/vernal.sh" "$release/"
   cp compose.yaml Dockerfile.sandbox offline.sh up.sh doctor.sh ensure-gitea.sh build-sandbox.sh \
-    start-runner.sh wait-and-bind-runner.sh "$release/deploy/loopforge/"
+    start-runner.sh runner-codex.sh wait-and-bind-runner.sh "$release/deploy/loopforge/"
   if [[ -f backup.sh ]]; then cp backup.sh "$release/deploy/loopforge/"; fi
   local lock="$release/deploy/loopforge/images.lock"
   local -a images

@@ -390,7 +390,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
             "2. 严格在允许修改路径白名单内编写高质量、可运行的代码与测试，不得触碰未授权路径。\n"
             "3. 逐条执行所有「必跑验证命令」并修复任何报错，直到全部通过。\n"
             "4. 若为文件交接模式，将本次新增/修改的文件写入 `vernal-files.json`（格式 `{\"files\": {\"path\": \"content\"}}`）；若为 Git 模式，提交并推送到工作分支。\n"
-            "5. 结束回合前，若环境中存在且允许调用 `submit_gate_result` MCP 工具，调用一次 `submit_gate_result`（参数 `decision=\"pass\"`, `reason=\"编码与自测通过\"`）；若被审批策略拒绝，如实记录受阻原因并正常退出，不得伪造终态。"
+            "5. 完成编码、自测与交接文件后正常退出，由后继脚本检验候选。"
         ),
     }
 
@@ -505,7 +505,7 @@ def build_vernal_agents(project_id: str, settings: Settings) -> list[dict[str, A
                 "1. 若需求正文给出了上下文还原命令，请先在当前工作目录执行该命令还原 `PLAN_PROMPT.md`、`inputs/` 与 `.vernal-schema.json`，再完整阅读 `PLAN_PROMPT.md` 与 `.vernal-schema.json`。\n"
                 "2. 严格按 `.vernal-schema.json`（或需求正文中的 JSON Schema）生成唯一的 JSON 对象，并以 UTF-8 纯 JSON（不要包含 Markdown 代码块围栏）写入当前目录的 `vernal-result.json`。下游确定性脚本节点会自动执行完整 Schema 校验，请勿在系统中搜索或安装 `ajv`/`jsonschema` 等外部包。\n"
                 "3. 不要编写或提交无关的业务源码文件。\n"
-                "4. 结束回合前，若环境中存在且允许调用 `submit_gate_result` MCP 工具，调用一次 `submit_gate_result`（参数 `decision=\"pass\"`, `reason=\"已产出合法的 vernal-result.json\"`）；若工具被审批策略拒绝，确保 `vernal-result.json` 已落盘并如实说明受阻原因后正常退出。"
+                "4. 将 vernal-result.json 写入工作目录后正常退出，由后继脚本检验产物。"
             ),
         }
 
@@ -774,8 +774,38 @@ def build_vernal_workflows(project_id: str, sandbox_id: str = "local") -> dict[s
 _LANE_LABELS = {"frontend": "前端界面", "contract": "契约文档", "bugfix": "缺陷修复"}
 
 
+def build_plan_prepare_script(restore_cmd: str = "") -> str:
+    """Prepare runs before the agent; inline prompts only need a writable working directory."""
+    required = ["PLAN_PROMPT.md", ".vernal-schema.json"] if restore_cmd else []
+    py = '''import pathlib, tempfile, sys
+try:
+    with tempfile.TemporaryFile(dir=".") as probe:
+        probe.write(b"vernal-prepare")
+    for name in REQUIRED:
+        file = pathlib.Path(name)
+        if file.is_symlink() or not file.is_file() or not file.read_text("utf-8").strip():
+            raise ValueError("缺少非空只读上下文文件：" + name)
+except (OSError, ValueError) as exc:
+    print("规划准备环境故障：" + str(exc), file=sys.stderr)
+    sys.exit(1)
+'''.replace("REQUIRED", repr(required))
+    node = '''const fs = require("fs");
+try {
+    const dir = fs.mkdtempSync(".vernal-prepare-");
+    try { fs.writeFileSync(dir + "/probe", "vernal-prepare"); }
+    finally { fs.rmSync(dir, {recursive:true, force:true}); }
+    for (const name of REQUIRED) {
+        if (!fs.existsSync(name) || fs.lstatSync(name).isSymbolicLink() || !fs.statSync(name).isFile() || !fs.readFileSync(name, "utf8").trim())
+            throw Error("缺少非空只读上下文文件：" + name);
+    }
+} catch (e) { console.error("规划准备环境故障：" + e.message); process.exit(1); }
+'''.replace("REQUIRED", repr(required))
+    restore = ("set -eu\n(\n" + restore_cmd + "\n) || { echo '规划准备环境故障：上下文还原失败' >&2; exit 1; }\n") if restore_cmd else ""
+    return restore + _dual_shell_script(py, node)
+
+
 def build_plan_workflow(project_id: str, sandbox_id: str = "local", role: str = "director") -> dict[str, Any]:
-    """按圆桌/规划岗位构造两节点只读规划 SOP：起草 → JSON Schema 校验（支持跨模型交叉评审）。"""
+    """准备只读上下文、起草结构化产物、原生统一校验。"""
     r = (role or "director").strip().lower()
     if r == "pm":
         planner_id = f"{project_id}-vernal-planner-pm"
@@ -795,8 +825,11 @@ def build_plan_workflow(project_id: str, sandbox_id: str = "local", role: str = 
         "sandboxProfileId": sandbox_id,
         "metricCategory": "需求开发",
         "sopLane": "产品",
-        "description": "Vernal 顶层圆桌评审、蓝图拆单与异常仲裁统一执行流：岗位专家起草 → JSON 契约校验（不合规自动打回重写）",
+        "description": "Vernal 顶层圆桌评审、蓝图拆单与异常仲裁统一执行流：准备只读上下文 → 岗位专家起草 → 工作包编译与 JSON 契约校验（不合规自动打回重写）",
         "nodes": [
+            {"id": "prepare", "name": "准备只读规划上下文与契约", "type": "script",
+             "metricStage": "clarification", "scriptLanguage": "shell", "script": build_plan_prepare_script(),
+             "maxAttempts": 1, "position": {"x": 80, "y": 140}},
             {
                 "id": "draft",
                 "name": "圆桌专家 / 总监起草",
@@ -806,7 +839,7 @@ def build_plan_workflow(project_id: str, sandbox_id: str = "local", role: str = 
                 "metricStage": "development",
                 "agentId": planner_id,
                 "maxAttempts": 2,
-                "position": {"x": 80, "y": 140},
+                "position": {"x": 360, "y": 140},
             },
             {
                 "id": "validate",
@@ -827,13 +860,93 @@ def build_plan_workflow(project_id: str, sandbox_id: str = "local", role: str = 
                         "required": True,
                     }
                 ],
-                "position": {"x": 380, "y": 140},
+                "position": {"x": 640, "y": 140},
             },
         ],
         "edges": [
+            {"id": "e0", "source": "prepare", "target": "draft", "when": "success"},
             {"id": "e1", "source": "draft", "target": "validate", "when": "success"},
         ],
     }
+
+
+def build_lite_plan_workflow(project_id: str, sandbox_id: str = "local") -> dict:
+    wf = build_plan_workflow(project_id, sandbox_id)
+    wf.update(id=f"{project_id}-vernal-lite-plan-sop", name="轻量需求与交付规划",
+              description="一次整理澄清、规格、方案与工作包并执行编译校验。")
+    prepare, draft, validate = wf["nodes"]
+    draft.update(id="draft_lite_bundle", name="起草轻量规划组合")
+    validate.update(id="validate_lite_bundle", name="校验规格、方案与工作包", rejectTo=draft["id"])
+    wf["edges"][0]["target"] = wf["edges"][1]["source"] = draft["id"]
+    wf["edges"][1]["target"] = validate["id"]
+    return wf
+
+
+def build_standard_plan_workflow(project_id: str, stage: str, sandbox_id: str = "local") -> dict:
+    """Keep draft, deterministic validation and independent review in one native Run."""
+    role, name, draft_id, validate_id, review_id = {
+        "std_spec": ("pm", "标准规格与质量检查", "draft_spec", "validate_spec", "quality_check"),
+        "std_plan": ("director", "标准方案与工作包", "draft_plan_and_packages", "validate_and_compile", "consistency_review"),
+    }[stage]
+    wf = build_plan_workflow(project_id, sandbox_id, role)
+    prepare, draft, validate = wf["nodes"]
+    draft.update(id=draft_id, name="起草" + name, taskPrompt="阅读 PLAN_PROMPT.md 和 .vernal-schema.json，写入 vernal-result.json，正常退出。")
+    validate.update(id=validate_id, rejectTo=draft_id)
+    review = {
+        "id": review_id, "name": name + "独立审查", "type": "agent", "metricStage": "testing",
+        "agentId": f"{project_id}-vernal-planner-qa", "maxAttempts": 2, "maxReworks": 2,
+        "rejectTo": draft_id, "onFailure": "reject", "position": {"x": 920, "y": 140},
+        "taskPrompt": ("独立核对已校验的 vernal-result.json、用户原话和需求覆盖，不修改起草产物。"
+                       "按 .vernal-schema.json 内 x-vernal-review-schema 写 vernal-quality.json。"
+                       "工程缺陷写 # REJECT 审查报告并通过原生 rework 打回。需用户决策的规格阻断项须给出阻塞问题，"
+                       "正常完成以等待用户回答。通过或转交用户时将 review-report.md 首行写为 # PASS。"),
+        "artifactOutputs": [
+            {"name": n, "path": n, "mediaType": mt, "required": True}
+            for n, mt in (("vernal-quality.json", "application/json"), ("review-report.md", "text/markdown"))
+        ],
+    }
+    wf.update(id=f"{project_id}-vernal-{stage.replace('_', '-')}-sop", name=name, description=name,
+              nodes=[prepare, draft, validate, review])
+    wf["edges"] = [{"id": f"e{i}", "source": a["id"], "target": b["id"], "when": "success"}
+                   for i, (a, b) in enumerate(zip(wf["nodes"], wf["nodes"][1:]))]
+    return wf
+
+
+def build_lite_delivery_workflow(project_id: str, mode: str, sandbox_id: str, *,
+                                 restore_cmd: str, verify_cmds: list[str], local_git: bool = False,
+                                 upload_url: str = "") -> dict:
+    """Bind the reviewed baseline and individual commands in the native Run snapshot."""
+    import shlex
+    from autodev.context_bundle import attach_native_review_context
+    if not verify_cmds:
+        raise ValueError("轻量交付缺少冻结的验证命令")
+    wf = build_vernal_workflows(project_id, sandbox_id)[mode]
+    implement, package, review = wf["nodes"]
+    if local_git:
+        package.pop("executionScope", None)
+        package.update(id="package", script=PACKAGE_PATCH, artifactOutputs=[
+            {"name":"vernal-patch.json", "path":"vernal-patch.json", "mediaType":"application/json", "required":True}])
+        implement["taskPrompt"] = "在已准备的 vernal-source 目录内编码和测试，下一节点生成补丁。"
+        review["taskPrompt"] = "对照 vernal-source 中的基线审查补丁，将 review-report.md 写到运行根目录。"
+    wf = attach_native_review_context(wf, upload_url=upload_url)
+    implement, package, review = wf["nodes"][-3:]
+    capture = wf["nodes"][0] if len(wf["nodes"]) == 4 else {}
+    prepare = dict(type="script", id="prepare", name="准备已批准工作包的交付基线",
+                   scriptLanguage="shell", maxAttempts=1, position={"x":0,"y":140},
+                   script="set -eu\n" + (restore_cmd or ":") + "\n" + capture.get("script", ":"))
+    if capture.get("executionScope"):
+        prepare["executionScope"] = capture["executionScope"]
+    if mode == "files":
+        implement["taskPrompt"] = "在 prepare 已还原的目录内直接修改并测试源码。候选清单由下一节点从实测目录生成。"
+        package["script"] = "rm -f vernal-files.json vernal-review-context.md\n" + package["script"]
+    checks = "\n".join("sh -ec " + shlex.quote(cmd) for cmd in verify_cmds)
+    package.update(id="package_and_verify", name="执行冻结验证命令并打包候选",
+                   script="set -eu\n(\n" + ("cd vernal-source\n" if local_git else "") + checks + "\n)\n" + package["script"])
+    wf.update(id=f"{project_id}-vernal-lite-deliver-{mode}-sop", name="轻量工作包交付",
+              nodes=[prepare, implement, package, review])
+    wf["edges"] = [{"id":f"e{i}", "source":a["id"], "target":b["id"], "when":"success"}
+                   for i,(a,b) in enumerate(zip(wf["nodes"], wf["nodes"][1:]))]
+    return wf
 
 
 def build_plan_workflows(project_id: str, sandbox_id: str = "local") -> dict[str, dict[str, Any]]:
@@ -1265,6 +1378,9 @@ async def ensure_vernal_loopforge_assets(
         pwid = pwf["id"]
         await _sync_workflow_template(client, pwf, existing_wfs)
         plan_workflows[prole] = pwid
+    for stage in ("std_spec", "std_plan"):
+        await _sync_workflow_template(client, build_standard_plan_workflow(project_id, stage, sandbox_id), existing_wfs)
+    await _sync_workflow_template(client, build_lite_plan_workflow(project_id, sandbox_id), existing_wfs)
     plan_wf_id = plan_workflows["director"]
 
     # 4c. 原生并发「进展评审与转向 SOP」（支持立项与运行中随时拉会讨论、原生 approval 拍板与驳回重议）

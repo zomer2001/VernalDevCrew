@@ -289,7 +289,9 @@ class ServerContext:
 
     def is_planning(self, slot: ProjectSlot | None = None) -> bool:
         s = slot or self.active_slot()
-        return s.plan_task is not None and not s.plan_task.done()
+        return (s.plan_task is not None and not s.plan_task.done()) or bool(s.engine.db._query(
+            "SELECT 1 FROM dispatch_records WHERE stage IN ('lite_bundle','std_plan','std_spec') "
+            "AND state IN ('DISPATCHING','QUEUED','RUNNING') LIMIT 1"))
 
     def lf_client(self, slot: ProjectSlot | None = None) -> LoopForgeClient:
         eng = (slot or self.active_slot()).engine

@@ -16,7 +16,6 @@ from fastapi.testclient import TestClient
 
 from autodev.config import Settings
 from autodev.engine import Engine, init_workspace
-from autodev.harnesses.base import Usage
 from autodev.harnesses.loopforge_harness import LoopForgeHarness
 from autodev.loopforge.bootstrap import build_vernal_agents
 from autodev.loopforge.bridge import extract_run_usage
@@ -69,81 +68,30 @@ def test_r7_extract_run_usage_avoids_double_counting_and_marks_unknown():
 
 
 def test_r7_triage_records_usage_on_success_and_failure_and_keeps_prompt_concise(tmp_path, monkeypatch):
+    from test_missions import assessed, mock_bundles
+    from autodev.loopforge import reconciler
     ws = init_workspace(tmp_path / "r7-triage", name="R7Triage", collaboration_mode="files")
-    settings = Settings(
-        collaboration_mode="files",
-        runtime_backend="loopforge",
-        loopforge_project_id="r7-proj",
-        loopforge_url="http://lf.test",
-        loopforge_token="tok",
-    )
-    eng = Engine(ws, settings=settings)
+    eng = Engine(ws, settings=Settings(collaboration_mode="files", runtime_backend="loopforge",
+                                       loopforge_project_id="r7-proj", loopforge_token="test-token"))
     try:
-        eng._harness = LoopForgeHarness(settings, eng.db, ws, poll_interval=0.001)
+        service.enable(eng, "vernal-core")
         mission = missions.save(eng, "001-save", "可靠保存回答，刷新后仍可读取。", "feature", 0, actor="owner")
-        # Duplicate wish slice to verify deduplication
-        eng.db._exec(
-            "INSERT INTO doc_slices(slice_id,source_file,heading_path,summary,content,char_count) VALUES(?,?,?,?,?,?)",
-            ("S-01", "inputs/01-wish.md", "wish", "wish", "可靠保存回答，刷新后仍可读取。", 15),
-        )
-        seen_prompts: list[str] = []
-
-        # 1. Success path records usage & session_id
-        async def ok_run(prompt, *, schema_path, cwd, log_dir, role):
-            seen_prompts.append(prompt)
-            return SimpleNamespace(
-                ok=True,
-                session_id="run-intake-ok",
-                structured=triage.Assessment(
-                    goal_clear=True,
-                    scope_clear=True,
-                    acceptance_clear=True,
-                    local_impact=True,
-                    change_type="feature",
-                    risk="low",
-                    rationale="目标清晰",
-                    questions=[],
-                    prerequisites=[],
-                    experience_items=[],
-                    proposed_spec=SPEC,
-                    handoff_brief=BRIEF,
-                ).model_dump(),
-                usage=Usage(input_tokens=437087, cached_tokens=400000, output_tokens=4440, reasoning_tokens=120, telemetry_known=True, source="run"),
-                error="",
-            )
-
-        monkeypatch.setattr(eng.harness, "run_structured_readonly", ok_run)
-        asyncio.run(triage.assess(eng, mission, actor="owner"))
-        runs = eng.db.list_runs("_speckit_intake_001-save")
-        assert len(runs) == 1
-        assert runs[0]["session_id"] == "run-intake-ok"
-        assert runs[0]["input_tokens"] == 437087
-        assert runs[0]["cached_tokens"] == 400000
-        assert runs[0]["output_tokens"] == 4440
-        assert runs[0]["reasoning_tokens"] == 120
-        # Prompt strips 38KB raw English upstream CLI scripts while keeping Chinese methodology & rules
-        assert len(seen_prompts[0].encode("utf-8")) < 8_000
-        assert "same_as_goal" in seen_prompts[0]
-        assert "ajv" not in seen_prompts[0] or "不要" in seen_prompts[0] or "请勿搜索" in seen_prompts[0]
-
-        # 2. Failure path after result STILL preserves usage & session_id
-        async def invalid_run(prompt, *, schema_path, cwd, log_dir, role):
-            return SimpleNamespace(
-                ok=True,
-                session_id="run-intake-bad",
-                structured={"invalid": True},
-                usage=Usage(input_tokens=12345, cached_tokens=10000, output_tokens=321, reasoning_tokens=0, telemetry_known=True, source="run"),
-                error="",
-            )
-
-        monkeypatch.setattr(eng.harness, "run_structured_readonly", invalid_run)
-        with pytest.raises(ValueError, match="格式校验"):
-            asyncio.run(triage.assess(eng, mission, actor="owner"))
-        runs2 = eng.db.list_runs("_speckit_intake_001-save")
-        assert len(runs2) == 2
-        assert runs2[1]["session_id"] == "run-intake-bad"
-        assert runs2[1]["input_tokens"] == 12345
-        assert runs2[1]["output_tokens"] == 321
+        eng.db._exec("INSERT INTO doc_slices(slice_id,source_file,heading_path,summary,content,char_count) VALUES(?,?,?,?,?,?)",
+                     ("S-01", "inputs/01-wish.md", "wish", "wish", mission["brief"], len(mission["brief"])))
+        prompt, _, _ = adapter.planning_request(eng, mission, "std_spec")
+        assert len(prompt.encode()) < 8000 and "same_as_goal" in prompt and prompt.count(mission["brief"]) == 1
+        outputs = iter([dict(assessed(), constitution_markdown="交付须验收"), {"invalid": True}])
+        runs = mock_bundles(eng, monkeypatch, lambda stage: next(outputs))
+        for turn, tokens in enumerate([(437087, 400000, 4440, 120), (12345, 10000, 321, 0)]):
+            if turn:
+                missions.save(eng, "001-save", "重新评估保存要求", "feature", 1, actor="owner")
+            result = asyncio.run(reconciler.start(eng, "001-save", turn + 1, actor="owner"))
+            rid = result["run_id"]
+            runs[rid]["usage"] = dict(zip(("inputTokens", "cacheReadTokens", "outputTokens", "reasoningTokens"), tokens))
+            asyncio.run(reconciler.reconcile_once(None, SimpleNamespace(engine=eng)))
+            row = eng.db.list_runs("_speckit_001-save_std_spec")[-1]
+            assert row["session_id"] == rid and row["verdict"] == ("ERROR" if turn else "PASS")
+            assert tuple(row[k] for k in ("input_tokens","cached_tokens","output_tokens","reasoning_tokens")) == tokens
     finally:
         eng.db.close()
 
@@ -184,6 +132,7 @@ def test_r7_effort_policy_and_harness_timing_and_dedup_schema(tmp_path):
         save(eng, "constitution", "# 项目宪章\n交付须有验收依据。\n")
         save(eng, "spec", SPEC)
         rule_puts = 0
+        workflows = {}
 
         def handler(req: httpx.Request) -> httpx.Response:
             nonlocal rule_puts
@@ -197,7 +146,13 @@ def test_r7_effort_policy_and_harness_timing_and_dedup_schema(tmp_path):
             if p.startswith("/api/rules/") and req.method == "PUT":
                 rule_puts += 1
                 return httpx.Response(200, json={"status": "published"})
-            if p in ("/api/rules", "/api/agents", "/api/skills", "/api/mcp-servers", "/api/workflows"):
+            if p == "/api/workflows":
+                if req.method == "GET":
+                    return httpx.Response(200, json=list(workflows.values()))
+                value = json.loads(req.content)
+                workflows[value["id"]] = value
+                return httpx.Response(200, json={**value, "status": "draft"})
+            if p in ("/api/rules", "/api/agents", "/api/skills", "/api/mcp-servers"):
                 return httpx.Response(200, json=[] if req.method == "GET" else {**json.loads(req.content), "status": "draft"})
             if p.endswith("/publish"):
                 return httpx.Response(200, json={"status": "published"})
@@ -353,6 +308,7 @@ def test_r7_isolated_local_checklist_validator_3x_replay_under_1s(tmp_path, runt
         "clarifications": [],
         "findings": [SpecFinding(severity="WARNING", message=f"W{i}", requirement_ids=["REQ-001"]).model_dump() for i in range(1, 8)],
         "handoff_brief": BRIEF,
+        "work_packages": [],
     }
     work = tmp_path / f"replay-{runtime}"
     work.mkdir()

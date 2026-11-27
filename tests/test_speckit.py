@@ -13,7 +13,7 @@ from autodev.config import Settings
 from autodev.models import ClarificationItem, SpecTaskDraft, SpecStepResult, strict_json_schema
 from autodev.process.runner import decide_gate, latest_gate_record, is_gate_passed, GateConflictError
 from autodev.speckit import service, compiler, adapter, assets
-from autodev.speckit.parser import parse_spec, render_tasks
+from autodev.speckit.parser import parse_spec, render_tasks, legacy_drafts_to_packages
 
 SPEC = """# 功能规格
 ## 目标
@@ -55,6 +55,10 @@ def approve(e):
 
 def draft(key="T001",**changes):
     return SpecTaskDraft(task_key=key,package_key="save",module="storage",title="保存回答",description="实现回答持久化。",acceptance_criteria=["重启后仍可读取"],requirement_ids=["REQ-001"],allowed_paths=["src/save.py"],verify_cmds=["python -m pytest"],**changes)
+
+
+def work_packages(*drafts):
+    return [p.model_dump() for p in legacy_drafts_to_packages(list(drafts) or [draft()])]
 
 
 def prepared(e):
@@ -133,10 +137,10 @@ def test_compiler_grouping_idempotence_and_frozen_execution(eng):
 
 @pytest.mark.parametrize("mutation,match",[
     ({"requirement_ids":["REQ-999"]},"需求不存在"),
-    ({"allowed_paths":["../secret"]},"越出"),
-    ({"allowed_paths":["specs/001-save/spec.md"]},"版本源"),
+    ({"allowed_paths":["../secret"]},"精确相对路径"),
+    ({"allowed_paths":["specs/001-save/spec.md"]},"精确相对路径"),
     ({"depends_on":["T001"]},"循环"),
-    ({"verify_cmds":[]},"验证命令"),
+    ({"verify_cmds":[]},"verify_cmds"),
 ])
 def test_compiler_rejects_invalid_drafts(eng,mutation,match):
     prepared(eng)
@@ -168,7 +172,7 @@ def test_validator_checks_nested_schema_and_writes_source(tmp_path,runtime):
     command=[sys.executable,str(source)] if runtime=="python" else ["node",str(source)]
     schema=strict_json_schema(SpecStepResult);schema["x-vernal-artifact-path"]="specs/001-save/spec.md"
     (tmp_path/".vernal-schema.json").write_text(json.dumps(schema))
-    value=dict(step="specify",content=SPEC,clarifications=[],findings=[],handoff_brief=dict(BRIEF))
+    value=dict(step="specify",content=SPEC,clarifications=[],findings=[],handoff_brief=dict(BRIEF),work_packages=[])
     output=tmp_path/"vernal-result.json";output.write_text(json.dumps(value))
     result=subprocess.run(command,cwd=tmp_path,capture_output=True,text=True)
     assert result.returncode==0,result.stderr
@@ -233,7 +237,8 @@ def test_complete_adapter_uses_real_planning_dispatch_with_mock_transport(eng,mo
                 nodes=["implement"] if missing_brief else ["implement","review"]
                 return httpx.Response(200,json={"id":"run-execute","status":"succeeded","artifacts":[
                     {"name":"handoff-brief.json","nodeId":node,"content":json.dumps(BRIEF,ensure_ascii=False)} for node in nodes]})
-            value=dict(step=current["step"],content=outputs[current["step"]],clarifications=[],findings=[],handoff_brief=dict(BRIEF))
+            value=dict(step=current["step"],content="" if current["step"]=="tasks" else outputs[current["step"]],clarifications=[],findings=[],handoff_brief=dict(BRIEF),
+                       work_packages=work_packages() if current["step"]=="tasks" else [])
             return httpx.Response(200,json={"id":"run-"+current["step"],"status":"succeeded","artifacts":[{"name":"vernal-result.json","content":json.dumps(value,ensure_ascii=False)}]})
         return httpx.Response(200,json={})
     client=LoopForgeClient(eng.settings.loopforge_url,eng.settings.loopforge_token,transport=httpx.MockTransport(handler))
@@ -345,7 +350,7 @@ def test_feature_namespaces_and_source_revision_guard(eng):
     with pytest.raises(ValueError,match="仍有任务运行"):save(eng,"constitution","# 宪章\n新约束")
 
 
-@pytest.mark.parametrize("case,match",[("coverage","未覆盖 P0"),("overlap","范围重叠"),("unsafe_id","安全的非空"),("projection","只读规格")])
+@pytest.mark.parametrize("case,match",[("coverage","未覆盖 P0"),("overlap","范围重叠"),("unsafe_id","milestone_id"),("projection","只读规格")])
 def test_compiler_additional_safety_boundaries(eng,case,match):
     prepared(eng)
     if case=="coverage":

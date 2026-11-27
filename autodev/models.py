@@ -7,7 +7,7 @@ import json
 import re
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -109,6 +109,67 @@ class SpecFinding(_Strict):
     severity: Literal["CRITICAL", "WARNING", "INFO"]
     message: str
     requirement_ids: list[str] = []
+    repair_target: Literal["", "plan", "tasks", "spec"] = ""
+
+
+class WorkPackageStep(_Strict):
+    task_key: str = Field(pattern=r"^T[0-9]{3,}$")
+    title: str = Field(min_length=1, max_length=120, pattern=r"\S")
+    description: str = Field(min_length=1, pattern=r"\S")
+    requirement_ids: list[Annotated[str, Field(pattern=r"^(?:REQ|NFR)-[0-9]{3,}$")]] = Field(min_length=1)
+    depends_on: list[str] = []
+    verify_cmds: list[str] = []
+
+
+class WorkPackageDraft(_Strict):
+    package_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+    milestone_id: str = Field(default="M1", pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
+    squad: str = Field(default="core", pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
+    module: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
+    role: TaskRole = "coder"
+    title: str = Field(min_length=1, pattern=r"\S")
+    acceptance_criteria: list[str] = Field(min_length=1)
+    allowed_paths: list[str] = Field(min_length=1)
+    verify_cmds: list[str] = Field(min_length=1)
+    depends_on_packages: list[str] = []
+    steps: list[WorkPackageStep] = Field(min_length=1)
+
+
+class Prerequisite(_Strict):
+    key: str = Field(pattern=r"^P[0-9]{2,}$")
+    description: str = Field(pattern=r"\S")
+    evidence_needed: str = Field(pattern=r"\S")
+
+
+class ExperienceItem(_Strict):
+    description: str = Field(pattern=r"\S")
+    core_acceptance: Literal[False] = False
+
+
+class LitePlanBundle(_Strict):
+    mode: Literal["NEEDS_CLARIFICATION", "READY_FOR_APPROVAL", "ESCALATE_STANDARD"]
+    risk: Literal["low", "medium", "high"]
+    rationale: str = Field(pattern=r"\S")
+    clarifications: list[ClarificationItem] = Field(default_factory=list, max_length=3)
+    prerequisites: list[Prerequisite] = []
+    experience_items: list[ExperienceItem] = []
+    spec_markdown: str = ""
+    plan_markdown: str = ""
+    work_packages: list[WorkPackageDraft] = Field(default_factory=list, max_length=2)
+    handoff_brief: HandoffBrief
+
+    @model_validator(mode="after")
+    def validate_bundle(self):
+        from autodev.speckit.validate_output import validate_lite_bundle
+        from autodev.prompts_style import _INTERNAL
+        validate_lite_bundle(self.model_dump(), {"x-vernal-public-pattern": _INTERNAL.pattern})
+        return self
+
+
+class StandardPlanBundle(_Strict):
+    plan_markdown: str = Field(pattern=r"\S")
+    work_packages: list[WorkPackageDraft] = Field(min_length=1)
+    handoff_brief: HandoffBrief
 
 
 class SpecStepResult(_Strict):
@@ -117,6 +178,15 @@ class SpecStepResult(_Strict):
     clarifications: list[ClarificationItem] = []
     findings: list[SpecFinding] = []
     handoff_brief: HandoffBrief
+    work_packages: list[WorkPackageDraft] = []
+
+    @model_validator(mode="after")
+    def task_source(self):
+        if self.step == "tasks" and not self.work_packages:
+            raise ValueError("tasks 必须返回非空 work_packages")
+        if self.step != "tasks" and self.work_packages:
+            raise ValueError("仅 tasks 步骤可返回 work_packages")
+        return self
 
 
 # ---------- 1. 多智能体架构评审圆桌（Architecture Council） ----------

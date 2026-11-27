@@ -14,7 +14,7 @@ from autodev.models import SpecFinding, SpecTaskDraft
 from autodev.server.app import create_app
 from autodev.speckit import adapter, assets, compiler, missions, service
 from autodev.speckit.parser import render_tasks
-from test_speckit import BRIEF, PLAN, SPEC, approve, draft, eng, save
+from test_speckit import BRIEF, PLAN, SPEC, approve, draft, eng, save, work_packages
 
 
 def _seven_findings() -> list[dict]:
@@ -60,7 +60,8 @@ def test_r4_seven_findings_enter_plan_and_analyze_and_survive_last_step(eng, mon
             assert schema["x-vernal-require-findings-ids"] == finding_ids
         return SimpleNamespace(
             ok=True,
-            structured=dict(step=step, content=outputs[step], clarifications=[], findings=[], handoff_brief=BRIEF),
+            structured=dict(step=step, content="" if step == "tasks" else outputs[step], clarifications=[], findings=[], handoff_brief=BRIEF,
+                            work_packages=work_packages() if step == "tasks" else []),
             session_id=f"s-{step}",
             usage=SimpleNamespace(input_tokens=10, cached_tokens=0, output_tokens=5, reasoning_tokens=0),
         )
@@ -189,11 +190,11 @@ def test_r4_applicable_nfr_enters_compiler_p0_coverage_and_explicit_asset_upgrad
 
     # Verify manifest bundle & explicit preset upgrade (immutable old lock untouched)
     manifest = assets.verify_bundle(assets.ASSET_ROOT)
-    assert manifest["presets"]["vernal-core"]["version"] == "1.1.0"
-    assert manifest["presets"]["vernal-lite"]["version"] == "1.1.0"
+    assert manifest["presets"]["vernal-core"]["version"] == "1.2.0"
+    assert manifest["presets"]["vernal-lite"]["version"] == "1.2.0"
     old_lock, old_dir = assets.load_assets(eng)
     assert old_lock["preset_id"] == "vernal-core"
-    assert old_lock["preset_version"] == "1.1.0"
+    assert old_lock["preset_version"] == "1.2.0"
 
     upgraded = assets.upgrade_assets(eng, "vernal-lite", actor="owner", reason="局部低风险特性显式切换轻量预设")
     assert upgraded["changed"] is True

@@ -1,10 +1,12 @@
 import { $, api, esc, toast, getActiveProjectId, root } from "./api.js";
+import { mountMissionExecution } from "./mission-execution.js";
 
 const labels = {NEEDS_ASSESSMENT:"待评估需求",WAITING_ANSWERS:"请确认以下关键问题",WAITING_PREREQUISITES:"先完成交付前置条件",NEEDS_CHECKLIST:"待检查规格质量",CHECKLIST_BLOCKED:"规格质量检查未通过，请先修订规格",WAITING_APPROVAL:"规格已准备好，请审阅批准",NEEDS_PLAN:"需求已批准，可继续形成实施方案",READY_TO_PUBLISH:"工作包已准备好",PUBLISHED:"已纳入研发计划",RUNNING:"正在处理需求"};
 const intents = {new_system:"全新系统",feature:"增量特性",bugfix:"缺陷修复",refactor:"重构加固",documentation:"逆向文档"};
 let project = "", selected = "", draft = "", intent = "feature", generation = 0, evidence = null;
 const drafts = new Map(), evidenceDrafts = new Map();
 let lastDiff=null;
+Object.assign(labels, {NEEDS_REWORK:"检查要求修正，可自动处理", REWORK_STOPPED:"自动修正已暂停", REVIEW_BLOCKED:"检查条件尚未满足"});
 
 export function codepointLength(text) {
   return Array.from(String(text ?? "")).length;
@@ -50,7 +52,7 @@ export function renderMissions(data, refresh) {
   mount.innerHTML=`<header class="mission-head"><div><h2>需求与交付</h2><p class="muted">说明目标，确认必要决策，按批准的规格交付。</p></div><button id="mission-refresh" class="btn btn-sm">刷新进度</button></header>
     <div class="mission-toolbar"><label>当前需求 <select id="mission-select"><option value="new">新增需求</option>${data.missions.map(m=>`<option value="${esc(m.feature_id)}" ${m.feature_id===selected?"selected":""}>${esc(m.brief.slice(0,42))}</option>`).join("")}</select></label><button class="btn btn-sm" id="mission-preflight">检查执行条件</button></div>
     ${!mission?`<label for="mission-intent">任务类型</label><select id="mission-intent">${Object.entries(intents).map(([k,v])=>`<option value="${k}" ${k===intent?"selected":""}>${v}</option>`).join("")}</select><label for="mission-brief">这次要完成什么</label><textarea id="mission-brief" rows="7" maxlength="50000" placeholder="说明目标、首版范围和验收方式。已有文档可在建项时附带。">${esc(draft)}</textarea><p class="muted">项目来源和执行池沿用当前项目设置，保存后再检查执行条件。</p><button class="btn btn-primary" id="mission-save">保存并评估需求</button>`:
-    `<div class="mission-status" role="status">${esc(labels[mission.state]||mission.state)}${mission.spec_rev_no?` · 规格第 ${mission.spec_rev_no} 版`:""}</div><p>${esc(mission.brief)}</p>
+    `<div class="mission-status" role="status">${esc(labels[mission.state]||mission.state)}${mission.spec_rev_no?` · 规格第 ${mission.spec_rev_no} 版`:""}</div><section id="mission-execution"></section><p>${esc(mission.brief)}</p>
     ${showAssessment?`<p class="muted">${{greenfield:"全新项目",existing_local:"已有本机代码",existing_git:"已有 Git 仓库"}[mission.route.source_origin]} · ${mission.route.clarity_level==="READY_LITE"?"局部轻量交付":mission.route.clarity_level==="NEEDS_CLARIFICATION"?"有待确认的交付边界":"标准交付"} · 风险${{low:"低",medium:"中",high:"高"}[mission.assessment.risk]}</p><p>${esc(mission.assessment.rationale)}</p>${mission.route.limitation?`<p class="muted">${esc(mission.route.limitation)}</p>`:""}`:""}
     ${showAssessment && mission.config_alignment && !mission.config_alignment.aligned?`<div class="mission-config-mismatch" id="mission-config-alignment"><p class="muted">${esc(mission.config_alignment.mismatch_reason||"本次评估推荐配置与当前锁定配置不同。")}</p>${mission.config_alignment.can_convert_to_recommended?`<button class="btn btn-sm" id="mission-convert-profile" ${run?"disabled":""}>显式切换至推荐配置（${esc(mission.config_alignment.recommended_preset)} / ${esc(mission.config_alignment.recommended_process)}）</button>`:""}</div>`:(showAssessment && mission.actual_process && mission.actual_process!==mission.route.process_template?`<p class="muted">本次评估推荐的流程与当前项目不同。项目继续保留已锁定的审批流程，建议不会自动覆盖既有设置。</p>`:"")}
     ${mission.last_error||mission.blocker?`<p role="alert">${esc(mission.last_error||mission.blocker)}</p>`:""}
@@ -59,12 +61,14 @@ export function renderMissions(data, refresh) {
     ${(mission.prerequisites||[]).map(p=>`<div class="mission-question"><strong>${esc(p.description)}</strong><p>${esc(p.evidence_needed)}</p><label>负责人核验依据<input data-prerequisite="${esc(p.key)}" placeholder="写明实际检查结果或证据位置"></label><button class="btn btn-sm" data-evidence-save="${esc(p.key)}">记录核验依据</button></div>`).join("")}
     ${source?`<details><summary>审阅当前规格 · 第 ${source.rev_no} 版</summary><pre class="mission-document">${esc(source.content_text)}</pre></details>`:""}
     ${renderQualityReview()}
-    ${["NEEDS_ASSESSMENT","NEEDS_CHECKLIST","NEEDS_PLAN"].includes(mission.state)?`<button class="btn btn-primary" id="mission-continue" ${run?"disabled":""}>${mission.last_error?"从已保存步骤继续":"继续需求交付"}</button>`:""}
+    ${(mission.repair?.findings || []).length ? `<div class="mission-question"><strong>当前待处理问题</strong><p>已自动修正 ${Number(mission.repair.round || 0)} 轮</p><ul>${mission.repair.findings.map(f => `<li>${esc(f.message)}${f.repair_target ? `（${esc({plan:"方案修正",tasks:"任务修正",spec:"规格决策"}[f.repair_target] || f.repair_target)}）` : ""}</li>`).join("")}</ul></div>` : ""}
+    ${["NEEDS_ASSESSMENT","NEEDS_CHECKLIST","NEEDS_PLAN","NEEDS_REWORK"].includes(mission.state)?`<button class="btn btn-primary" id="mission-continue" ${run?"disabled":""}>${mission.state==="NEEDS_REWORK"?"修正并复审":mission.last_error?"从已保存步骤继续":"继续需求交付"}</button>`:""}
     ${mission.state==="WAITING_APPROVAL"?`<p>请到工作台的需求审批门审阅当前版本。批准后点击继续，自动生成方案、任务和一致性检查。</p><button class="btn" id="mission-home">打开工作台审批</button>`:""}
     ${mission.state==="READY_TO_PUBLISH"?`${mission.packages.map(p=>`<div class="mission-question"><strong>${esc(p.task.title)}</strong><p>${esc(p.task.acceptance_criteria.join("；"))}</p><p class="muted">修改范围：${esc(p.task.allowed_paths.join("、"))}</p></div>`).join("")}<button class="btn btn-primary" id="mission-publish">发布以上工作包</button>`:""}
     ${mission.state==="PUBLISHED"?`<p>规格和工作包已冻结。请在工作台核对实施方案并启动研发，交付结果由现有验证和合入流程记录。</p><button class="btn" id="mission-home">打开研发工作台</button>`:""}
     ${mission.state==="RUNNING"&&!data.running?`<p>上次流程已中断。恢复前将检查原生执行是否结束。</p><button class="btn" id="mission-recover">核对执行记录并恢复</button>`:""}`}
     <div id="mission-checks" aria-live="polite"></div><div id="mission-answer-revision" aria-live="polite"></div>`;
+  if (mission) mountMissionExecution(feature, refresh);
   const showChecks=value=>{if(!active())return;$("mission-checks").innerHTML=`<p><strong>${value.ready?"派发前配置检查通过":"执行条件尚未满足，需求已保留"}</strong></p><ul>${value.checks.map(c=>`<li>${c.ok?"已确认":"待处理"}：${esc(c.message)}</li>`).join("")}</ul><p class="muted">${esc(value.verification)}</p>`;};
   if(evidence)showChecks(evidence);
   const showDiff=()=>{if(lastDiff?.feature===feature)$("mission-answer-revision").innerHTML=`<details open><summary>回答已保存，以下为本次变更</summary><pre class="mission-document">${esc(lastDiff.diff)}</pre></details>`;};showDiff();

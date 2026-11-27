@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 from autodev.process.runner import (
     BUILTIN_TEMPLATES,
     GateConflictError,
-    decide_gate,
     list_gate_records,
     load_builtin_template,
     load_template,
@@ -131,8 +130,9 @@ async def api_decide_gate(record_id: int, request: Request, req: GateDecisionReq
     allowed_roles = ("admin",) if is_waive else tuple(gate_def.approver_roles if (gate_def and gate_def.approver_roles) else ("admin", "architect", "reviewer"))
     try:
         check_role_permission(eng.db, actor, allowed_roles, project=pid)
-        decided = decide_gate(
-            eng.db,
+        from autodev.speckit.missions import decide_and_freeze
+        decided = decide_and_freeze(
+            eng,
             record_id,
             req.decision,
             audit_project=pid, actor_ip=request.client.host if request.client else "127.0.0.1",
@@ -153,6 +153,9 @@ async def api_decide_gate(record_id: int, request: Request, req: GateDecisionReq
 
     from autodev.governance.audit import flush_decisions
     flush_decisions(eng.db, platform_db_path_for(ctx.workspaces_parent()))
+    if decided.get("frozen_task_ids"):
+        from .speckit import start_lite_delivery
+        start_lite_delivery(ctx, ctx.active_slot(request), decided["frozen_task_ids"])
     return decided
 
 

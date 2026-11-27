@@ -1,6 +1,6 @@
 {
   "id": "vernal-core",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "extends": "upstream@1.4.4",
   "mode": "append",
   "instructions": "采用中文。功能规格是可执行 REQ/NFR 的唯一登记来源；宪章仅保存原则、治理边界与兼容底线，不在两份文档重复维护业务条目。需求用 EARS 方式写清触发条件与可观察行为，每条有独立验收条件。需求编号 REQ-001 或 NFR-001，优先级 P0/P1/P2。明确 Non-Goals。保留用户约束，缺失承诺写入澄清问题，不自行猜测。上游模板中的 CLI、分支、脚本、扩展钩子和交互步骤由平台承担，本次只返回结构化产物，不执行这些控制操作。",
@@ -10,7 +10,7 @@
     "clarify": "content 留空，在 clarifications 中给出最多三项影响承诺的未决问题。已有答案不重复提问。无歧义时允许空列表。低风险默认值须列出依据。此步骤不自行更改规格。",
     "plan": "输出技术方案 Markdown，包含 ## 需求映射、## 接口与数据、## 实施边界、## 验证。引用已批准需求（含适用 NFR），说明现有契约和增量变化，不修改需求。若当前质量检查存在未结发现，必须增加 ## 检查发现处理 表格（发现标识 | 处理位置 | 验证方式 | 是否需规格变更）逐条覆盖所有 CHK 发现标识；涉及业务承诺变更的必须标明需规格变更并退回修订，不得在方案中擅自承诺。",
     "checklist": "输出规格质量检查清单，检查范围、歧义、验收可测性、非目标及宪章适用 NFR 是否已登记到规格；这不是程序测试。问题写入 findings。",
-    "tasks": "输出任务草案。每条格式为 - [ ] T001 简短标题，紧随一个 vernal-task JSON 代码块。字段 task_key, package_key, milestone_id, squad, module, role, title, description, acceptance_criteria, requirement_ids, depends_on, allowed_paths, verify_cmds。元数据标题编号须与勾选行相同。package_key 将同一模块及验收边界的微步骤归成可独立交付的工作包。依赖引用 T 编号。所有任务必须关联需求（含全部适用 P0 NFR）、明确路径和验证命令，不得预勾完成。P1 不允许跨工作包重叠写入范围；共享范围请合并为一个工作包。",
+    "tasks": "仅通过 work_packages 输出结构化工作包，content 可为空。工作包级字段 package_key、milestone_id、squad、module、role、title、acceptance_criteria、allowed_paths、verify_cmds、depends_on_packages 每包只写一次。steps 仅包含 task_key、title、description、requirement_ids、depends_on、verify_cmds。平台依据 tasks.json 确定性生成 tasks.md，不生成 Markdown 勾选列表或 vernal-task 围栏。全部步骤覆盖已批准的 P0 REQ/NFR；路径精确、跨包不重叠；命令可执行；步骤与工作包依赖均无环。",
     "analyze": "只读核验宪章、需求、质量检查发现、技术方案和任务草案。content 输出问题说明；findings 区分 CRITICAL/WARNING/INFO。必须逐条核验每条当前质量发现（CHK 标识）是否在需求、接口、任务和验证命令中真实落实，不能只凭方案写有已处理而放行。遗漏 P0 需求或适用 P0 NFR、互相矛盾、不可测承诺为 CRITICAL。不得改写输入降低标准。"
   }
 }

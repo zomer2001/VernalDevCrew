@@ -244,8 +244,9 @@ def test_loopforge_harness_externalizes_large_context_and_fuses_offline_runner(t
     eng = Engine(ws, settings=settings)
     harness = LoopForgeHarness(settings, eng.db, ws, poll_interval=0.01)
 
-    desc = harness._build_issue_description("blueprint", "请阅读 inputs/ 中的大文档", eng.schemas["project_blueprint"], "director")
-    assert "http://10.0.0.5:8787/vernal-api/plan-context/blueprint.json" in desc
+    desc, restore_cmd = harness._build_issue_description("blueprint", "请阅读 inputs/ 中的大文档", eng.schemas["project_blueprint"], "director")
+    assert "http://10.0.0.5:8787/vernal-api/plan-context/blueprint.json" in restore_cmd
+    assert "prepare" in desc and "```bash" not in desc
     assert (ws.state_dir / "baselines" / "plan-blueprint.json").is_file()
 
     # 测试 REST 接口能够提供规划上下文与 Runner 绑定码

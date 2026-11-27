@@ -61,8 +61,11 @@ case "${1:-}" in
   *) echo "未知 Runner 参数 $1" >&2; exit 2 ;;
 esac
 
-if [[ -x "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex" && ! -e "$BIN_DIR/codex" ]]; then
-  ln -sf "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex" "$BIN_DIR/codex"
+desktop_codex="/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
+if [[ -x "$desktop_codex" && -x "$DIR/runner-codex.sh" ]]; then
+  if [[ ! -e "$BIN_DIR/codex" || ( -L "$BIN_DIR/codex" && "$(readlink "$BIN_DIR/codex")" == "$desktop_codex" ) ]]; then
+    ln -sfn "../runner-codex.sh" "$BIN_DIR/codex"
+  fi
 fi
 paths=("$HOME/.local/bin" "$HOME/.npm-global/bin" "$HOME/.opencode/bin" "$HOME/.codebuddy/bin"
        "$HOME/.dsh/bin" "$HOME/.claude/local" "$HOME/.volta/bin" "$HOME/.asdf/shims"
@@ -82,7 +85,12 @@ done < <(
 for p in "${paths[@]}" "/opt/homebrew/bin" "/usr/local/bin"; do
   [[ ! -d "$p" ]] || PATH="$PATH:$p"
 done
-export PATH="$PATH:$BIN_DIR"
+# Prefer the scoped Codex launcher when it is installed by this deployment.
+if [[ -L "$BIN_DIR/codex" && "$(readlink "$BIN_DIR/codex")" == "../runner-codex.sh" ]]; then
+  export PATH="$BIN_DIR:$PATH"
+else
+  export PATH="$PATH:$BIN_DIR"
+fi
 for cli in codex codebuddy opencode dsh claude; do
   if cli_path="$(command -v "$cli")"; then
     version="$("$cli_path" --version </dev/null 2>/dev/null | head -n 1 || true)"

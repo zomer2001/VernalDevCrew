@@ -1,5 +1,6 @@
 import { $, actorName, api, esc, fmtElapsed, getActiveProjectId, projectQuerySuffix, root, setLoggedInUser, toast } from "./api.js";
 import { bindCouncilActions, refreshCouncil } from "./council.js";
+import { pollMissionExecution } from "./mission-execution.js";
 import { renderDAG } from "./dag.js";
 import { handleLiveDrawerEvent, initDrawer, openReportModal, openTaskDrawer } from "./drawer.js";
 import { initLauncher } from "./launcher.js";
@@ -710,6 +711,8 @@ setInterval(() => {
 }, 10000);
 
 setInterval(() => {
+  if (document.hidden) return;
+  if (activeView === "council") pollMissionExecution();
   if (activeView !== "overview" || !state || state.workspace_initialized === false) return;
   pollOpenTaskStreams();
 }, 4000);

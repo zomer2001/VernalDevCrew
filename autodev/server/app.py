@@ -111,10 +111,13 @@ def _auto_resume_active_schedulers(ctx: ServerContext) -> list[str]:
         eng = slot.engine
         if ctx.is_scheduler_running(slot) or eng.status != ProjectStatus.RUNNING:
             continue
+        if eng.db._query("SELECT 1 FROM dispatch_records WHERE stage='lite_delivery' "
+                         "AND state IN ('DISPATCHING','QUEUED','RUNNING','NEEDS_CONFIRMATION') LIMIT 1"):
+            continue  # The receipt reconciler owns restart recovery for tagged native deliveries.
         tasks = eng.db.list_tasks()
         has_active = any(t.status in ACTIVE_TASK_STATUSES for t in tasks)
         has_dispatch = bool(
-            eng.db._query("SELECT 1 FROM dispatch_records WHERE state IN ('RUNNING', 'QUEUED') LIMIT 1")
+            eng.db._query("SELECT 1 FROM dispatch_records WHERE state IN ('RUNNING', 'QUEUED') AND stage NOT IN ('std_plan','std_spec','lite_bundle') LIMIT 1")
         )
         has_ready = any(t.status == TaskStatus.READY for t in tasks)
         if eng.settings.runtime_backend == "loopforge":
@@ -155,13 +158,16 @@ def create_app(initial_engine: Engine, proxy_transport: httpx.AsyncBaseTransport
                     except (OSError, httpx.HTTPError, __import__("sqlite3").Error):
                         continue
                 await asyncio.sleep(10)
+        from autodev.loopforge.reconciler import serve
+        reconciliation = asyncio.create_task(serve(ctx))
         delivery = asyncio.create_task(drain())
         _auto_resume_active_schedulers(ctx)
         try:
             yield
         finally:
+            reconciliation.cancel()
             delivery.cancel()
-            await asyncio.gather(delivery, return_exceptions=True)
+            await asyncio.gather(delivery, reconciliation, return_exceptions=True)
             for s in list(ctx.all_slots):
                 if s.scheduler is not None:
                     s.scheduler.request_stop()

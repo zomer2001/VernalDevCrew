@@ -1,14 +1,16 @@
 """Immutable source revisions and one-way document projections."""
 from __future__ import annotations
+from contextlib import contextmanager
 import json
 import re
 
 from autodev.db import now_iso
-from autodev.models import ClarificationItem, HandoffBrief, ProductSpec
+from autodev.models import ClarificationItem, HandoffBrief, ProductSpec, WorkPackageDraft
 from autodev.process.targets import document_sha, normalize_document
 from .assets import digest_json, load_assets, pin_assets
-from .parser import parse_spec, parse_tasks, render_spec
-from .paths import source_path, safe_path
+from .parser import parse_spec, parse_tasks, render_spec, render_work_packages_markdown
+from .paths import feature_spec_dir, source_path, safe_path, tasks_json_path
+from .validate_output import canonical_json, validate_work_packages
 
 
 class SpecConflictError(ValueError):
@@ -41,7 +43,10 @@ async def sync_rule(engine,client,project_id) -> None:
 
 
 def latest(engine, feature_id: str, kind: str = "spec") -> dict | None:
-    source_path(feature_id, kind)
+    if kind == "intake":
+        feature_spec_dir(feature_id)
+    else:
+        source_path(feature_id, kind)
     feature_id = "project" if kind == "constitution" else feature_id
     rows = engine.db._query(
         "SELECT r.*,d.content_text FROM spec_revisions r JOIN doc_versions d ON d.id=r.content_version_id "
@@ -60,6 +65,15 @@ def assert_source_current(engine, rev: dict) -> None:
     path = safe_path(engine.ws.root, rev["rel_path"])
     if not path.is_file() or document_sha(path.read_text("utf-8")) != rev["content_sha"]:
         raise SpecConflictError("规格工作副本与已发布修订不一致，请显式保存或恢复后继续")
+    if rev["source_kind"] == "tasks":
+        json_path = tasks_json_path(rev["feature_id"])
+        if rev["rel_path"] != json_path and safe_path(engine.ws.root, json_path).exists():
+            raise SpecConflictError("tasks.json 已存在，禁止回退旧版 tasks.md")
+        if rev["rel_path"] == json_path:
+            packages = [WorkPackageDraft.model_validate(p) for p in json.loads(rev["content_text"])]
+            projection = safe_path(engine.ws.root, source_path(rev["feature_id"], "tasks"))
+            if not projection.is_file() or projection.read_text("utf-8") != render_work_packages_markdown(packages):
+                raise SpecConflictError("tasks.md 只读投影与 tasks.json 不一致，请恢复来源")
 
 
 def restore_source(engine,feature_id: str,kind: str,*,expected_rev_id: int,actor: str) -> dict:
@@ -79,6 +93,10 @@ def restore_source(engine,feature_id: str,kind: str,*,expected_rev_id: int,actor
             backup=saved.relative_to(engine.ws.root).as_posix()
         target.parent.mkdir(parents=True,exist_ok=True)
         target.write_text(rev["content_text"],"utf-8")
+        if kind == "tasks" and rev["rel_path"].endswith(".json"):
+            projection = safe_path(engine.ws.root, source_path(feature_id, kind))
+            packages = [WorkPackageDraft.model_validate(p) for p in json.loads(rev["content_text"])]
+            projection.write_text(render_work_packages_markdown(packages), "utf-8")
         project_documents(engine)
         engine.db.add_event("speckit.source_restored",f"已恢复 {feature_id} 的 {kind} 工作副本；外部修改备份：{backup or '无需备份'}",actor=actor)
         return {"restored":rev["rel_path"],"backup_path":backup}
@@ -221,7 +239,7 @@ def quality_review(engine, feature_id: str) -> dict:
 
 
 def input_fingerprint(engine, feature_id: str, kind: str, *, legacy: bool = False) -> str:
-    chain = {"constitution": [], "spec": ["constitution"], "checklist": ["constitution", "spec"],
+    chain = {"intake": [], "constitution": [], "spec": ["constitution"], "checklist": ["constitution", "spec"],
              "plan": ["constitution", "spec", "checklist"],
              "tasks": ["constitution", "spec", "checklist", "plan"],
              "analyze": ["constitution", "spec", "checklist", "plan", "tasks"]}[kind]
@@ -294,6 +312,12 @@ def project_documents(engine) -> list[str]:
         body = "# 软件需求规格说明书\n\n本页由功能规格汇总，修改请进入对应功能。\n"
         for rev in specs:
             body += f"\n## 功能 {rev['feature_id']} · 修订 {rev['rev_no']}\n\n" + rev["content_text"]
+            mission = json.loads(engine.db.meta_get("mission:" + rev["feature_id"]) or "{}")
+            if mission.get("lite_revisions"):
+                for kind in ("plan", "tasks"):
+                    item = latest(engine, rev["feature_id"], kind)
+                    if item:
+                        body += f"\n本次一并审阅 {item['rel_path']} · r{item['rev_no']} · {item['content_sha']}\n"
         _snapshot(engine, "docs/SRS.md", body, author="SpecAdapter", summary="汇总当前功能规格")
         written.append("docs/SRS.md")
     constitution = latest(engine, "project", "constitution")
@@ -312,12 +336,49 @@ def project_documents(engine) -> list[str]:
     return written
 
 
+def work_package_schema(engine, feature_id: str, *, exclude_task_ids=()) -> dict:
+    rev = latest(engine, feature_id, "spec")
+    if not rev:
+        raise ValueError("缺少当前功能规格")
+    assert_source_current(engine, rev)
+    spec = parse_spec(rev["content_text"], feature_id)
+    requirements = spec.requirements + spec.nfrs
+    return {**work_package_boundaries(engine, exclude_task_ids),
+        "x-vernal-tasks-json-path": tasks_json_path(feature_id),
+        "x-vernal-req-ids": [r.req_id for r in requirements],
+        "x-vernal-p0-req-ids": [r.req_id for r in requirements if r.priority == "P0"],
+    }
+
+
+def work_package_boundaries(engine, exclude_task_ids=()):
+    return {
+        "x-vernal-protected-paths": list(engine.settings.protected_paths),
+        "x-vernal-existing-paths": [p for task in engine.db.list_tasks()
+                                    if task.status not in ("CANCELLED", "MERGED") and task.task_id not in exclude_task_ids
+                                    for p in task.allowed_paths],
+        "x-vernal-single-milestone": True,
+    }
+
+
 def publish_revision(engine, feature_id: str, kind: str, content: str, *, expected_rev_id: int,
                      author: str = "owner", summary: str = "人工修订", input_sha: str | None = None,
-                     handoff: HandoffBrief | None = None, findings: list[dict] | None = None) -> dict:
-    path = source_path(feature_id, kind)
+                     handoff: HandoffBrief | None = None, findings: list[dict] | None = None,
+                     work_packages: list[WorkPackageDraft] | None = None) -> dict:
+    path = f"{feature_spec_dir(feature_id)}/intake.md" if kind == "intake" else source_path(feature_id, kind)
+    projection = None
+    if work_packages is not None:
+        if kind != "tasks":
+            raise ValueError("仅 tasks 修订可包含工作包")
+        work_packages = [WorkPackageDraft.model_validate(p) for p in work_packages]
+        payload = [p.model_dump() for p in work_packages]
+        validate_work_packages(payload, work_package_schema(engine, feature_id), engine.ws.root)
+        projection = safe_path(engine.ws.root, path)
+        path = tasks_json_path(feature_id)
+        content = canonical_json(payload)
+    elif kind == "tasks" and safe_path(engine.ws.root, tasks_json_path(feature_id)).exists():
+        raise SpecConflictError("tasks.md 是只读投影，请通过结构化工作包更新 tasks.json")
     feature_id = "project" if kind == "constitution" else feature_id
-    if not enabled(engine):
+    if not enabled(engine) and kind != "intake":
         raise ValueError("请先启用功能规格流程")
     content = normalize_document(content)
     from autodev.prompts_style import validate_public_text
@@ -327,7 +388,8 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
     if kind == "spec":
         parse_spec(content, feature_id)
     elif kind == "tasks":
-        parse_tasks(content)
+        if work_packages is None:
+            parse_tasks(content)
     elif kind == "plan":
         from .parser import section
         if any(not section(content,h) for h in ("需求映射","接口与数据","实施边界","验证")):
@@ -341,7 +403,13 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
             if missing_ids:
                 raise ValueError("技术方案「检查发现处理」缺少以下质量发现标识：" + ", ".join(missing_ids))
     with engine.db.transaction():
-        assets, _ = load_assets(engine)
+        if enabled(engine):
+            assets, _ = load_assets(engine)
+        else:
+            from .assets import ASSET_ROOT, verify_bundle
+            manifest = verify_bundle(ASSET_ROOT)
+            assets = dict(preset_id="vernal-lite", preset_version=manifest["presets"]["vernal-lite"]["version"],
+                          speckit_version=manifest["speckit_version"])
         active_sql = "SELECT 1 FROM tasks WHERE status IN ('IN_PROGRESS','VERIFYING','REVIEWING')"
         if kind != "constitution":
             active_sql += " AND feature_id=?"
@@ -352,7 +420,7 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
             raise SpecConflictError("当前规格修订已变化，请刷新后重试")
         if old:
             assert_source_current(engine,old)
-        elif safe_path(engine.ws.root,path).exists():
+        elif safe_path(engine.ws.root,path).exists() or (projection is not None and projection.exists()):
             raise SpecConflictError("目标路径已有未纳管文件，请保留备份并移出该路径后再保存")
         actual_input = input_fingerprint(engine, feature_id, kind)
         if input_sha is not None and input_sha != actual_input:
@@ -366,6 +434,9 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
             assert_source_current(engine, old)
             return old
         snap = _snapshot(engine, path, content, author=author, summary=summary)
+        if projection is not None:
+            projection.parent.mkdir(parents=True, exist_ok=True)
+            projection.write_text(render_work_packages_markdown(work_packages), "utf-8")
         rev_no = old["rev_no"] + 1 if old else 1
         cursor = engine.db._exec(
             "INSERT INTO spec_revisions(feature_id,rev_no,source_kind,rel_path,content_sha,content_version_id,"
@@ -379,7 +450,7 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
             engine.db.meta_set(f"speckit.analysis:{new_rev_id}", json.dumps(findings, ensure_ascii=False))
         if old:
             engine.db._exec("UPDATE spec_revisions SET status='STALE' WHERE rev_id=?", (old["rev_id"],))
-        downstream = {"constitution": ["spec","plan","tasks","checklist","analyze"],
+        downstream = {"intake": [], "constitution": ["spec","plan","tasks","checklist","analyze"],
                       "spec": ["plan","tasks","checklist","analyze"],
                       "checklist": ["plan","tasks","analyze"],
                       "plan": ["tasks","analyze"],
@@ -389,7 +460,8 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
             scope = "" if kind == "constitution" else " AND feature_id=?"
             engine.db._exec(f"UPDATE spec_revisions SET status='STALE' WHERE source_kind IN ({placeholders}){scope}",
                             (*downstream, *([] if kind == "constitution" else [feature_id])))
-        project_documents(engine)
+        if kind != "intake":
+            project_documents(engine)
         if kind in ("spec", "constitution"):
             from autodev.process.runner import ensure_gate_record
             if current_specs(engine):
@@ -398,7 +470,9 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
             if kind=="spec" and engine.status in ("CREATED","INGESTED"):
                 from autodev.models import ProjectStatus
                 engine.set_status(ProjectStatus.SPECIFIED)
-        if kind == "plan":
+        from autodev.process.runner import load_template
+        if kind == "plan" and any(g.id == "architecture_approval" for s in load_template(engine.ws, engine.settings).stages
+                                   if s.enabled for g in s.gates):
             from autodev.process.runner import ensure_gate_record
             ensure_gate_record(engine.db, stage_id="architecture",gate_id="architecture_approval",kind="human_approval",
                                scope_type="project",scope_id="project",summary="审阅当前功能技术方案")
@@ -407,11 +481,43 @@ def publish_revision(engine, feature_id: str, kind: str, content: str, *, expect
                                      "ON d.id=r.content_version_id WHERE rev_id=?", (new_rev_id,))[0])
 
 
+@contextmanager
+def bundle_publication(engine, feature):
+    """Roll back the existing document projections together if the combined publication fails."""
+    folder = feature_spec_dir(feature)
+    paths = [safe_path(engine.ws.root, rel) for rel in (
+        f"{folder}/intake.md", f"{folder}/spec.md", f"{folder}/plan.md", f"{folder}/tasks.md",
+        tasks_json_path(feature), source_path(feature, "checklist"), source_path(feature, "analyze"),
+        source_path(feature,"constitution"), "docs/SRS.md",
+        "docs/CONSTITUTION.md", "docs/ARCHITECTURE.md")]
+    process = engine.ws.state_dir / "process.yaml"
+    if process.is_symlink():
+        raise SpecConflictError("流程模板不能是符号链接")
+    paths.append(process)
+    with engine.db.transaction():
+        before = {p:p.read_bytes() if p.exists() else None for p in paths}
+        previous = engine.settings.process_template
+        try:
+            yield
+        except BaseException:
+            engine.settings.process_template = previous
+            for p, original in before.items():
+                if original is None:
+                    p.unlink(missing_ok=True)
+                elif not p.exists() or p.read_bytes() != original:
+                    p.write_bytes(original)
+            raise
+
+
+def clarification_source(engine, feature):
+    return latest(engine, feature) or latest(engine, feature, "intake")
+
+
 def add_clarifications(engine, feature_id: str, spec_rev_id: int, questions: list[ClarificationItem], *, actor: str) -> None:
     if len({q.question_key for q in questions}) != len(questions):
         raise ValueError("澄清问题编号重复")
     with engine.db.transaction():
-        rev = latest(engine, feature_id)
+        rev = clarification_source(engine, feature_id)
         if not rev or rev["rev_id"] != spec_rev_id:
             raise SpecConflictError("澄清所基于的规格已变化")
         assert_source_current(engine, rev)
@@ -434,7 +540,7 @@ def add_clarifications(engine, feature_id: str, spec_rev_id: int, questions: lis
                 answer_clarification(engine,inserted.lastrowid,q.default_option,
                                      expected_rev_id=latest(engine,feature_id)["rev_id"],actor="recommended-default")
                 engine.db._exec("UPDATE clarifications SET status='AUTO_DEFAULTED' WHERE clarify_id=?",(inserted.lastrowid,))
-            else:
+            elif rev["source_kind"] == "spec":
                 from autodev.process.runner import ensure_gate_record
                 ensure_gate_record(engine.db,stage_id="requirements",gate_id="srs_approval",kind="human_approval",
                                    scope_type="project",scope_id="project",summary="请先回答关键澄清问题再审批",force_new_round=True)
@@ -447,7 +553,7 @@ def answer_clarification(engine, clarify_id: int, answer: str, *, expected_rev_i
         if not rows:
             raise ValueError("澄清问题不存在")
         q = dict(rows[0])
-        rev = latest(engine, q["feature_id"])
+        rev = clarification_source(engine, q["feature_id"])
         if not rev or rev["rev_id"] != expected_rev_id or q["status"] not in ("OPEN","AUTO_DEFAULTED"):
             raise SpecConflictError("问题或规格已变化，请刷新后回答")
         answer = answer.strip()
@@ -459,7 +565,7 @@ def answer_clarification(engine, clarify_id: int, answer: str, *, expected_rev_i
         content += f"\n## {heading}\n\n问题：{q['question']}\n\n确认：{answer}\n"
         if supplement.strip():
             content += f"\n补充：{supplement.strip()}\n"
-        new = publish_revision(engine,q["feature_id"],"spec",content,expected_rev_id=expected_rev_id,
+        new = publish_revision(engine,q["feature_id"],rev["source_kind"],content,expected_rev_id=expected_rev_id,
                                author=actor,summary="记录负责人澄清回答")
         engine.db._exec("UPDATE clarifications SET status='ANSWERED',answer=?,answered_by=?,applied_rev_id=?,updated_at=? "
                         "WHERE clarify_id=?", (answer,actor,new["rev_id"],now_iso(),clarify_id))
@@ -481,7 +587,7 @@ def answer_batch(engine, feature: str, answers: list[dict], *, expected_rev_id: 
     if not 1 <= len(answers) <= 3 or len({a["clarify_id"] for a in answers}) != len(answers):
         raise ValueError("每轮应包含一至三个不同问题的回答")
     with engine.db.transaction():
-        rev = latest(engine, feature)
+        rev = clarification_source(engine, feature)
         if not rev or rev["rev_id"] != expected_rev_id:
             raise SpecConflictError("当前规格已变化，请刷新后回答")
         rows = {q["clarify_id"]: q for q in list_clarifications(engine, feature)}
@@ -502,7 +608,7 @@ def answer_batch(engine, feature: str, answers: list[dict], *, expected_rev_id: 
             if item.get("supplement", "").strip():
                 content += f"\n补充：{item['supplement'].strip()}\n"
             normalized.append((q["clarify_id"], answer))
-        new = publish_revision(engine, feature, "spec", content, expected_rev_id=expected_rev_id,
+        new = publish_revision(engine, feature, rev["source_kind"], content, expected_rev_id=expected_rev_id,
                                author=actor, summary="记录本轮负责人回答")
         for clarify_id, answer in normalized:
             engine.db._exec("UPDATE clarifications SET status='ANSWERED',answer=?,answered_by=?,applied_rev_id=?,updated_at=? WHERE clarify_id=?",

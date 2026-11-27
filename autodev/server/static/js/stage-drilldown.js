@@ -89,8 +89,8 @@ function fmtDurationSec(sec) {
 
 function fmtTimeShort(iso) {
   if (!iso) return "";
-  const m = String(iso).match(/T(\d{2}:\d{2}:\d{2})/);
-  return m ? m[1] : String(iso).slice(11, 19);
+  const date = new Date(iso);
+  return Number.isFinite(date.getTime()) ? date.toLocaleTimeString("zh-CN", { hourCycle: "h23" }) : "";
 }
 
 function formatRichInline(text) {
@@ -248,7 +248,7 @@ export function pollOpenTaskStreams() {
   }
 }
 
-function renderStreamItemHtml(item) {
+export function renderStreamItemHtml(item) {
   const ts = fmtTimeShort(item.timestamp);
   const tsHtml = ts ? `<time class="vst-time">${esc(ts)}</time>` : "";
   if (item.kind === "thought") {
@@ -266,7 +266,7 @@ function renderStreamItemHtml(item) {
   if (item.kind === "tool") {
     const st = item.status || "";
     const stCls = st === "failed" ? "err" : st === "in_progress" ? "running" : "ok";
-    const stTxt = st === "failed" ? "失败" : st === "in_progress" ? "执行" : "已执行";
+    const stTxt = st === "failed" ? "失败" : st === "in_progress" ? "已发起" : st === "completed" || st === "succeeded" ? "已执行" : "已记录";
     const isShort = (item.body || "").length <= 120 && !(item.body || "").includes("\n");
     return `<details class="vst-item vst-tool" ${isShort ? "" : ""}>
       <summary class="vst-tool-sum">

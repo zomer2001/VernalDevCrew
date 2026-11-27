@@ -600,6 +600,9 @@ class Database:
             },
             "milestone_deliveries": {"evidence_json": "TEXT NOT NULL DEFAULT '{}'"},
             "dispatch_records": {
+                "feature_id": "TEXT NOT NULL DEFAULT ''",
+                "stage": "TEXT NOT NULL DEFAULT ''",
+                "expected_baseline_sha": "TEXT NOT NULL DEFAULT ''",
                 "spec_sha": "TEXT NOT NULL DEFAULT ''",
                 "contract_sha": "TEXT NOT NULL DEFAULT ''",
                 "compiled_task_hash": "TEXT NOT NULL DEFAULT ''",

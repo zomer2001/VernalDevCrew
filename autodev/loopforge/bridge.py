@@ -6,8 +6,10 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 import shlex
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -18,12 +20,12 @@ from autodev.loopforge.bootstrap import classify_lane, ensure_local_git_workflow
 from autodev.loopforge.client import LoopForgeClient, LoopForgeError
 from autodev.loopforge.completion import CompletionCategory, CompletionLedger, evaluate_waiting_node, is_review_node, read_review_verdict
 from autodev.models import TaskStatus
-from autodev.loopforge.protocol import FILE_DELIVERY_STAGES
+from autodev.loopforge.protocol import FILE_DELIVERY_STAGES, native_progress
 
 
 _RESTORE_PY_SCRIPT = (
     "import json,pathlib,sys,urllib.request; "
-    "p=pathlib.Path(sys.argv[1]) if sys.argv[1] else None; "
+    "p=next((pathlib.Path(v) for v in json.loads(sys.argv[1]) if v and pathlib.Path(v).is_file()),None); "
     'raw=json.loads(p.read_text("utf-8")) if (p and p.is_file()) else json.loads(urllib.request.urlopen(sys.argv[2]).read().decode("utf-8")); '
     'assert isinstance(raw,dict), "invalid bundle json"; '
     "nk=sys.argv[3]; "
@@ -54,7 +56,8 @@ def verify_context_sig(secret: str, project_id: str, resource: str, sig: str) ->
 _RESTORE_NODE_SCRIPT = (
     'const fs=require("fs"),path=require("path"); '
     "(async()=>{"
-    "const [p,url,nk,sb]=process.argv.slice(1);"
+    "const [paths,url,nk,sb]=process.argv.slice(1);"
+    "const p=JSON.parse(paths).find(v=>v&&fs.existsSync(v)&&fs.statSync(v).isFile());"
     "let raw;"
     'if(p&&fs.existsSync(p)){raw=JSON.parse(fs.readFileSync(p,"utf8"));}'
     'else{const r=await fetch(url);if(!r.ok)throw new Error("HTTP "+r.status+": "+(await r.text()).slice(0,200));raw=await r.json();}'
@@ -77,9 +80,21 @@ def build_restore_command(
     save_baseline: bool = False,
 ) -> str:
     """构造跨 Shell 且兼容零 Python 宿主机（优先 python3，缺失时自动降级 node）的文件还原命令。"""
+    paths = [local_path]
+    # The gateway and a personal Runner see the same mounted workspace under
+    # different paths. Pass its explicit host alias, without filesystem searches
+    # or granting network access to the agent sandbox.
+    host_root = os.environ.get("VERNAL_HOST_WORKSPACES_DIR", "").strip()
+    if host_root and Path(host_root).is_absolute() and ".." not in Path(local_path).parts:
+        try:
+            relative = Path(local_path).relative_to("/app/workspaces")
+        except ValueError:
+            pass
+        else:
+            paths.append(str(Path(host_root) / relative))
     args = " ".join(
         [
-            shlex.quote(local_path),
+            shlex.quote(json.dumps(paths, ensure_ascii=False)),
             shlex.quote(api_url),
             shlex.quote(nested_key),
             shlex.quote("1" if save_baseline else "0"),
@@ -179,6 +194,60 @@ def extract_run_text(run: dict[str, Any]) -> str:
 async def _review_verdict(client: LoopForgeClient, run: dict, node_id: str) -> tuple[str, str]:
     verdict, detail, _ = await read_review_verdict(client, run, node_id)
     return verdict, detail
+
+
+async def reconcile_waiting_nodes(client, run, ledger, on_auto_passed=None):
+    run_id, nodes = run["id"], run.get("nodes") or {}
+    wf_nodes = {n["id"]: n for n in (run.get("workflowSnapshot") or {}).get("nodes", [])}
+    gate_note = ""
+    did_advance = False
+    for nid, nr in nodes.items():
+        if not isinstance(nr, dict) or nr.get("status") not in ("waiting", "waiting_approval"):
+            continue
+        decision = await evaluate_waiting_node(client, run, nid, nr, wf_nodes.get(nid))
+        if decision.category == CompletionCategory.CALLBACK_PERMISSION_DENIED:
+            return False, gate_note, decision.reason
+        if decision.action == "wait":
+            if decision.category == CompletionCategory.ARTIFACT_INVALID and decision.reason:
+                gate_note = f"。{decision.reason}"
+            continue
+        claimed, claim_state = ledger.claim(decision)
+        if not claimed:
+            if claim_state == "pending":
+                gate_note = "。恢复请求结果尚未确认，已停止重复提交，请核对远端节点状态"
+            continue
+        if decision.action == "reject_rework":
+            gate_note = f"。独立审查要求返工。{decision.reason[:220]}"
+            try:
+                await client.reject_run(
+                    run_id,
+                    reason=decision.reason,
+                    node_id=nid,
+                    target_node=decision.reject_target,
+                )
+                ledger.record(decision)
+            except LoopForgeError as exc:
+                gate_note += f"。提交返工失败。{exc}"
+            continue
+        if decision.action == "approve_recovery":
+            try:
+                await client.approve_run(
+                    run_id,
+                    comment=(
+                        f"Vernal 受控恢复完成确认（node={nid} attempt={decision.attempt} "
+                        f"rework={decision.rework_count} digest={decision.artifact_digest} "
+                        f"key={decision.idempotency_key}）"
+                    ),
+                    node_id=nid,
+                )
+                ledger.record(decision)
+                if on_auto_passed:
+                    on_auto_passed(nid, "")
+                did_advance = True
+            except LoopForgeError as exc:
+                if on_auto_passed:
+                    on_auto_passed(nid, str(exc))
+    return did_advance, gate_note, ""
 
 
 async def poll_loopforge_run(
@@ -287,62 +356,18 @@ async def poll_loopforge_run(
         reviews = {nid for nid, spec in wf_nodes.items() if is_review_node(spec)}
         gate_note = ""
         active_nodes = [
-            f"{nid}:{nr.get('status')}"
+            f"{nid}:{nr.get('status')}" + (f" (返工 {nr['reworkCount']})" if nr.get("reworkCount") else "")
             for nid, nr in nodes.items()
             if isinstance(nr, dict) and nr.get("status") in ("running", "waiting", "waiting_approval")
         ]
 
         if st in ("waiting", "waiting_approval"):
-            did_advance = False
-            for nid, nr in nodes.items():
-                if not isinstance(nr, dict) or nr.get("status") not in ("waiting", "waiting_approval"):
-                    continue
-                decision = await evaluate_waiting_node(client, run, nid, nr, wf_nodes.get(nid))
-                if decision.category == CompletionCategory.CALLBACK_PERMISSION_DENIED:
-                    if on_progress:
-                        on_progress(st, f"LoopForge [{st}] {decision.reason}", run)
-                    _finalize_timing("permission_denied")
-                    return False, run, decision.reason
-                if decision.action == "wait":
-                    if decision.category == CompletionCategory.ARTIFACT_INVALID and decision.reason:
-                        gate_note = f"。{decision.reason}"
-                    continue
-                claimed, claim_state = ledger.claim(decision)
-                if not claimed:
-                    if claim_state == "pending":
-                        gate_note = "。恢复请求结果尚未确认，已停止重复提交，请核对远端节点状态"
-                    continue
-                if decision.action == "reject_rework":
-                    gate_note = f"。独立审查要求返工。{decision.reason[:220]}"
-                    try:
-                        await client.reject_run(
-                            run_id,
-                            reason=decision.reason,
-                            node_id=nid,
-                            target_node=decision.reject_target,
-                        )
-                        ledger.record(decision)
-                    except LoopForgeError as exc:
-                        gate_note += f"。提交返工失败。{exc}"
-                    continue
-                if decision.action == "approve_recovery":
-                    try:
-                        await client.approve_run(
-                            run_id,
-                            comment=(
-                                f"Vernal 受控恢复完成确认（node={nid} attempt={decision.attempt} "
-                                f"rework={decision.rework_count} digest={decision.artifact_digest} "
-                                f"key={decision.idempotency_key}）"
-                            ),
-                            node_id=nid,
-                        )
-                        ledger.record(decision)
-                        if on_auto_passed:
-                            on_auto_passed(nid, "")
-                        did_advance = True
-                    except LoopForgeError as exc:
-                        if on_auto_passed:
-                            on_auto_passed(nid, str(exc))
+            did_advance, gate_note, denial = await reconcile_waiting_nodes(client, run, ledger, on_auto_passed)
+            if denial:
+                if on_progress:
+                    on_progress(st, f"LoopForge [{st}] {denial}", run)
+                _finalize_timing("permission_denied")
+                return False, run, denial
             if did_advance:
                 await asyncio.sleep(min(1.0, poll_interval))
                 continue
@@ -800,6 +825,9 @@ class LoopForgeBridge:
                 expected_run_id=run_id,
             ):
                 return
+            if receipt.get("stage") == "lite_delivery" and _run.get("status") != "succeeded":
+                from autodev.speckit.missions import record_progress
+                record_progress(self, task.feature_id, run_id, *native_progress(_run))
             self.db.update_slot(slot_id, current_action=summary[:200])
             self.db.add_event(
                 "loopforge.progress",
@@ -872,6 +900,6 @@ class LoopForgeBridge:
                 self.db.add_event("speckit.handoff_invalid",str(exc),task_id=task.task_id,actor="VernalBridge")
                 return False,"开发或审查交接便签缺失或格式无效，请检查本次运行产物"
             self.db.update_task(task.task_id,handoff_brief_json=json.dumps(briefs,ensure_ascii=False))
-        if _run.get("status") in ("succeeded", "failed", "cancelled", "completed"):
+        if receipt.get("stage") != "lite_delivery" and _run.get("status") in ("succeeded", "failed", "cancelled", "completed"):
             record(self.db, receipt, "FINISHED" if ok else "FAILED")
         return ok, msg

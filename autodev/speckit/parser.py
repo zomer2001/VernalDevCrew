@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 
-from autodev.models import ProductSpec, RequirementItem, SpecTaskDraft
+from autodev.models import ProductSpec, RequirementItem, SpecTaskDraft, WorkPackageDraft, WorkPackageStep
 from autodev.process.targets import normalize_document
 from autodev.prompts_style import validate_public_text
 from .paths import feature_spec_dir
@@ -96,3 +96,29 @@ def render_tasks(tasks: list[SpecTaskDraft]) -> str:
     return "# 任务草案\n\n" + "\n\n".join(
         f"- [ ] {t.task_key} {t.title}\n```vernal-task\n{json.dumps(t.model_dump(), ensure_ascii=False, indent=2)}\n```"
         for t in tasks) + "\n"
+
+
+def legacy_drafts_to_packages(drafts: list[SpecTaskDraft]) -> list[WorkPackageDraft]:
+    """Read old metadata once; retain the union of all acceptance and verification clauses."""
+    groups: dict[str, list[SpecTaskDraft]] = {}
+    for draft in drafts:
+        groups.setdefault(draft.package_key, []).append(draft)
+    packages = []
+    for key, items in groups.items():
+        first = items[0]
+        for field in ("milestone_id", "squad", "module", "role"):
+            if any(getattr(item, field) != getattr(first, field) for item in items):
+                raise ValueError(f"旧版工作包 {key} 的 {field} 不一致，无法归一化")
+        unique = lambda field: list(dict.fromkeys(v for item in items for v in getattr(item, field)))
+        packages.append(WorkPackageDraft(
+            package_key=key, milestone_id=first.milestone_id, squad=first.squad, module=first.module,
+            role=first.role, title=first.title, acceptance_criteria=unique("acceptance_criteria"),
+            allowed_paths=unique("allowed_paths"), verify_cmds=unique("verify_cmds"),
+            steps=[WorkPackageStep(**{field: getattr(item, field) for field in WorkPackageStep.model_fields})
+                   for item in items]))
+    return packages
+
+
+def render_work_packages_markdown(packages: list[WorkPackageDraft]) -> str:
+    from .validate_output import render_packages
+    return render_packages([package.model_dump() for package in packages])

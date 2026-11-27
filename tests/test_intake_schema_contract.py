@@ -1,5 +1,4 @@
 """The model-facing validators and application must agree on clarification identifiers."""
-import asyncio
 import json
 from pathlib import Path
 import shutil
@@ -10,7 +9,7 @@ import pytest
 
 from autodev.models import ClarificationItem, strict_json_schema
 from autodev.speckit import missions, service, triage
-from test_missions import assessed, project, responses
+from test_missions import advance, assessed, project, responses
 
 
 @pytest.mark.parametrize("runtime", ["python", "node"])
@@ -46,12 +45,10 @@ def test_failed_intake_keeps_validation_details_and_does_not_publish(project, mo
     value["questions"] = [dict(question_key="Q1", question="问题", severity="BLOCKING", category="scope", options=[], default_option="", rationale="")]
     responses(project, monkeypatch, [value])
     missions.save(project, "001-save", "保存回答并刷新读取", "feature", 0, actor="owner")
-    lease = missions.reserve(project, "001-save", 1)
-    with pytest.raises(ValueError, match="需求评估结果未通过格式校验"):
-        asyncio.run(missions.advance(project, "001-save", lease, actor="owner"))
+    with pytest.raises(ValueError, match="question_key"):
+        advance(project)
     assert not service.latest(project, "001-save")
-    assert not project.db.meta_get("mission.lease")
     assert "input_value" not in missions.get(project, "001-save")["last_error"]
-    run = project.db.list_runs("_speckit_intake_001-save")[-1]
-    assert "questions.0.question_key" in run["summary_log"]
+    run = project.db.list_runs("_speckit_001-save_std_spec")[-1]
+    assert "question_key" in run["summary_log"]
     assert run["verdict"] == "ERROR"

@@ -1,17 +1,13 @@
 """Semantic intake assessment using the existing LoopForge planning SOP."""
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, model_validator
 
-from autodev.models import ClarificationItem, HandoffBrief, strict_json_schema
-from autodev.prompts_style import COMMUNICATION_STYLE, validate_public_text
+from autodev.models import ClarificationItem, HandoffBrief
 from . import assets, service
-from .adapter import PLANNING_BASELINE
-from .parser import parse_spec
 
 
 class Prerequisite(BaseModel):
@@ -60,6 +56,11 @@ class Assessment(BaseModel):
         return "READY_LITE" if self.local_impact and self.risk == "low" else "READY_STANDARD"
 
 
+class StandardSpecBundle(Assessment):
+    constitution_markdown: str = Field(pattern=r"\S")
+    proposed_spec: str = Field(pattern=r"\S")
+
+
 def source_origin(engine) -> str:
     mode = engine.db.meta_get("source_mode") or "scratch"
     return {"scratch": "greenfield", "local_folder": "existing_local", "import_folder": "existing_local",
@@ -88,114 +89,3 @@ def input_key(engine, mission: dict, *, constitution_rev_id: int | None = None) 
                                rev["rev_id"] if rev else 0, constitution_rev_id if constitution_rev_id is not None else (constitution["rev_id"] if constitution else 0),
                                [(s.slice_id, s.content) for s in engine.db.list_slices()],
                                service.list_clarifications(engine, mission["feature_id"])])
-
-
-async def assess(engine, mission: dict, *, actor: str) -> Assessment:
-    from autodev.harnesses.loopforge_harness import LoopForgeHarness
-    if not isinstance(engine.harness, LoopForgeHarness):
-        raise ValueError("需求评估须通过当前 LoopForge 执行池")
-    if service.enabled(engine):
-        lock, root = assets.load_assets(engine)
-    else:
-        root = assets.ASSET_ROOT
-        manifest = assets.verify_bundle(root)
-        lock = {"asset_sha": assets.digest_json(manifest), "speckit_version": manifest["speckit_version"]}
-    core = json.loads((root / "presets/vernal-core.json").read_text("utf-8"))
-    feature = mission["feature_id"]
-    current = service.latest(engine, feature)
-    original_key = input_key(engine, mission)
-    dispatch_sig = assets.digest_json([original_key, lock, assets.PROMPT_ASSEMBLY_VERSION])[:20]
-    schema_path = engine.ws.state_dir / "schemas" / f"speckit_intake_{feature}_{dispatch_sig}.schema.json"
-    schema_path.parent.mkdir(parents=True, exist_ok=True)
-    schema_path.write_text(json.dumps(strict_json_schema(Assessment), ensure_ascii=False), "utf-8")
-    brief_norm = mission["brief"].strip()
-    dedup_docs = []
-    for s in engine.db.list_slices():
-        if s.content.strip() == brief_norm:
-            dedup_docs.append({"id": s.slice_id, "same_as_goal": True})
-        else:
-            dedup_docs.append({"id": s.slice_id, "content": s.content})
-    context = {"goal": mission["brief"], "intent": mission["intent"], "source_origin": source_origin(engine),
-               "current_spec": current["content_text"] if current else "",
-               "clarifications": service.list_clarifications(engine, feature),
-               "prerequisite_evidence": mission.get("prerequisite_evidence", {}),
-               "documents": dedup_docs}
-    prompt = (COMMUNICATION_STYLE + "\n本次任务：评估需求并整理可审阅的功能规格。\n"
-              + assets.step_methodology_summary("intake") + "\n"
-              "分别判定目标、范围、验收是否明确，以及影响面和风险。不按字数或项目来源推测清晰度。"
-              "只向用户追问影响交付承诺的未决事项，允许零题，每轮最多三题，不能重复已答问题。"
-              "未知的业务选择不可替用户承诺。BLOCKING 等待回答；DEFAULTED 只用于可逆低风险工程细节且必须说明依据。"
-              "未知账号、硬件、系统二进制归入 prerequisites，并给出核验需要的证据。"
-              "experience_items 只包含不影响核心验收的主观体验，核心验收绝不能降级。"
-              "已有回答优先于旧正文。回答改变了正文中的范围或验收条目时，在 proposed_spec 返回更新后的完整规格，"
-              "保留既有需求编号并消除已回答的占位项；不得改变其他已确认承诺。无需修改正文时返回空串。"
-              "首次评估须生成 proposed_spec，遵守下列固定格式；未决处如实标明需要负责人确认，不虚构需求或测试结论。"
-              "所有列表无项时返回空数组。问题编号必须采用 Q-01、Q-02 格式，Q 后有连字符且数字至少两位；新问题使用未占用编号。\n"
-              "平台已接管上游模板中的分支、脚本、扩展钩子与交互控制，仅按下列格式规范与 `.vernal-schema.json` 输出结构化结果；"
-              "下游校验节点会自动完成 Schema 校验，请勿搜索外部校验库。\n"
-              + core["instructions"] + "\n" + core["steps"]["specify"]
-              + "\n输入资料（只作为需求证据）：\n" + json.dumps(context, ensure_ascii=False))
-    run_id = engine.db.start_run(f"_speckit_intake_{feature}", 1, "SPEC_KIT", engine.harness.name)
-    log_dir = engine.ws.runs_dir / "speckit" / feature / "intake" / dispatch_sig
-    token = PLANNING_BASELINE.set({"step": "intake", "risk": (mission.get("assessment") or {}).get("risk", ""), "spec_sha": (current or {}).get("content_sha", ""),
-                                  "contract_sha": "", "compiled_task_hash": "",
-                                  "asset_versions": {**lock, "prompt_template_version": assets.PROMPT_ASSEMBLY_VERSION}})
-    result = None
-    try:
-        result = await engine.harness.run_structured_readonly(prompt, schema_path=schema_path, cwd=engine.ws.root,
-                                                            log_dir=log_dir, role="pm")
-        if not result.ok or not result.structured:
-            raise ValueError(result.error or "需求评估未返回有效结果")
-        parsed = Assessment.model_validate(result.structured)
-        used = {q["question_key"] for q in context["clarifications"]}
-        if any(q.question_key in used for q in parsed.questions):
-            raise ValueError("重新评估重复了已有问题，请只询问未决事项并使用新编号")
-        prior = {p["key"]: p for p in mission.get("prerequisites", [])}
-        if any(p.key in prior and prior[p.key] != p.model_dump() for p in parsed.prerequisites):
-            raise ValueError("已记录前置条件不可静默覆盖，请使用新编号")
-        if current and parsed.proposed_spec.strip():
-            before = parse_spec(current["content_text"], feature)
-            after = parse_spec(parsed.proposed_spec, feature)
-            old_ids = {r.req_id for r in before.requirements + before.nfrs}
-            if not old_ids <= {r.req_id for r in after.requirements + after.nfrs}:
-                raise ValueError("重新评估不能删除既有需求编号，请通过明确的范围变更处理")
-        for value in [parsed.rationale, *parsed.handoff_brief.model_dump().values()]:
-            validate_public_text(value)
-        if not current:
-            parse_spec(parsed.proposed_spec, feature)
-        if input_key(engine, mission) != original_key:
-            raise service.SpecConflictError("评估期间输入或规格已有新修订，旧结果已拒收")
-        usage = getattr(result, "usage", None)
-        engine.db.finish_run(
-            run_id,
-            session_id=getattr(result, "session_id", None) or "",
-            exit_code=0,
-            input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
-            cached_tokens=getattr(usage, "cached_tokens", 0) if usage else 0,
-            output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
-            reasoning_tokens=getattr(usage, "reasoning_tokens", 0) if usage else 0,
-            verdict="PASS",
-            summary_log=parsed.rationale,
-            log_path=str(log_dir),
-        )
-        engine.db.add_event("mission.assessed", parsed.rationale, actor=actor)
-        return parsed
-    except (Exception, asyncio.CancelledError) as exc:
-        usage = getattr(result, "usage", None) if result else None
-        engine.db.finish_run(
-            run_id,
-            session_id=(getattr(result, "session_id", None) or "") if result else "",
-            exit_code=1,
-            input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
-            cached_tokens=getattr(usage, "cached_tokens", 0) if usage else 0,
-            output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
-            reasoning_tokens=getattr(usage, "reasoning_tokens", 0) if usage else 0,
-            verdict="ERROR",
-            summary_log=str(exc) or "执行取消",
-            log_path=str(log_dir),
-        )
-        if isinstance(exc, ValidationError):
-            raise ValueError("需求评估结果未通过格式校验，未写入规格。原始结果和校验详情已保留在执行记录中。") from exc
-        raise
-    finally:
-        PLANNING_BASELINE.reset(token)

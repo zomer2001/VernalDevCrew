@@ -20,7 +20,6 @@ from autodev.loopforge.client import LoopForgeClient, LoopForgeError
 
 
 class CompletionCategory(StrEnum):
-    COMPLETED = "COMPLETED"
     CALLBACK_MISSING = "CALLBACK_MISSING"
     CALLBACK_PERMISSION_DENIED = "CALLBACK_PERMISSION_DENIED"
     ARTIFACT_INVALID = "ARTIFACT_INVALID"
@@ -28,7 +27,7 @@ class CompletionCategory(StrEnum):
     HUMAN_APPROVAL_REQUIRED = "HUMAN_APPROVAL_REQUIRED"
 
 
-CompletionAction = Literal["continue", "approve_recovery", "reject_rework", "block", "wait"]
+CompletionAction = Literal["approve_recovery", "reject_rework", "block", "wait"]
 
 _PERMISSION_DENIED_PATTERNS = (
     "requires approval, but approval policy is never",
@@ -266,6 +265,12 @@ class CompletionLedger:
                 self._save()
 
 
+def callback_permission_denied(node):
+    code = str(node.get("completionCategory") or node.get("gateFailureCode") or "").upper()
+    return code == CompletionCategory.CALLBACK_PERMISSION_DENIED or _matches_any(
+        _node_diagnostic_text(node), _PERMISSION_DENIED_PATTERNS)
+
+
 async def evaluate_waiting_node(
     client: LoopForgeClient,
     run: dict[str, Any],
@@ -320,10 +325,7 @@ async def evaluate_waiting_node(
 
     # 3. Explicit permission denial (structured field or runtime error/output text) is a hard env block.
     structured_cat = str(node_record.get("completionCategory") or node_record.get("gateFailureCode") or "").upper()
-    diag_text = _node_diagnostic_text(node_record)
-    if structured_cat == CompletionCategory.CALLBACK_PERMISSION_DENIED or _matches_any(
-        diag_text, _PERMISSION_DENIED_PATTERNS
-    ):
+    if callback_permission_denied(node_record):
         return make(
             CompletionCategory.CALLBACK_PERMISSION_DENIED,
             "block",
@@ -387,14 +389,14 @@ async def evaluate_waiting_node(
         report = contents["review-report.md"]
         heading, _, details = report.strip().partition("\n")
         verdict = heading.strip() if heading.strip() in {"# PASS", "# REJECT"} else ""
-        detail, raw_report = details.strip()[:1200] or heading, report
+        detail = details.strip()[:1200] or heading
         if not verdict:
             return make(
                 CompletionCategory.ARTIFACT_INVALID,
                 "wait",
                 f"等待本轮独立审查报告：{detail}",
             )
-        digest = compute_artifact_digest(turn_artifacts, raw_report)
+        digest = compute_artifact_digest(turn_artifacts, report)
         if verdict == "# REJECT":
             return make(
                 CompletionCategory.REVIEW_REJECTED,

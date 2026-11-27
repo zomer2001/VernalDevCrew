@@ -26,7 +26,7 @@ def test_dispatched_step_contract_rejects_cross_step_output(eng, tmp_path, monke
     workspace = tmp_path / "native"
     workspace.mkdir()
     value = dict(step=step, content="" if step == "clarify" else "# 项目宪章\n交付须保留验收依据。\n",
-                 clarifications=[], findings=[], handoff_brief=BRIEF)
+                 clarifications=[], findings=[], handoff_brief=BRIEF, work_packages=[])
 
     async def execute(prompt, *, schema_path, **kwargs):
         (workspace / ".vernal-schema.json").write_text(schema_path.read_text())
@@ -72,7 +72,7 @@ def test_plan_validator_requires_findings_handling_table_when_checklist_has_find
     (workspace / ".vernal-schema.json").write_text(json.dumps(schema, ensure_ascii=False), "utf-8")
 
     base_plan = "# 技术方案\n\n## 需求映射\n- REQ-001\n\n## 接口与数据\n- save\n\n## 实施边界\n- src/app.py\n\n## 验证\n- pytest\n"
-    payload = dict(step="plan", content=base_plan, clarifications=[], findings=[], handoff_brief=BRIEF)
+    payload = dict(step="plan", content=base_plan, clarifications=[], findings=[], handoff_brief=BRIEF, work_packages=[])
     (workspace / "vernal-result.json").write_text(json.dumps(payload, ensure_ascii=False), "utf-8")
     res_missing_sec = subprocess.run([executable, str(validator)], cwd=workspace, capture_output=True, text=True, timeout=10)
     assert res_missing_sec.returncode != 0 and "检查发现处理" in res_missing_sec.stderr

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setActiveProjectId, toast } from "../autodev/server/static/js/api.js";
 import { codepointLength, renderMissions } from "../autodev/server/static/js/missions.js";
+import { mergeExecutionItems, pollMissionExecution } from "../autodev/server/static/js/mission-execution.js";
 
 function dom() {
   const elements=new Map();
@@ -20,6 +21,39 @@ function dom() {
 function state(questions=[]) { return {running:false,features:[{feature_id:"f1",sources:{spec:{rev_id:42,rev_no:3,content_text:"# 保存回答"}}}],missions:[{
   feature_id:"f1",revision:2,spec_rev_id:42,spec_rev_no:3,brief:'保存回答 <script>bad()</script>',state:questions.length?"WAITING_ANSWERS":"NEEDS_ASSESSMENT",questions,prerequisites:[],
 }]}; }
+
+test("planning stream merges pages without duplicates and keeps event ordering",()=>{
+  const before=[{id:"a",sequence:1,status:"in_progress"},{id:"b",sequence:2}];
+  const result=mergeExecutionItems(before,[{items:[{id:"a",sequence:1,status:"completed"},{id:"c",sequence:3}]}]);
+  assert.deepEqual(result.map(x=>x.id),["a","b","c"]);
+  assert.equal(result[0].status,"completed");
+});
+
+test("planning stream escapes logs and discards a response after switching projects",async()=>{
+  const el=dom();setActiveProjectId("stream-a");renderMissions(state(),async()=>{});
+  let resolve;
+  globalThis.fetch=()=>new Promise(r=>{resolve=r;});
+  const pending=pollMissionExecution();
+  setActiveProjectId("stream-b");renderMissions(state(),async()=>{});
+  resolve({ok:true,json:async()=>({selected:{run_id:"old"},nodes:[],runs:[]})});
+  await pending;
+  assert.doesNotMatch(el.get("mission-execution").innerHTML,/old/);
+  globalThis.fetch=async()=>({ok:true,json:async()=>({selected:{run_id:"new",role:"director",executor:"codex",model:"sol",step:"tasks"},runs:[],run_status:"running",after:1,
+    nodes:[{items:[{id:"e1",sequence:1,kind:"tool",title:"<script>bad</script>",body:"<img src=x>",status:"in_progress"}]}]})});
+  await pollMissionExecution();
+  const html=el.get("mission-execution").innerHTML;
+  assert.match(html,/拆解实施任务/);assert.match(html,/&lt;script&gt;/);assert.doesNotMatch(html,/<img|<script>/);
+});
+
+test("bounded rework shows its concrete findings and has no blind retry button",()=>{
+  const el=dom();setActiveProjectId("repair-ui");
+  const data=state();data.missions[0].state="REWORK_STOPPED";
+  data.missions[0].repair={round:2,findings:[{message:"缺少第二次测试",repair_target:"tasks"}]};
+  renderMissions(data,async()=>{});
+  assert.match(el.get("missions-mount").innerHTML,/缺少第二次测试/);
+  assert.match(el.get("missions-mount").innerHTML,/已自动修正 2 轮/);
+  assert.doesNotMatch(el.get("missions-mount").innerHTML,/id="mission-continue"/);
+});
 
 test("clarification UI preserves project and revision, offers no implicit answer and posts one round",async()=>{
   const el=dom();setActiveProjectId("project-a");

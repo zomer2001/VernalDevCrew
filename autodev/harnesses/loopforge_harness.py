@@ -248,7 +248,7 @@ class LoopForgeHarness(Harness):
             if source.get("status") != "published":
                 raise LoopForgeError("规划 SOP 尚未发布，不能自动发布其推理配置副本")
             workflow = copy.deepcopy({k: v for k, v in source.items() if k not in _NATIVE_METADATA})
-            draft = next((n for n in workflow.get("nodes", []) if n.get("id") == "draft" and n.get("type") == "agent"), None)
+            draft = next((n for n in workflow.get("nodes", []) if n.get("id") in ("draft", "draft_lite_bundle", "draft_spec", "draft_plan_and_packages") and n.get("type") == "agent"), None)
             original = next((a for a in agents if draft and a.get("id") == draft.get("agentId")), None)
             if not original or original.get("executorId") != "codex":
                 raise LoopForgeError("规划角色与 Codex 推理配置不匹配，请核对原生角色")
@@ -278,13 +278,55 @@ class LoopForgeHarness(Harness):
                 await client.publish_workflow(wid)
             return wid
 
+    async def _prepare_workflow(self, client, pid: str, wf_id: str, role: str,
+                                stage_key: str, effort: str, restore_cmd: str) -> str:
+        """Caller holds _assets_lock through dispatch so updates cannot race the run snapshot."""
+        if not restore_cmd:
+            return wf_id
+        import copy
+        from autodev.loopforge.bootstrap import (_NATIVE_METADATA, _managed_digest, managed_asset,
+                                                 managed_clean, build_plan_workflow, build_plan_prepare_script)
+        workflows = await client.list_workflows(pid)
+        source = next((w for w in workflows if w.get("id") == wf_id), None)
+        if not source or source.get("status") != "published":
+            raise LoopForgeError("无法读取已发布规划 SOP，不能准备只读上下文")
+        # Spec Kit schema filenames include a content signature, not a new logical planning stage.
+        stable_stage = re.sub(r"_[a-f0-9]{20}$", "", stage_key) if stage_key.startswith("speckit_") else stage_key
+        key = hashlib.sha256(json.dumps([pid, role, stable_stage, effort]).encode()).hexdigest()[:20]
+        wid = (wf_id if wf_id in {f"{pid}-vernal-{lane}-sop" for lane in ("lite-plan", "std-spec", "std-plan")} else f"{pid}-vernal-prepare-sop-{key}")
+        workflow = copy.deepcopy({k: v for k, v in source.items() if k not in _NATIVE_METADATA})
+        prepare = next((n for n in workflow.get("nodes", []) if n.get("id") == "prepare"), None)
+        if prepare is None:
+            if {n.get("id") for n in workflow.get("nodes", [])} != {"draft", "validate"}:
+                raise LoopForgeError("规划 SOP 缺少 prepare 节点，请核对自定义拓扑")
+            prepare = build_plan_workflow(pid)["nodes"][0]
+            workflow["nodes"].insert(0, prepare)
+            workflow["edges"].insert(0, {"id": "e0", "source": "prepare", "target": "draft", "when": "success"})
+        if prepare.get("type") != "script":
+            raise LoopForgeError("规划 prepare 节点必须为脚本")
+        prepare.update(scriptLanguage="shell", script=build_plan_prepare_script(restore_cmd), maxAttempts=1)
+        workflow["description"] = (workflow.get("description") or "").split("\n[vernal-managed-v", 1)[0]
+        previous = next((w for w in workflows if w.get("id") == wid), None)
+        workflow = managed_asset({**workflow, "id": wid, "projectId": pid, "status": "published",
+                                  "version": (previous or {}).get("version", 1)})
+        if previous and not managed_clean(previous, workflow):
+            raise LoopForgeError("阶段规划 SOP 已被手动修改，请核对后重试")
+        if not previous or _managed_digest(previous, set(workflow) - _NATIVE_METADATA) != _managed_digest(workflow, set(workflow) - _NATIVE_METADATA):
+            if previous and "revision" in previous:
+                workflow["revision"] = previous["revision"]
+            await client.put_workflow(workflow)
+            await client.publish_workflow(wid)
+        elif previous.get("status") != "published":
+            await client.publish_workflow(wid)
+        return wid
+
     def _build_issue_description(
         self,
         stage_key: str,
         prompt: str,
         schema_path: Path,
         role: str,
-    ) -> str:
+    ) -> tuple[str, str]:
         schema_text = schema_path.read_text("utf-8")
         try:
             schema_obj = json.loads(schema_text)
@@ -328,7 +370,7 @@ class LoopForgeHarness(Harness):
             "完成后确保当前目录存在合法的 `vernal-result.json`，勿修改业务源码。\n"
         )
         if not need_extra_files and len(inline_candidate.encode("utf-8")) <= _INLINE_DESC_LIMIT:
-            return inline_candidate
+            return inline_candidate, ""
 
         from autodev.public_pool import context_url
         public_url = (context_url(self.settings) or "http://127.0.0.1:8787").rstrip("/")
@@ -354,18 +396,21 @@ class LoopForgeHarness(Harness):
         return (
             f"## Vernal 架构规划任务（角色：`{role}`，阶段：`{stage_key}`）\n\n"
             f"本阶段上下文较多（含 {len(ctx_files)} 份工作区资料：{file_list}）。\n"
-            "请先在当前工作区执行下面这行命令还原完整任务说明 `PLAN_PROMPT.md`、`.vernal-schema.json` 与只读上下文文件：\n"
-            f"```bash\n{restore_cmd}\n```\n"
-            "然后完整阅读 `PLAN_PROMPT.md`，按其中要求的 JSON Schema 将唯一的合法 JSON 对象写入当前目录的 `vernal-result.json`。\n"
-            "切勿修改无关业务源码；完成后若环境中存在且被授权调用 `submit_gate_result` MCP 工具，调用一次 `decision=\"pass\"`；若审批策略拒绝该工具，请如实说明权限受阻并正常退出，不要重复试探或伪造终态。\n"
-        )
+            "prepare 节点已准备好当前目录的 `PLAN_PROMPT.md`、`.vernal-schema.json` 与只读上下文文件。\n"
+            "直接完整阅读这两个文件，按 JSON Schema 将唯一合法 JSON 对象写入当前目录的 `vernal-result.json`。\n"
+            "产物写完后正常退出，由下一节点校验。审查节点按自身任务说明提交独立报告。\n"
+        ), restore_cmd
 
     async def _dispatch_plan(
         self, client: LoopForgeClient, pid: str, stage_key: str, title: str, description: str,
-        wf_id: str, prior_candidate: str, request_signature: str,
+        wf_id: str, prior_candidate: str, request_signature: str, *, snapshot=None,
     ) -> tuple[str, str]:
         # Only serialize issue writes and dispatch. Runner execution and polling remain parallel.
-        async with self._dispatch_lock:
+        from contextlib import AsyncExitStack
+        async with AsyncExitStack() as locks:
+            await locks.enter_async_context(self._dispatch_lock)
+            if snapshot is not None:
+                locks.push_async_callback(snapshot.aclose)
             meta_key = f"plan_issue:{pid}:{stage_key}"
             issue_id = self.db.meta_get(meta_key)
             pending_key = f"{meta_key}:pending_run"
@@ -387,6 +432,7 @@ class LoopForgeHarness(Harness):
             if baseline := PLANNING_BASELINE.get():
                 bind_baseline(self.db, receipt, baseline)
             if not fresh:
+                await locks.aclose()
                 run = await observe_task(self.db, receipt, client, timeout=self.settings.agent_timeout_sec)
                 return receipt["issue_id"], run
             if issue_id:
@@ -427,8 +473,44 @@ class LoopForgeHarness(Harness):
                         raise
                     await asyncio.sleep(0.25 * 2**attempt)
                     continue
+                await locks.aclose()
                 run_id = await accept_task(self.db, receipt, client, dispatched, timeout=self.settings.agent_timeout_sec)
                 return issue_id, run_id
+
+    async def dispatch_bundle(self, receipt, prompt, schema, role):
+        """Bind a mission receipt before the native POST; return as soon as it has a Run."""
+        from autodev import public_pool
+        from autodev.loopforge import dispatch
+
+        stage, feature = receipt["stage"], receipt["feature_id"]
+        # Reconciliation after a restart uses the deployment identity for this project.
+        asset_client = self._custom_client
+        if asset_client is None:
+            token = self.settings.service_token()
+            if not token:
+                raise LoopForgeError("项目缺少可用于后台对账的部署凭据", 403)
+            asset_client = LoopForgeClient(self.settings.loopforge_url, token)
+        pool, client = await public_pool.resolve(self.settings, asset_client)
+        self.settings.selected_pool = pool
+        pid, _ = await self._ensure_ready(asset_client, role)
+        lane = {"std_plan": "std-plan", "std_spec": "std-spec", "lite_bundle": "lite-plan"}[stage]
+        wid = f"{pid}-vernal-{lane}-sop"
+        effort = self.settings.effort_for(role, step=stage)
+        wid = await self._effort_workflow(asset_client, pid, wid, role, effort)
+        key = f"speckit_{stage}_{feature}_{receipt['expected_baseline_sha'][:20]}"
+        path = self.ws.state_dir / "schemas" / (key + ".schema.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(schema, ensure_ascii=False), "utf-8")
+        async with self._assets_lock:
+            description, restore = self._build_issue_description(key, prompt, path, role)
+            wid = await self._prepare_workflow(asset_client, pid, wid, role, key, effort, restore)
+            await public_pool.check_workflow_sandbox(self.settings, asset_client, wid, pool)
+            self.db._exec("UPDATE dispatch_records SET pool=? WHERE dispatch_id=?", (pool, receipt["dispatch_id"]))
+            receipt["pool"] = pool
+            issue = await client.create_issue(project_id=pid, title=f"{feature} · {lane}", workflow_id=wid, description=description)
+            dispatch.record(self.db, receipt, "DISPATCHING", issue_id=issue["id"])
+            accepted = await client.dispatch_issue(issue["id"])
+        return dispatch.bind_accepted_task(self.db, receipt, accepted)
 
     async def run_structured_readonly(
         self, prompt: str, *, schema_path: Path, cwd: Path, log_dir: Path, role: str
@@ -484,9 +566,11 @@ class LoopForgeHarness(Harness):
         t_ready_start = time.monotonic()
         try:
             pid, wf_id = await self._ensure_ready(client, role)
+            if step == "lite_bundle":
+                wf_id = f"{pid}-vernal-lite-plan-sop"
             actual_effort = self.settings.effort_for(role, step=step, risk=risk)
             wf_id = await self._effort_workflow(client, pid, wf_id, role, actual_effort)
-            await public_pool.check_workflow_sandbox(self.settings, client, wf_id, selected)
+            asset_client = client
             client = dispatch_client
         except LoopForgeError as exc:
             return AgentResult(
@@ -501,12 +585,17 @@ class LoopForgeHarness(Harness):
         t_ready_sec = round(time.monotonic() - t_ready_start, 4)
 
         t_dispatch_start = time.monotonic()
-        description = self._build_issue_description(stage_key, prompt, schema_path, role)
         schema_text = schema_path.read_text("utf-8")
         try:
-            signature = hashlib.sha256(json.dumps([prompt, schema_text, selected, wf_id, actual_effort, self.settings.model_for(role), self.settings.harness_for(role)]).encode()).hexdigest()
-            issue_id, run_id = await self._dispatch_plan(client, pid, stage_key, title, description, wf_id,
-                                                         prior_candidate, signature)
+            from contextlib import AsyncExitStack
+            async with AsyncExitStack() as snapshot:
+                await snapshot.enter_async_context(self._assets_lock)
+                description, restore_cmd = self._build_issue_description(stage_key, prompt, schema_path, role)
+                wf_id = await self._prepare_workflow(asset_client, pid, wf_id, role, stage_key, actual_effort, restore_cmd)
+                await public_pool.check_workflow_sandbox(self.settings, asset_client, wf_id, selected)
+                signature = hashlib.sha256(json.dumps([prompt, schema_text, selected, wf_id, actual_effort, self.settings.model_for(role), self.settings.harness_for(role)]).encode()).hexdigest()
+                issue_id, run_id = await self._dispatch_plan(client, pid, stage_key, title, description, wf_id,
+                                                           prior_candidate, signature, snapshot=snapshot)
         except LoopForgeError as exc:
             return AgentResult(
                 False,
@@ -521,6 +610,13 @@ class LoopForgeHarness(Harness):
 
         actual_executor = self.settings.harness_for(role)
         actual_model = self.settings.model_for(role) or "default"
+        feature = planning_context.get("feature_id")
+        if feature:
+            from autodev.speckit.execution import record
+            from autodev.db import now_iso
+            record(self.db, feature, {"run_id": run_id, "project_id": pid, "role": role, "pool": selected,
+                                     "executor": actual_executor, "model": actual_model, "effort": actual_effort,
+                                     "step": step, "round": 0, "started_at": now_iso()})
         (log_dir / "loopforge_run.json").write_text(
             json.dumps(
                 {

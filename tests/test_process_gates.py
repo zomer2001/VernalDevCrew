@@ -257,8 +257,8 @@ def test_r3_distinguishes_content_currency_from_preconditions_and_blocks_bypass(
         missions._store(eng, mission)
 
         # 1. Checklist running on the SAME spec -> status stays PENDING, content_current=True, can_approve=False, CHECKLIST_RUNNING
-        token = missions.reserve(eng, "001-alpha", mission["revision"])
-        missions._update_lease_step(eng, token, "checklist")
+        from autodev.loopforge import dispatch
+        receipt, _ = dispatch.reserve(eng.db, "plan:001-alpha:std_spec", 1, 1, "local_runner", "owner")
         gate_before_rounds = len(list_gate_records(eng.db, gate_id="srs_approval"))
         client = TestClient(create_app(eng, proxy_transport=_offline_transport()))
         gates_running = client.get("/vernal-api/gates").json()
@@ -278,7 +278,7 @@ def test_r3_distinguishes_content_currency_from_preconditions_and_blocks_bypass(
         assert r_running.status_code == 409
 
         # 2. Release lease; checklist exists with MISSING findings metadata -> cannot be treated as no issues
-        missions.release(eng, token)
+        dispatch.record(eng.db, receipt, "FINISHED")
         check = save(eng, "checklist", "# 质量检查\n- [ ] CHK001 验收可测\n", "001-alpha")
         assert len(list_gate_records(eng.db, gate_id="srs_approval")) == gate_before_rounds
         srs_missing_meta = [g for g in client.get("/vernal-api/gates").json() if g["gate_id"] == "srs_approval"][-1]

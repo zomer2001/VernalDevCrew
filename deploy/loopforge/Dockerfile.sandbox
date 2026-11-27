@@ -39,6 +39,8 @@ import urllib.request
 
 def main():
     name = Path(sys.argv[0]).name
+    if name not in ("dsh", "opencode"):
+        raise SystemExit("未知的沙箱执行器")
     if name == "opencode":
         content = json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT") or "{}")
         provider = content.get("provider", {}).get("agentflow", {}).get("options", {})
@@ -74,6 +76,7 @@ def main():
                 json.dump(content, handle)
             # A retry must exchange the current Run again. Leave the native patch untouched.
             sys.argv = [handle.name if arg == str(patch) else arg for arg in sys.argv]
+    # Preserve the native executor exit status for the downstream script gate.
     os.execv("/opt/vernal-cli/" + name, [name, *sys.argv[1:]])
 
 
@@ -88,6 +91,7 @@ RUN set -eu; \
       if [ "$target" = "/usr/local/bin/$cli" ]; then mv "$target" "/opt/vernal-cli/$cli"; \
       else ln -s "$target" "/opt/vernal-cli/$cli"; rm -f "/usr/local/bin/$cli"; fi; \
       install -m 755 /opt/vernal-pool-cli.py "/usr/local/bin/$cli"; \
+      "/usr/local/bin/$cli" --version >/dev/null; \
     done; \
     mkdir -p /opt/vernal-quality/autodev; \
     if [ -d /tmp/vernal-ctx/autodev/quality ]; then \
